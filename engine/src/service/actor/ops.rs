@@ -8,13 +8,14 @@
 //! server's refusals, and those the sync paths made, reach the app as `Event::OpsRefused`.
 
 use super::{Interrupt, Poller, backoff_delay, discard, race};
-use crate::api::{Event, Refused, SyncStatus};
+use crate::api::{Event, FolderError, Refused, SyncStatus};
 use crate::imap::write::{
     self, Copy, Done, Mark, Move, Moving, OpFolder, WriteError, WriteFailure,
 };
 use sealwax_domain::model::FolderId;
+use sealwax_domain::sync::{Facts, place_after_move};
 use sealwax_infrastructure::store::{
-    Failure, OpAction, OpGroup, OpId, OpsDone, OpsRefusal, RefusedChange,
+    Failure, OpAction, OpGroup, OpId, OpsDone, OpsRefusal, RefusedChange, SyncState,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,9 +32,22 @@ pub(super) fn unix_ms() -> i64 {
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 
-/// The instant a store time falls at, `now` being the store time of `Instant::now()`.
+/// The longest a timer sleeps toward a store time (a send scheduled for later, an op's or a
+/// copy's retry). Store times are the wall clock's, and a sleeping timer doesn't count a
+/// suspend: a laptop that slept past the time would send hours late. The actor wakes within
+/// this, asks the store what is due by the wall clock, and sleeps again (as Remind Me's
+/// timer does, `reminders::RECHECK`).
+pub(super) const RECHECK: Duration = Duration::from_secs(60);
+
+/// How long to sleep at store time `now` before looking at what is due at `at`.
+pub(super) fn wait_for(at: i64, now: i64) -> Duration {
+    Duration::from_millis(u64::try_from(at.saturating_sub(now)).unwrap_or(0)).min(RECHECK)
+}
+
+/// The instant to look again for what a store time makes due, `now` being the store time of
+/// `Instant::now()`: the time itself when it is near, else [`RECHECK`] from now.
 pub(super) fn instant_at(at: i64, now: i64) -> Instant {
-    Instant::now() + Duration::from_millis(u64::try_from(at.saturating_sub(now)).unwrap_or(0))
+    Instant::now() + wait_for(at, now)
 }
 
 /// The app's name for a refused change.
@@ -68,7 +82,8 @@ enum Ran {
     Resync(FolderId),
     /// Done, but the store couldn't place the messages in this folder (a move without COPYUID,
     /// into a folder never synced, or a copy): its pass fetches them now, so they show there,
-    /// counted, at once rather than at the account pass.
+    /// counted, at once rather than at the account pass. Never Gmail's All Mail while it was
+    /// never synced ([`Poller::places`]).
     Place(FolderId),
 }
 
@@ -87,6 +102,10 @@ impl Poller {
         self.ops_now = false;
         for _ in 0..ROUNDS {
             let now = unix_ms();
+            self.prepare_folders(now, seen).await?;
+            if self.conn.is_none() {
+                return Ok(());
+            }
             let due = match self.shared.store.due_ops(self.account, now).recv().await {
                 Ok(due) => due,
                 Err(error) => {
@@ -122,6 +141,78 @@ impl Poller {
             }
         }
         self.next_ops = Some(Instant::now() + self.config().backoff_min);
+        Ok(())
+    }
+
+    /// Prepares the Reminders folders that moves due at `now` go into (the fork's Remind Me,
+    /// docs/superhuman/remind.md), before those moves run: one the store made is created on
+    /// the server (CREATE, then SUBSCRIBE: `imap::manage::create_reminders`), and one the store
+    /// never synced gets its first pass, so the moves land in rows of their own (COPYUID) and
+    /// the conversation never leaves the store on its way. A refused folder goes from the
+    /// store, which refuses the moves into it; the next read of the due ops reports them.
+    async fn prepare_folders(&mut self, now: i64, seen: u64) -> Result<(), Interrupt> {
+        let wanted = match self
+            .shared
+            .store
+            .folders_to_prepare(self.account, now)
+            .recv()
+            .await
+        {
+            Ok(wanted) => wanted,
+            Err(error) => {
+                tracing::warn!(account = self.account.0, %error, "Reminders folders couldn't be read");
+                return Ok(());
+            }
+        };
+        for folder in wanted {
+            if folder.create {
+                let Some(conn) = self.conn.as_mut() else {
+                    return Ok(());
+                };
+                let made = race(
+                    &self.signals,
+                    seen,
+                    crate::imap::manage::create_reminders(conn, &folder.name_raw),
+                )
+                .await?;
+                self.used = Instant::now();
+                let store = &self.shared.store;
+                let recorded = match made {
+                    Ok(()) => {
+                        tracing::info!(
+                            account = self.account.0,
+                            "the Reminders folder was created"
+                        );
+                        store.folder_created(folder.folder).recv().await.map(drop)
+                    }
+                    Err(FolderError::Lost) => {
+                        self.lost();
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        tracing::info!(
+                            account = self.account.0,
+                            %error,
+                            "the server refused to create the Reminders folder"
+                        );
+                        let refused = store.folder_refused(folder.folder).recv().await;
+                        if let Err(error) = refused {
+                            tracing::warn!(account = self.account.0, %error, "a refused Reminders folder couldn't be recorded");
+                        }
+                        continue;
+                    }
+                };
+                if let Err(error) = recorded {
+                    tracing::warn!(account = self.account.0, %error, "a created Reminders folder couldn't be recorded");
+                }
+            }
+            if folder.sync {
+                self.folder_pass(folder.folder, seen).await?;
+                if self.conn.is_none() {
+                    return Ok(());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -207,13 +298,11 @@ impl Poller {
                     );
                 }
                 let unplaced = self.record_done(&group, done).await;
-                match target {
-                    Some(to)
-                        if matches!(group.action, OpAction::Copy { .. })
-                            || unplaced.contains(&to) =>
-                    {
-                        Ran::Place(to)
-                    }
+                let place = target.filter(|to| {
+                    matches!(group.action, OpAction::Copy { .. }) || unplaced.contains(to)
+                });
+                match place {
+                    Some(to) if self.places(to).await => Ran::Place(to),
                     _ => Ran::Recorded,
                 }
             }
@@ -357,6 +446,30 @@ impl Poller {
         };
         self.used = Instant::now();
         Ok(Outcome::Written(written))
+    }
+
+    /// Whether `to` gets its pass now to place what a move or copy put there
+    /// ([`place_after_move`]): not Gmail's All Mail while its first sync isn't done, which an
+    /// Archive would otherwise do (or go on with) on this connection.
+    async fn places(&self, to: FolderId) -> bool {
+        let Ok(Some(state)) = self.shared.store.folder_sync(to).recv().await else {
+            return true;
+        };
+        let placed = place_after_move(Facts {
+            role: state.role,
+            attributes: &[],
+            selectable: state.selectable,
+            synced_before: state.uidvalidity.is_some(),
+            first_synced: state.state == SyncState::Ready,
+        });
+        if !placed {
+            tracing::debug!(
+                account = self.account.0,
+                %to,
+                "a move's target is never synced by a move: no pass"
+            );
+        }
+        placed
     }
 
     /// Records `done`; replies with the folders the store couldn't place moved messages in.

@@ -8,9 +8,13 @@
 //! helper (`helper.js`) cleans pastes and drops with S7's allowlist, turns pasted or dropped
 //! images into parts of the draft, and serialises the body with `cid:` references.
 //!
-//! Composer views share one web context and web process of their own, apart from the reader's.
-//! Inline images are served to the view that holds them through its `cid:` scheme, read from
-//! the blob store off the GTK thread; nothing is ever fetched from the network.
+//! Composer views share one web context and one web process of their own, apart from the
+//! reader's: every view after the first is built related to it (`related-view`, as the reader's
+//! are; until the fork's phase B each card started a web process). A spare editor, its page
+//! loaded, waits for the next card ([`EditorEngine::prewarm`]), so a card's body is ready about
+//! as soon as its draft is. Inline images are served to the view that holds them through its
+//! `cid:` scheme, read from the blob store off the GTK thread; nothing is ever fetched from the
+//! network.
 
 use super::js;
 use crate::reader::NETWORK_FEATURES;
@@ -187,6 +191,11 @@ pub struct EditorEngine {
     pages: Rc<RefCell<Pages>>,
     blobs: Rc<RefCell<Option<BlobStore>>>,
     spell: RefCell<Vec<String>>,
+    /// The first view: every later one is built related to it, so they share its web process;
+    /// it is kept while the process runs, its card gone or not.
+    root: RefCell<Option<webkit6::WebView>>,
+    /// An editor with its page loading or loaded, for the next card.
+    spare: RefCell<Option<Editor>>,
 }
 
 thread_local! {
@@ -235,6 +244,8 @@ impl EditorEngine {
             pages,
             blobs,
             spell: RefCell::new(spell),
+            root: RefCell::new(None),
+            spare: RefCell::new(None),
         });
         let directory = cache.join("content-filters");
         let weak = Rc::downgrade(&engine);
@@ -285,6 +296,49 @@ impl EditorEngine {
     pub fn cid_counts(&self) -> (u64, u64) {
         let pages = self.pages.borrow();
         (pages.served, pages.refused)
+    }
+
+    /// Makes a spare editor in `theme` and loads its page, unless one waits already: the next
+    /// card takes it ([`EditorEngine::take_spare`]) instead of starting a view of its own.
+    pub async fn prewarm(self: &Rc<Self>, theme: &Theme) {
+        if self.spare.borrow().is_some() {
+            return;
+        }
+        let Some(filter) = self.filter().await else {
+            return;
+        };
+        if self.spare.borrow().is_some() {
+            return;
+        }
+        let editor = Editor::new(self, theme);
+        editor.load(&filter);
+        self.spare.replace(Some(editor));
+        tracing::debug!("composer: a spare editor is loading");
+    }
+
+    /// The spare editor, its page loaded or loading, styled for `theme`; `None` when there is
+    /// none (a card makes its own).
+    pub fn take_spare(&self, theme: &Theme) -> Option<Editor> {
+        let spare = self.spare.take()?;
+        spare.set_theme(theme);
+        Some(spare)
+    }
+
+    /// Whether a spare editor waits, and whether its page is ready.
+    pub fn spare(&self) -> Option<bool> {
+        self.spare.borrow().as_ref().map(Editor::is_ready)
+    }
+
+    /// The window closed into background mode (the fork's phase B): the spare editor goes and,
+    /// with no card left (`cards` false), the root view too, so the composer's web process
+    /// ends (about 37 MiB) until a card or a new window's spare starts one again.
+    pub fn rest(&self, cards: bool) {
+        if let Some(spare) = self.spare.take() {
+            spare.release();
+        }
+        if !cards && self.root.take().is_some() {
+            tracing::debug!("composer: the web process may end");
+        }
     }
 }
 
@@ -437,9 +491,12 @@ fn apply_fonts(settings: &webkit6::Settings, theme: &Theme) {
     settings.set_default_monospace_font_size(fonts.monospace_size);
 }
 
-/// The body in the live theme: its background, text and caret, accent links, the reading font
-/// at the mock's line height, quotes with a left border in the secondary colour and the line
-/// before a quote (its attribution) small and muted.
+/// The body in the live theme: the card's raised surface (the fork's phase B), text and caret,
+/// accent links (lightened or deepened as far as they need to read on that surface), the reading
+/// font at the mock's line height, quotes with a left border in the secondary colour and their
+/// attribution lines small and muted (the lines `helper.js` marks; since phase C not any line
+/// before a quote, which took the user's own). A reply's quoted history folded (`helper.js`,
+/// phase C) shows as the reader's "•••" pill in its attribution's place.
 pub fn editor_css(theme: &Theme) -> String {
     let p = &theme.palette;
     let fonts = theme.webview_fonts();
@@ -457,23 +514,29 @@ pub fn editor_css(theme: &Theme) -> String {
          html{{background-color:{background};color:{fg};font:{size}px/{line} {family}}}\n\
          body{{margin:0;padding:{pad_y}px {pad_x}px {pad_bottom}px;min-height:100vh;\
          box-sizing:border-box;overflow-wrap:anywhere;caret-color:{accent};outline:none}}\n\
-         a{{color:{accent}}}\n\
+         a{{color:{link}}}\n\
          blockquote:not([style]),blockquote[type=cite]{{margin:0 0 0 2px;padding-left:{quote_pad}px;\
          border-left:3px solid {border};color:{secondary}}}\n\
-         :has(+ blockquote:not([style])),:has(+ blockquote[type=cite]){{font-size:{small}px;\
-         color:{secondary}}}\n\
+         [data-sw-attribution]{{font-size:{small}px;color:{secondary}}}\n\
+         html.sw-quote-folded [data-sw-fold=quote]{{display:none}}\n\
+         html.sw-quote-folded [data-sw-fold=pill]{{font-size:0;line-height:0;width:fit-content;\
+         margin:{fold_gap}px 0 2px;color:transparent;cursor:pointer}}\n\
+         html.sw-quote-folded [data-sw-fold=pill]::before{{content:\"\\2022\\2022\\2022\";\
+         display:inline-block;padding:0 9px;border-radius:9px;background:{pill};color:{secondary};\
+         font:bold 9px/16px sans-serif;letter-spacing:2px}}\n\
          pre,code,kbd,samp,tt{{font-family:{mono};font-size:{mono_size}px}}\n\
          pre{{white-space:pre-wrap}}\n\
          hr{{border:0;border-top:1px solid {border}}}\n\
          img{{max-width:100%;height:auto}}\n\
          ul,ol{{margin:0.3em 0;padding-left:1.8em}}\n\
          ::selection{{background-color:{selection}}}\n",
-        background = p.background,
+        background = theme.ui.composer,
         fg = p.foreground,
         size = fonts.default_size,
         line = LINE_HEIGHT,
         family = css_family(&theme.fonts.reading, fonts.default_family),
         accent = p.accent,
+        link = sealwax_domain::theme::link_on(p, theme.ui.composer),
         border = theme.ui.border,
         secondary = theme.mail.secondary_text,
         small = theme.scale.small,
@@ -483,6 +546,8 @@ pub fn editor_css(theme: &Theme) -> String {
         pad_x = space(18),
         pad_bottom = space(18) * 2,
         quote_pad = space(12),
+        fold_gap = space(10),
+        pill = p.foreground.with_alpha(0.1),
     )
 }
 
@@ -490,6 +555,8 @@ type Handler = Rc<dyn Fn(EditorEvent)>;
 
 struct State {
     handler: RefCell<Option<Handler>>,
+    /// The editor page was asked for ([`Editor::load`]).
+    loading: Cell<bool>,
     ready: Cell<bool>,
     block: RefCell<BlockState>,
     typing: Cell<u32>,
@@ -498,6 +565,8 @@ struct State {
     refused: Cell<u32>,
     /// Loads that started for anything but the draft's own parts and the editor page.
     remote: Cell<u32>,
+    /// The keys the page has seen, as its last message said (`keys`, the fork's phase B).
+    keys_seen: Cell<u64>,
 }
 
 impl State {
@@ -531,16 +600,24 @@ impl Editor {
             &[],
             &[],
         ));
-        let view = webkit6::WebView::builder()
-            .web_context(&engine.context)
-            .network_session(&engine.session)
+        let builder = webkit6::WebView::builder()
             .user_content_manager(&ucm)
             .settings(&hardened_settings(theme))
             .default_content_security_policy(CONTENT_SECURITY_POLICY)
             .editable(true)
             .hexpand(true)
-            .vexpand(true)
-            .build();
+            .vexpand(true);
+        let root = engine.root.borrow().clone();
+        let view = match &root {
+            Some(root) => builder.related_view(root),
+            None => builder
+                .web_context(&engine.context)
+                .network_session(&engine.session),
+        }
+        .build();
+        if root.is_none() {
+            engine.root.replace(Some(view.clone()));
+        }
         view.add_css_class("sw-composer-body");
         view.set_widget_name("composer-body");
         view.update_property(&[gtk::accessible::Property::Label("Message body")]);
@@ -559,12 +636,14 @@ impl Editor {
             parts,
             state: Rc::new(State {
                 handler: RefCell::new(None),
+                loading: Cell::new(false),
                 ready: Cell::new(false),
                 block: RefCell::new(BlockState::default()),
                 typing: Cell::new(0),
                 history: Cell::new((false, false)),
                 refused: Cell::new(0),
                 remote: Cell::new(0),
+                keys_seen: Cell::new(0),
             }),
         };
         editor.set_theme(theme);
@@ -584,7 +663,13 @@ impl Editor {
     pub fn load(&self, filter: &webkit6::UserContentFilter) {
         self.ucm.remove_all_filters();
         self.ucm.add_filter(filter);
+        self.state.loading.set(true);
         self.view.load_html(EDITOR_HTML, None);
+    }
+
+    /// The editor page was asked for: it is ready, or reports `Ready` when it is.
+    pub fn is_loading(&self) -> bool {
+        self.state.loading.get()
     }
 
     pub fn is_ready(&self) -> bool {
@@ -601,7 +686,7 @@ impl Editor {
             &[],
             &[],
         ));
-        let background = theme.palette.background;
+        let background = theme.ui.composer;
         self.view.set_background_color(&gdk::RGBA::new(
             f32::from(background.r) / 255.0,
             f32::from(background.g) / 255.0,
@@ -648,6 +733,12 @@ impl Editor {
             .execute_editing_command_with_argument(command, argument);
     }
 
+    /// The keys the page has seen, as its last message said: Send compares it with the keys
+    /// the view was given, and asks the page only when it is behind.
+    pub fn keys_seen(&self) -> u64 {
+        self.state.keys_seen.get()
+    }
+
     /// Runs `script` in the helper's world.
     pub async fn eval(&self, script: &str) -> Result<Value, String> {
         self.view
@@ -661,10 +752,12 @@ impl Editor {
             .evaluate_javascript(script, Some(WORLD), None, None::<&gio::Cancellable>, |_| {});
     }
 
-    pub async fn set_content(&self, html: &str) {
+    /// Puts `html` in the body. `foldable`: the draft answers a message, so its quoted history
+    /// folds behind the "•••" pill when it is the body's trailing quote (`helper.js`).
+    pub async fn set_content(&self, html: &str, foldable: bool) {
         let _ = self
             .eval(&format!(
-                "sealwaxComposer.setContent({})",
+                "sealwaxComposer.setContent({}, {foldable})",
                 js::literal(html)
             ))
             .await;
@@ -730,6 +823,8 @@ impl Editor {
                 #[strong]
                 state,
                 move |_, value| {
+                    let keys = js::number(value, "keys").max(0.0) as u64;
+                    state.keys_seen.set(state.keys_seen.get().max(keys));
                     if let Some(event) = parse_event(value, &state) {
                         state.emit(event);
                     }
@@ -873,7 +968,8 @@ impl Editor {
         ));
     }
 
-    /// Forgets the view's parts; call when its window goes.
+    /// Forgets the view's parts; call when its window goes. The engine's root view stays for
+    /// the views after it, its page blanked: the draft doesn't linger in it.
     pub fn release(&self) {
         self.state.handler.replace(None);
         self.engine
@@ -882,6 +978,11 @@ impl Editor {
             .parts
             .remove(&self.view.page_id());
         self.view.stop_loading();
+        if self.engine.root.borrow().as_ref() == Some(&self.view) {
+            self.state.ready.set(false);
+            self.state.loading.set(false);
+            self.view.load_uri("about:blank");
+        }
     }
 }
 
@@ -966,10 +1067,14 @@ mod tests {
             let css = editor_css(&theme);
             let p = &theme.palette;
             for expected in [
-                format!("background-color:{}", p.background),
+                format!("background-color:{}", theme.ui.composer),
                 format!("color:{}", p.foreground),
                 format!("caret-color:{}", p.accent),
-                format!("a{{color:{}}}", p.accent),
+                // Links read on the raised card (Adwaita dark's accent is lightened there).
+                format!(
+                    "a{{color:{}}}",
+                    sealwax_domain::theme::link_on(p, theme.ui.composer)
+                ),
                 format!("color:{}}}", theme.mail.secondary_text),
                 "/1.6 ".to_owned(),
             ] {
@@ -980,6 +1085,34 @@ mod tests {
                 Mode::Light => "color-scheme:light",
             }));
         }
+    }
+
+    #[test]
+    fn attributions_and_the_fold_are_the_marked_lines() {
+        let theme = Theme::new(&ThemeInputs::builtin(Mode::Dark), &ThemeOptions::default());
+        let css = editor_css(&theme);
+        // No rule styles a line for what follows it: a user's answer before a quote keeps the
+        // body's size, and only the fold's attribution is a pill (phase C). The helper marks them.
+        assert!(!css.contains(":has(+"), "{css}");
+        for (rule, mark) in [
+            (
+                "[data-sw-attribution]{font-size:",
+                "const ATTRIBUTION = 'data-sw-attribution';",
+            ),
+            (
+                "html.sw-quote-folded [data-sw-fold=quote]{display:none}",
+                "quote.setAttribute(FOLD, 'quote');",
+            ),
+            (
+                "html.sw-quote-folded [data-sw-fold=pill]::before{content:\"\\2022\\2022\\2022\";",
+                "attribution.setAttribute(FOLD, 'pill');",
+            ),
+        ] {
+            assert!(css.contains(rule), "{rule}\n{css}");
+            assert!(HELPER.contains(mark), "{mark}");
+        }
+        assert!(HELPER.contains("const FOLD = 'data-sw-fold';"));
+        assert!(HELPER.contains("const FOLDED = 'sw-quote-folded';"));
     }
 
     #[test]

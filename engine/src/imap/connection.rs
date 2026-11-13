@@ -1,7 +1,8 @@
 //! Connecting and logging in (ML-035): implicit TLS, or STARTTLS that must succeed; AUTHENTICATE
 //! PLAIN, LOGIN only when PLAIN is missing and LOGINDISABLED isn't set, XOAUTH2 with a token from
-//! the caller; ID with generic values; ENABLE QRESYNC where offered. Nothing is ever sent in
-//! plaintext but the STARTTLS command itself.
+//! the caller, each with SASL-IR's initial response where offered; ID with generic values;
+//! ENABLE QRESYNC where offered. Nothing is ever sent in plaintext but the STARTTLS command
+//! itself.
 
 use super::error::{ImapError, rejection};
 use super::hidden;
@@ -81,6 +82,22 @@ pub struct Connection {
     microsoft: bool,
     /// The wire name of the mailbox selected or examined, if any.
     pub(crate) selected: Option<String>,
+    /// A command read a notice of the open mailbox (new mail, a removal, a flag change) and had
+    /// no use for it (a body fetch): the server won't say it again, so the IDLE connection
+    /// passes again rather than idle on it (ADR-006, S1). Cleared when a mailbox is opened,
+    /// whose pass then reads it afresh.
+    pub(crate) noticed: bool,
+    /// What this connection learned of Gmail's categories (the fork's Split Inbox).
+    pub(crate) categories: Categories,
+}
+
+/// What a connection learned of Gmail's categories (the fork's Split Inbox,
+/// docs/superhuman/split.md): the INBOX's stored messages without one were asked about once,
+/// or the server refused the search, after which the header rules sort its new mail.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Categories {
+    pub(crate) caught_up: bool,
+    pub(crate) refused: bool,
 }
 
 impl fmt::Debug for Connection {
@@ -137,6 +154,8 @@ impl Connection {
             mechanism,
             microsoft,
             selected,
+            noticed,
+            categories,
         } = self;
         (
             session,
@@ -146,6 +165,8 @@ impl Connection {
                 mechanism,
                 microsoft,
                 selected,
+                noticed,
+                categories,
             },
         )
     }
@@ -157,6 +178,8 @@ impl Connection {
             mechanism,
             microsoft,
             selected,
+            noticed,
+            categories,
         } = parts;
         Connection {
             session,
@@ -165,6 +188,8 @@ impl Connection {
             mechanism,
             microsoft,
             selected,
+            noticed,
+            categories,
         }
     }
 }
@@ -176,6 +201,8 @@ pub(crate) struct Parts {
     mechanism: Mechanism,
     microsoft: bool,
     selected: Option<String>,
+    noticed: bool,
+    categories: Categories,
 }
 
 /// The SASL PLAIN response: no authorization identity.
@@ -361,7 +388,7 @@ async fn connect_inner(
     }
     if caps.has("ID") {
         let id = format!(
-            "ID (\"name\" \"Sealwax\" \"version\" \"{}\")",
+            "ID (\"name\" \"Pronto\" \"version\" \"{}\")",
             env!("CARGO_PKG_VERSION")
         );
         match raw::run(&mut session, &id, |_| {}).await {
@@ -387,7 +414,32 @@ async fn connect_inner(
         mechanism,
         microsoft: hidden::microsoft_host(&endpoint.host),
         selected: None,
+        noticed: false,
+        categories: Categories::default(),
     })
+}
+
+/// AUTHENTICATE `mechanism` with `response`: as SASL-IR's initial response where the server
+/// offers it (RFC 4959; Gmail does), which saves the round trip of the empty first challenge at
+/// every login (the fork's Superhuman pass), else as the answer to the first challenge. A
+/// challenge after it (XOAUTH2's error) gets an empty line, after which the server says NO.
+async fn authenticate(
+    client: Client,
+    caps: &Caps,
+    mechanism: &str,
+    response: Zeroizing<Vec<u8>>,
+) -> Result<Session, async_imap::error::Error> {
+    let authenticated = if caps.has("SASL-IR") {
+        use base64::Engine as _;
+        let encoded = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(&*response));
+        let command = Zeroizing::new(format!("{mechanism} {}", encoded.as_str()));
+        client.authenticate(command.as_str(), OneShot(None)).await
+    } else {
+        client
+            .authenticate(mechanism, OneShot(Some(response)))
+            .await
+    };
+    authenticated.map_err(|(error, _client)| error)
 }
 
 async fn login(
@@ -401,26 +453,25 @@ async fn login(
             if !caps.has("AUTH=XOAUTH2") {
                 return Err(ImapError::NoMechanism { oauth });
             }
-            let response = OneShot(Some(xoauth2_response(username, token)));
-            client
-                .authenticate("XOAUTH2", response)
+            let response = xoauth2_response(username, token);
+            authenticate(client, caps, "XOAUTH2", response)
                 .await
                 .map(|session| (session, Mechanism::XOAuth2))
         }
         Credentials::Password { username, password } if caps.has("AUTH=PLAIN") => {
-            let response = OneShot(Some(plain_response(username, password)));
-            client
-                .authenticate("PLAIN", response)
+            let response = plain_response(username, password);
+            authenticate(client, caps, "PLAIN", response)
                 .await
                 .map(|session| (session, Mechanism::Plain))
         }
         Credentials::Password { username, password } if !caps.has("LOGINDISABLED") => client
             .login(username, password)
             .await
-            .map(|session| (session, Mechanism::Login)),
+            .map(|session| (session, Mechanism::Login))
+            .map_err(|(error, _client)| error),
         Credentials::Password { .. } => return Err(ImapError::NoMechanism { oauth }),
     };
-    result.map_err(|(error, _client)| match error {
+    result.map_err(|error| match error {
         async_imap::error::Error::No(text) => ImapError::Rejected(rejection(&text, false)),
         async_imap::error::Error::Bad(text) => ImapError::Rejected(rejection(&text, true)),
         other => other.into(),

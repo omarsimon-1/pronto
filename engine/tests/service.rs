@@ -1,7 +1,7 @@
 //! The engine service end to end, offline: commands in, events out. A preset address is detected
 //! without the network; an account whose server refuses connections is added, reports its sync
 //! failure, and is removed with its entry and its secret; a send whose message was being built
-//! when Sealwax stopped comes back as failed at the next start.
+//! when Pronto stopped comes back as failed at the next start.
 
 use sealwax_domain::account::{
     AccountKey, AccountSettings, AuthMethod, DetectSource, Detection, Endpoint, LoginFailure,
@@ -33,7 +33,7 @@ fn start(dirs: &SealwaxDirs) -> Engine {
     };
     let store = Store::open(&dirs.store_file(), options).unwrap();
     Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: Arc::new(store),
         blobs,
         paths: AccountPaths::new(dirs),
@@ -41,6 +41,7 @@ fn start(dirs: &SealwaxDirs) -> Engine {
         secrets: SecretBackend::Memory,
         detect: DetectOptions::default(),
         microsoft_client_id: None,
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig::default(),
     })
@@ -111,9 +112,9 @@ fn a_preset_address_is_detected_without_the_network() {
     engine.stop();
 }
 
-/// Sealwax died while a send's message was being built (M9, docs/m9/depth.md): the engine's
+/// Pronto died while a send's message was being built (M9, docs/m9/depth.md): the engine's
 /// next start gives the send back to its draft as failed, before any actor runs, so a message
-/// whose build stops Sealwax isn't built again at every start.
+/// whose build stops Pronto isn't built again at every start.
 #[test]
 fn a_send_left_being_built_fails_at_the_engines_start() {
     let root = tempfile::tempdir().unwrap();

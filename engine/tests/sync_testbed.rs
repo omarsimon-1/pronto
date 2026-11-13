@@ -5,7 +5,7 @@
 //! running and seeded and are skipped otherwise. They reset and change the users rand and fault
 //! and only read perf:
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test sync_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -535,7 +535,8 @@ async fn inbox_count(store: &Store, account: AccountId) -> u32 {
         .messages
 }
 
-/// Cut in the second batch of a first sync: the retry resumes from the committed floor.
+/// Cut in the third batch of a first sync, the first of 200 after the ramp's 25 and 100 (the
+/// fork's Superhuman pass): the retry resumes from the committed floor.
 async fn mid_fetch_first_sync(server: Server) {
     prepare(server, 1200, 11).await;
     let proxy = Proxy::start(server.tls, &common::ca()).await;
@@ -560,7 +561,7 @@ async fn mid_fetch_first_sync(server: Server) {
     assert!(cut_by_the_proxy(&first) && proxy.fired() == 1);
     assert_eq!(
         (committed, retry.stats.stored),
-        (200, 1000),
+        (125, 1075),
         "{}",
         server.name
     );

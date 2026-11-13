@@ -4,7 +4,7 @@
 # the sender listed, both taken back); a list change alone with Undo from z; Create Rule from
 # Message from a sender, the rule then run on the Inbox's mail and taken back with z, and from a
 # list. Every name and address is fictional.
-# Run: tools/headless.sh 85 target/debug/sealwax --self-test tests/selftest/rules-menu.sealwax-test
+# Run: tools/headless.sh 85 target/debug/pronto --self-test tests/selftest/rules-menu.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -76,12 +76,12 @@ row-menu-click message-menu-junk-sender
 wait-until assert-toast "Moved 1 message to Junk. Mail from karinordmann@example.test goes to Junk from now on"
 engine-expect ops-queued
 assert-list-count 3
-wait-until assert-file-contains $TMP/config/sealwax/rules/work.sieve "if address :is \"from\" \"karinordmann@example.test\""
-assert-file-contains $TMP/config/sealwax/rules/work.sieve "# Sealwax: always junk"
+wait-until assert-file-contains $TMP/config/pronto/rules/work.sieve "if address :is \"from\" \"karinordmann@example.test\""
+assert-file-contains $TMP/config/pronto/rules/work.sieve "# Pronto: always junk"
 assert-undoable true
 toast-undo
 wait-until assert-list-count 4
-wait-until assert-file-lacks $TMP/config/sealwax/rules/work.sieve "karinordmann@example.test"
+wait-until assert-file-lacks $TMP/config/pronto/rules/work.sieve "karinordmann@example.test"
 setup-dismiss-toasts
 
 # Never Junk from Junk: the message back in the Inbox as not junk, the sender trusted; Undo.
@@ -96,11 +96,11 @@ row-menu-click message-menu-trust-sender
 wait-until assert-toast "Moved 1 message to the Inbox as not junk. Mail from leahkim@example.test stays out of Junk from now on"
 engine-expect ops-queued
 assert-list-count 0
-wait-until assert-file-contains $TMP/config/sealwax/rules/work.sieve "if address :is \"from\" \"leahkim@example.test\""
-assert-file-contains $TMP/config/sealwax/rules/work.sieve "# Sealwax: never junk"
+wait-until assert-file-contains $TMP/config/pronto/rules/work.sieve "if address :is \"from\" \"leahkim@example.test\""
+assert-file-contains $TMP/config/pronto/rules/work.sieve "# Pronto: never junk"
 toast-undo
 wait-until assert-list-count 1
-wait-until assert-file-lacks $TMP/config/sealwax/rules/work.sieve "leahkim@example.test"
+wait-until assert-file-lacks $TMP/config/pronto/rules/work.sieve "leahkim@example.test"
 setup-dismiss-toasts
 
 # Never Junk on a message outside Junk lists the sender alone, with Undo; z takes it back.
@@ -112,11 +112,11 @@ row-menu 3
 row-menu-click message-menu-trust-sender
 wait-until assert-toast "Mail from mariusdahl@example.test stays out of Junk from now on"
 assert-list-count 4
-wait-until assert-file-contains $TMP/config/sealwax/rules/work.sieve "mariusdahl@example.test"
+wait-until assert-file-contains $TMP/config/pronto/rules/work.sieve "mariusdahl@example.test"
 assert-action-enabled win.undo true
 focus list
 key z
-wait-until assert-file-lacks $TMP/config/sealwax/rules/work.sieve "mariusdahl@example.test"
+wait-until assert-file-lacks $TMP/config/pronto/rules/work.sieve "mariusdahl@example.test"
 assert-toast Undone
 assert-action-enabled win.undo false
 setup-dismiss-toasts
@@ -128,7 +128,7 @@ wait-until assert-toast "Moved 1 message to Junk. Mail from mariusdahl@example.t
 engine-expect ops-queued
 toast-undo
 wait-until assert-list-count 4
-wait-until assert-file-lacks $TMP/config/sealwax/rules/work.sieve "mariusdahl@example.test"
+wait-until assert-file-lacks $TMP/config/pronto/rules/work.sieve "mariusdahl@example.test"
 setup-dismiss-toasts
 
 # Create Rule from Message: From is the sender, the folder the user's to choose.
@@ -148,7 +148,7 @@ click rule-save
 wait-until assert-rules-dialog rules
 rules-wait
 assert-rules-set "Kari Nordmann:on"
-wait-until assert-file-contains $TMP/config/sealwax/rules/work.sieve "if allof (address :is \"from\" \"karinordmann@example.test\")"
+wait-until assert-file-contains $TMP/config/pronto/rules/work.sieve "if allof (address :is \"from\" \"karinordmann@example.test\")"
 # The rule runs at once on the mail already in the Inbox: both of the sender's messages move to
 # Kunder and leave the Inbox; z in the list takes the run back once the dialog is closed.
 engine-expect apply-rules folder=1 "rule=Kari Nordmann"

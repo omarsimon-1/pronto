@@ -2,7 +2,7 @@
 //! the message row's menu, the rules file and the engine's rules events. The dialog's widgets
 //! are driven with the setup assistant's `setup-type`, `setup-choose` and `setup-click` and the
 //! real clicks of `click`; its toasts with `assert-toast`; the file with `write-file`,
-//! `assert-file-contains` and `assert-file-lacks` under `$TMP/config/sealwax/rules/`. Every
+//! `assert-file-contains` and `assert-file-lacks` under `$TMP/config/pronto/rules/`. Every
 //! name and address is fictional.
 //!
 //! | Command | What it does |

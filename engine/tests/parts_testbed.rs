@@ -6,7 +6,7 @@
 //! Nothing is marked `\Seen`, and the trace-level log holds no secret, name, address, folder
 //! name, subject or content. Needs the testbed running and seeded, and is skipped otherwise:
 //!
-//! SEALWAX_TESTBED_CA=tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test parts_testbed -- --ignored --nocapture
 
 mod common;

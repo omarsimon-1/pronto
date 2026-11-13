@@ -1,0 +1,229 @@
+# Per-account signature settings persist through the existing accounts.toml writer and appear
+# as editable plain text in new messages, replies and forwards. All data is fictional.
+# Run: tools/headless.sh 79 target/debug/pronto --self-test tests/selftest/composer-signatures.sealwax-test
+
+desktop tiling
+resize 1440 900
+write-file $TMP/config/pronto/accounts.toml "[[account]]\nkey = \"work\"\nname = \"Work\"\naddress = \"work@example.test\"\n[account.imap]\nhost = \"imap.example.test\"\n[account.smtp]\nhost = \"smtp.example.test\"\n[[account]]\nkey = \"home\"\nname = \"Home\"\naddress = \"home@example.test\"\n[account.imap]\nhost = \"imap.example.test\"\n[account.smtp]\nhost = \"smtp.example.test\"\n"
+triage-account Work work
+triage-account Home home
+wait-until assert-action-enabled win.edit-account true
+engine-attach
+
+# The multiline account field accepts literal markup and keeps it as plain text.
+action win.edit-account
+setup-choose edit-account-choice work@example.test
+assert-field edit-account-signature ""
+assert-accessible-name edit-account-signature Signature
+setup-type edit-account-signature "Ada Example\n<Research> & Co."
+setup-respond edit-account save
+engine-expect edit-account key=work "signature=Ada Example\n<Research> & Co."
+engine-reply edited ok file
+action win.edit-account
+setup-choose edit-account-choice work@example.test
+assert-field edit-account-signature "Ada Example\n<Research> & Co."
+setup-choose edit-account-choice home@example.test
+assert-field edit-account-signature ""
+setup-respond edit-account cancel
+
+composer-backend store
+composer-store-message plans inbox
+folder all-inboxes
+composer-open new
+composer-wait
+assert-composer from work@example.test
+assert-composer html-has "<div class=\"sw-signature\"><div>--&nbsp;</div><div>Ada Example</div><div>&lt;Research&gt; &amp; Co.</div></div>"
+assert-composer eval "document.body.firstElementChild.innerHTML" "<br>"
+assert-composer eval "document.querySelectorAll('div.sw-signature').length" 1
+# The signature can be edited for this message, then survives saving and reopening.
+composer-focus body
+composer-select "Ada Example"
+composer-insert "Ada, for this message"
+wait-until assert-composer db current html "Ada, for this message"
+composer-close
+composer-open draft last
+composer-wait
+assert-composer html-has "Ada, for this message"
+assert-composer eval "document.querySelectorAll('div.sw-signature').length" 1
+composer-close
+
+# Each account supplies its own signature when From changes; Home's is empty.
+composer-open new
+composer-wait
+composer-from 1
+wait-until assert-composer html-lacks sw-signature
+composer-from 0
+wait-until assert-composer html-has "Ada Example"
+composer-close
+
+# Replies and forwards put the signature between the writing area and the quote.
+composer-open reply plans
+composer-wait
+assert-composer html-has "Ada Example"
+assert-composer focus body
+composer-insert "Reply text"
+assert-composer eval "document.body.innerHTML.indexOf('Reply text') < document.body.innerHTML.indexOf('sw-signature')" true
+assert-composer eval "!!(document.querySelector('div.sw-signature').compareDocumentPosition(document.querySelector('blockquote')) & Node.DOCUMENT_POSITION_FOLLOWING)" true
+composer-close
+composer-open reply-all plans
+composer-wait
+assert-composer html-has "Ada Example"
+assert-composer eval "document.querySelectorAll('div.sw-signature').length" 1
+composer-close
+composer-open forward plans
+composer-wait
+assert-composer html-has "Ada Example"
+assert-composer eval "document.body.firstElementChild.innerHTML" "<br>"
+assert-composer eval "document.body.innerHTML.indexOf('sw-signature') < document.body.innerHTML.indexOf('Forwarded message')" true
+composer-from 1
+wait-until assert-composer html-lacks sw-signature
+composer-from 0
+wait-until assert-composer html-has "Ada Example"
+assert-composer eval "document.body.innerHTML.indexOf('sw-signature') < document.body.innerHTML.indexOf('Forwarded message')" true
+composer-close
+
+# The primary inline reply shows an editable signature below the writing area too.
+# Use a plain message so Pop In is allowed (the plans fixture contains an inline image).
+composer-store-message elsewhere inbox
+folder inbox work@example.test
+list-wait
+list-select 0
+action win.reply
+wait-until assert-quick-reply open true
+wait-until assert-field quick-reply-signature "Ada Example\n<Research> & Co."
+# A signature edit alone is kept, including when a composer is popped back into the reader.
+setup-type quick-reply-signature "Ada, signature only"
+assert-quick-reply send false
+wait-until assert-reply-draft selected reply
+reply-relayout
+wait-until assert-field quick-reply-signature "Ada, signature only"
+assert-quick-reply text ""
+action win.pop-out-draft
+composer-wait
+assert-composer html-has "Ada, signature only"
+composer-action pop-out-draft
+wait-until assert-composer count 0
+assert-quick-reply text ""
+wait-until assert-field quick-reply-signature "Ada, signature only"
+reply-relayout
+wait-until assert-field quick-reply-signature "Ada, signature only"
+assert-quick-reply send false
+setup-type quick-reply-text "Inline reply"
+setup-type quick-reply-signature "Ada, inline\nResearch team"
+wait-until assert-reply-draft selected reply
+reply-relayout
+wait-until assert-field quick-reply-signature "Ada, inline\nResearch team"
+action win.pop-out-draft
+composer-wait
+assert-composer html-has "Ada, inline"
+assert-composer html-has "Research team"
+assert-composer html-has "Inline reply"
+assert-composer html-lacks "Ada Example"
+assert-composer eval "document.querySelectorAll('div.sw-signature').length" 1
+composer-close
+# Removing the inline signature is an explicit per-message choice; expanding preserves it.
+action win.reply
+wait-until assert-quick-reply open true
+setup-type quick-reply-text "No signature on this reply"
+setup-type quick-reply-signature ""
+action win.pop-out-draft
+composer-wait
+assert-composer html-lacks sw-signature
+assert-composer html-lacks "Ada Example"
+composer-action pop-out-draft
+wait-until assert-composer count 0
+assert-field quick-reply-signature ""
+reply-relayout
+assert-field quick-reply-signature ""
+action win.pop-out-draft
+composer-wait
+assert-composer html-lacks sw-signature
+composer-close
+# Home has no default, but its absent signature must still suppress Work's inline default.
+action win.reply
+action win.pop-out-draft
+composer-wait
+composer-from 1
+wait-until assert-composer html-lacks sw-signature
+composer-action pop-out-draft
+wait-until assert-composer count 0
+assert-quick-reply text ""
+assert-field quick-reply-signature ""
+key Escape
+assert-quick-reply open true
+action win.pop-out-draft
+composer-wait
+assert-composer html-lacks sw-signature
+composer-close
+# Opening the saved inline draft in a card leaves a fresh account signature in the reader.
+action win.reply
+wait-until assert-field quick-reply-signature "Ada Example\n<Research> & Co."
+setup-type quick-reply-text "Saved inline reply"
+quick-tries-mark
+setup-type quick-reply-signature "Ada, saved inline"
+wait-until assert-quick-tries 1 10
+wait-until assert-reply-draft selected reply
+composer-open reply-draft elsewhere
+composer-wait
+assert-composer html-has "Saved inline reply"
+assert-composer html-has "Ada, saved inline"
+composer-close
+action win.reply
+wait-until assert-quick-reply text ""
+wait-until assert-field quick-reply-signature "Ada Example\n<Research> & Co."
+
+# Send uses the edited inline signature as well (the in-memory sender cannot send mail).
+composer-backend stand-in
+action win.reply
+wait-until assert-quick-reply open true
+setup-type quick-reply-text "Sending inline"
+setup-type quick-reply-signature "Ada, sent inline"
+action win.send
+wait-until assert-composer sent 1
+assert-composer last-sent html "<div class=\"sw-signature\"><div>--&nbsp;</div><div>Ada, sent inline</div></div>"
+composer-backend store
+
+# Empty clears the stored setting and future messages have no signature or separator.
+engine-attach
+action win.edit-account
+setup-choose edit-account-choice work@example.test
+assert-field edit-account-signature "Ada Example\n<Research> & Co."
+setup-type edit-account-signature ""
+setup-respond edit-account save
+engine-expect edit-account key=work signature=none
+engine-reply edited ok file
+action win.edit-account
+setup-choose edit-account-choice work@example.test
+assert-field edit-account-signature ""
+setup-respond edit-account cancel
+composer-open new
+composer-wait
+assert-composer html-lacks sw-signature
+assert-composer html-lacks "--&nbsp;"
+composer-close
+composer-open reply plans
+composer-wait
+assert-composer html-lacks sw-signature
+composer-close
+composer-open forward plans
+composer-wait
+assert-composer html-lacks sw-signature
+composer-close
+
+# With neither sender nor inline account configured, an untouched empty Pop In stays empty.
+composer-open reply elsewhere
+composer-wait
+assert-composer html-lacks sw-signature
+quick-tries-mark
+composer-action pop-out-draft
+wait-until assert-composer count 0
+assert-quick-reply text ""
+assert-quick-reply send false
+key Escape
+assert-quick-reply open false
+# Wait beyond the inline autosave interval: no empty-signature draft should be created.
+sleep 2200
+assert-quick-tries 0 0
+reply-relayout
+assert-quick-reply text ""
+assert-quick-reply open false

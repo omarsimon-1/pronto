@@ -1,6 +1,6 @@
 //! Background mode (ML-084, PRD D6, ADR-013 and its M7 amendment): on by default, closing the
-//! window keeps Sealwax running so sync and notifications go on, with a one-time notice the
-//! first time; Quit stops it. Also Start Sealwax at Login (opt-in, asks first:
+//! window keeps Pronto running so sync and notifications go on, with a one-time notice the
+//! first time; Quit stops it. Also Start Pronto at Login (opt-in, asks first:
 //! [`autostart`](crate::autostart)) and the engine started without a window
 //! (`AppState::start_engine_without_window`).
 //!
@@ -9,11 +9,11 @@
 //!   the process, the engine, IDLE and any open composers running; off, closing the last window
 //!   quits, and turning it off while no window is open quits now, through Quit.
 //! - **The notice:** the first time the last window closes into background mode, a desktop
-//!   notification says that Sealwax keeps running and how to quit it. Once per user: a marker in
-//!   Sealwax's state folder remembers it across restarts. Clicking it shows the main window; a
+//!   notification says that Pronto keeps running and how to quit it. Once per user: a marker in
+//!   Pronto's state folder remembers it across restarts. Clicking it shows the main window; a
 //!   window opening withdraws it. The texts are proposals for the M7 gate.
 
-use crate::application::{AppState, ICON_NAME, SealwaxApplication};
+use crate::application::{AppState, ICON_NAME, ProntoApplication};
 use crate::autostart;
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
@@ -30,7 +30,7 @@ use std::time::Duration;
 /// The notice's notification id; new-mail notifications use their own.
 pub const NOTICE_ID: &str = "background-notice";
 
-/// The marker in Sealwax's state folder that says the notice was shown.
+/// The marker in Pronto's state folder that says the notice was shown.
 pub const NOTICE_MARKER: &str = "background-notice-shown";
 
 /// The application action a click on the notice runs: show the main window. Not a command of
@@ -38,9 +38,9 @@ pub const NOTICE_MARKER: &str = "background-notice-shown";
 pub const SHOW_WINDOW_ACTION: &str = "show-main-window";
 
 /// Development builds only: closes the first main window this many milliseconds after its first
-/// frame, as a user would, so a self-test can watch a Sealwax of its own close into background
+/// frame, as a user would, so a self-test can watch a Pronto of its own close into background
 /// mode.
-pub const CLOSE_AFTER_ENV: &str = "SEALWAX_CLOSE_WINDOW_AFTER_MS";
+pub const CLOSE_AFTER_ENV: &str = "PRONTO_CLOSE_WINDOW_AFTER_MS";
 
 /// A notice as sent: its id and texts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +63,12 @@ pub fn sent() -> Vec<Notice> {
 /// The notice's texts, with the Quit key the user has (`keys.toml` can change it).
 pub fn notice(keymap: &Keymap) -> Notice {
     let quit = match keymap.shown(ActionId::Quit).first() {
-        Some(key) => format!("To quit, open Sealwax and press {}.", key.display()),
-        None => "To quit, open Sealwax and choose Quit in its menu.".to_owned(),
+        Some(key) => format!("To quit, open Pronto and press {}.", key.display()),
+        None => "To quit, open Pronto and choose Quit in its menu.".to_owned(),
     };
     Notice {
         id: NOTICE_ID,
-        title: "Sealwax keeps running".to_owned(),
+        title: "Pronto keeps running".to_owned(),
         body: format!(
             "Mail keeps syncing and new mail is still notified while the window is closed. \
              {quit} To quit whenever the window closes, set enabled = false under [background] \
@@ -88,7 +88,7 @@ pub fn remember_notice(state_dir: &Path) -> io::Result<bool> {
     {
         Ok(mut file) => {
             file.write_all(
-                b"Sealwax showed its one-time notice about background mode. Delete this file to \
+                b"Pronto showed its one-time notice about background mode. Delete this file to \
                   see it again.\n",
             )?;
             Ok(true)
@@ -98,8 +98,8 @@ pub fn remember_notice(state_dir: &Path) -> io::Result<bool> {
     }
 }
 
-/// Follows `[background]`, installs the notice and Start Sealwax at Login, once at startup.
-pub fn install(app: &SealwaxApplication, state: &Rc<AppState>) {
+/// Follows `[background]`, installs the notice and Start Pronto at Login, once at startup.
+pub fn install(app: &ProntoApplication, state: &Rc<AppState>) {
     follow_settings(app, state);
     install_notice(app, state);
     autostart::install(state);
@@ -114,7 +114,7 @@ fn enabled(state: &AppState) -> bool {
 }
 
 /// The hold follows `[background]`, now and whenever `config.toml` changes.
-fn follow_settings(app: &SealwaxApplication, state: &Rc<AppState>) {
+fn follow_settings(app: &ProntoApplication, state: &Rc<AppState>) {
     apply(app, state);
     let Some(prefs) = state.preferences() else {
         return;
@@ -129,14 +129,14 @@ fn follow_settings(app: &SealwaxApplication, state: &Rc<AppState>) {
     });
 }
 
-fn apply(app: &SealwaxApplication, state: &Rc<AppState>) {
+fn apply(app: &ProntoApplication, state: &Rc<AppState>) {
     let on = enabled(state);
     if on == state.is_background() || state.is_quitting() {
         return;
     }
     tracing::info!(on, "background mode");
     state.set_background(app, on);
-    // Off with no window open: nothing keeps Sealwax but the hold just released, so it quits
+    // Off with no window open: nothing keeps Pronto but the hold just released, so it quits
     // the usual way (a `--background` start waits for its first window instead).
     if !on && app.windows().is_empty() && !state.is_hidden_start() {
         tracing::info!("background mode turned off with no window open; quitting");
@@ -144,7 +144,7 @@ fn apply(app: &SealwaxApplication, state: &Rc<AppState>) {
     }
 }
 
-fn install_notice(app: &SealwaxApplication, state: &Rc<AppState>) {
+fn install_notice(app: &ProntoApplication, state: &Rc<AppState>) {
     let shown = Rc::new(Cell::new(false));
     let action = gio::SimpleAction::new(SHOW_WINDOW_ACTION, None);
     let (weak_app, weak) = (app.downgrade(), Rc::downgrade(state));
@@ -173,8 +173,8 @@ fn install_notice(app: &SealwaxApplication, state: &Rc<AppState>) {
     });
 }
 
-/// The last window closed: tell the user once, ever, that Sealwax runs on.
-fn closed_into_background(app: &SealwaxApplication, state: &Rc<AppState>, sent: &Rc<Cell<bool>>) {
+/// The last window closed: tell the user once, ever, that Pronto runs on.
+fn closed_into_background(app: &ProntoApplication, state: &Rc<AppState>, sent: &Rc<Cell<bool>>) {
     if state.is_quitting() || !app.windows().is_empty() || !state.is_background() || !enabled(state)
     {
         return;
@@ -207,7 +207,7 @@ fn closed_into_background(app: &SealwaxApplication, state: &Rc<AppState>, sent: 
     });
 }
 
-fn send(app: &SealwaxApplication, notice: Notice) {
+fn send(app: &ProntoApplication, notice: Notice) {
     let notification = gio::Notification::new(&notice.title);
     notification.set_body(Some(&notice.body));
     notification.set_icon(&gio::ThemedIcon::new(ICON_NAME));
@@ -218,7 +218,7 @@ fn send(app: &SealwaxApplication, notice: Notice) {
 }
 
 /// [`CLOSE_AFTER_ENV`], in development builds.
-fn close_after_first_frame(app: &SealwaxApplication, state: &Rc<AppState>) {
+fn close_after_first_frame(app: &ProntoApplication, state: &Rc<AppState>) {
     if !cfg!(debug_assertions) {
         return;
     }
@@ -267,10 +267,9 @@ mod tests {
     fn the_notice_says_how_to_quit() {
         let text = notice(&Keymap::default());
         assert_eq!(text.id, NOTICE_ID);
-        assert_eq!(text.title, "Sealwax keeps running");
+        assert_eq!(text.title, "Pronto keeps running");
         assert!(
-            text.body
-                .contains("To quit, open Sealwax and press Ctrl+Q."),
+            text.body.contains("To quit, open Pronto and press Ctrl+Q."),
             "{}",
             text.body
         );
@@ -290,7 +289,7 @@ mod tests {
 
     #[test]
     fn the_notice_is_remembered_once_across_restarts() {
-        let dir = scratch("notice").join("state").join("sealwax");
+        let dir = scratch("notice").join("state").join("pronto");
         assert!(remember_notice(&dir).unwrap());
         assert!(!remember_notice(&dir).unwrap());
         // A restart reads the same folder: still shown.

@@ -67,7 +67,7 @@ fn sample() -> RuleSet {
 }
 
 const SAMPLE: &str = r#"require ["fileinto","copy","imap4flags","environment","imapsieve"];
-# Sealwax: never junk
+# Pronto: never junk
 if environment :is "imap.mailbox" "Junk"
 {
 	if anyof (address :is "from" "ola@example.test", address :domain :is "from" "partner.example.test")
@@ -79,7 +79,7 @@ if environment :is "imap.mailbox" "Junk"
 	}
 	stop;
 }
-# Sealwax: always junk
+# Pronto: always junk
 if address :is "from" "spam@example.test"
 {
 	removeflag "$NotJunk";
@@ -114,7 +114,7 @@ fn an_empty_set_still_keeps_junk_out_of_the_rules() {
     let text = render(&RuleSet::default());
     assert_eq!(
         text,
-        "require [\"environment\",\"imapsieve\"];\n# Sealwax: never junk\nif environment :is \
+        "require [\"environment\",\"imapsieve\"];\n# Pronto: never junk\nif environment :is \
          \"imap.mailbox\" \"Junk\"\n{\n\tstop;\n}\n"
     );
     assert_eq!(read(&text), RuleSet::default());
@@ -536,12 +536,12 @@ fn reading_and_writing_again_never_changes_what_a_script_does() {
 
 #[test]
 fn sections_need_their_marker_and_their_place() {
-    let unmarked = read(&SAMPLE.replace("# Sealwax: never junk\n", ""));
+    let unmarked = read(&SAMPLE.replace("# Pronto: never junk\n", ""));
     assert!(unmarked.trusted.is_empty() && unmarked.blocked.is_empty());
     assert!(unmarked.is_hand_written());
     let always_junk_first = format!(
         "require [\"fileinto\", \"copy\", \"imap4flags\"];\n{}",
-        &SAMPLE[SAMPLE.find("# Sealwax: always junk").expect("a marker")..]
+        &SAMPLE[SAMPLE.find("# Pronto: always junk").expect("a marker")..]
     );
     let set = read(&always_junk_first);
     assert!(
@@ -552,9 +552,9 @@ fn sections_need_their_marker_and_their_place() {
 
     let late = format!(
         "require [\"fileinto\", \"copy\", \"imap4flags\"];\n# rule:[First]\nif true\n{{\n\tstop;\n}}\n{}",
-        SAMPLE.split_once("# Sealwax: always junk\n").expect("a marker").1
+        SAMPLE.split_once("# Pronto: always junk\n").expect("a marker").1
     )
-    .replacen("if address", "# Sealwax: always junk\nif address", 1);
+    .replacen("if address", "# Pronto: always junk\nif address", 1);
     let set = read(&late);
     assert!(
         set.blocked.is_empty(),
@@ -577,10 +577,10 @@ fn names_and_markers_belong_to_the_command_right_below() {
     let texts = [
         "require \"fileinto\";\n# rule:[]\n# a note\n# rule:[]\nif true\n{\n\tfileinto \"A\";\n}\n",
         "require \"fileinto\";\n# rule:[Old]\n# a note\nif true\n{\n\tfileinto \"A\";\n}\n",
-        "# Sealwax: always junk\nrequire [\"fileinto\", \"imap4flags\"];\nif address :is \"from\" \
+        "# Pronto: always junk\nrequire [\"fileinto\", \"imap4flags\"];\nif address :is \"from\" \
          \"spam@example.test\"\n{\n\tremoveflag \"$NotJunk\";\n\taddflag \"$Junk\";\n\tfileinto \
          \"Junk\";\n\tstop;\n}\n",
-        "require [\"fileinto\", \"imap4flags\"];\n# Sealwax: always junk\n# rule:[Spam]\nif address \
+        "require [\"fileinto\", \"imap4flags\"];\n# Pronto: always junk\n# rule:[Spam]\nif address \
          :is \"from\" \"spam@example.test\"\n{\n\tremoveflag \"$NotJunk\";\n\taddflag \
          \"$Junk\";\n\tfileinto \"Junk\";\n\tstop;\n}\n",
     ];

@@ -1,14 +1,13 @@
-//! Which message bodies Sealwax downloads (ML-044). A message up to [`WHOLE_LIMIT`] is fetched
+//! Which message bodies Pronto downloads (ML-044). A message up to [`WHOLE_LIMIT`] is fetched
 //! whole; a larger one as its text parts, its attachments left on the server until asked for.
-//! After a sync, recent Inbox messages are downloaded in the background ([`prefetch`]) within
-//! part of the disk cap, so they open without waiting. Pure rules: the engine fetches, the
-//! store keeps and evicts.
+//! After a sync, the Inbox and the rest of its conversations are downloaded in the background
+//! ([`prefetch`]) within part of the disk cap, so they open without waiting. Pure rules: the
+//! engine fetches, the store keeps and evicts.
 
 use crate::config::Storage;
 use crate::model::{FolderRole, MessageId};
 
 const MIB: u64 = 1024 * 1024;
-const DAY: i64 = 86_400;
 
 /// Messages up to this size (RFC822.SIZE) are downloaded whole.
 pub const WHOLE_LIMIT: u64 = 10 * MIB;
@@ -20,7 +19,9 @@ pub const PREFETCH_SHARE: u64 = 50;
 /// What the background prefetch downloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prefetch {
-    /// Inbox messages that arrived within this many days; 0 turns prefetching off.
+    /// `[storage]`'s `prefetch_days`: 0 turns prefetching off. Since the fork's Superhuman pass
+    /// any other value prefetches the Inbox and its conversations whatever their age: what is
+    /// in the Inbox is what the user will open next, old or not.
     pub days: u32,
     /// Larger messages wait until they are opened.
     pub max_size: u64,
@@ -34,9 +35,9 @@ impl Prefetch {
         }
     }
 
-    /// The oldest arrival time prefetched at `now`; `None` when prefetching is off.
-    pub fn since(&self, now: i64) -> Option<i64> {
-        (self.days > 0).then(|| now - i64::from(self.days) * DAY)
+    /// Whether the prefetch downloads anything.
+    pub fn on(&self) -> bool {
+        self.days > 0
     }
 }
 
@@ -61,28 +62,28 @@ pub struct CacheUse {
     pub limit: Option<u64>,
 }
 
-/// The messages to download in the background, newest first: Inbox messages from the policy's
-/// window, each within its size, while the downloaded bodies stay within
-/// [`PREFETCH_SHARE`] of the cap.
-pub fn prefetch(
-    policy: &Prefetch,
-    now: i64,
-    cache: CacheUse,
-    candidates: &[Candidate],
-) -> Vec<MessageId> {
-    let Some(since) = policy.since(now) else {
+/// The messages to download in the background: the Inbox's, newest first, then the rest of the
+/// Inbox conversations the candidates hold (a reply in Sent, a copy in the Archive), newest
+/// first, whatever their age, never from the Trash or Junk; each within its size, while the
+/// downloaded bodies stay within [`PREFETCH_SHARE`] of the cap.
+pub fn prefetch(policy: &Prefetch, cache: CacheUse, candidates: &[Candidate]) -> Vec<MessageId> {
+    if !policy.on() {
         return Vec::new();
-    };
+    }
     let mut wanted: Vec<&Candidate> = candidates
         .iter()
         .filter(|candidate| {
-            candidate.role == FolderRole::Inbox
-                && !candidate.downloaded
-                && candidate.date >= since
+            !candidate.downloaded
+                && !matches!(candidate.role, FolderRole::Trash | FolderRole::Junk)
                 && candidate.size <= policy.max_size
         })
         .collect();
-    wanted.sort_by(|a, b| b.date.cmp(&a.date).then(b.message.cmp(&a.message)));
+    wanted.sort_by(|a, b| {
+        (b.role == FolderRole::Inbox)
+            .cmp(&(a.role == FolderRole::Inbox))
+            .then(b.date.cmp(&a.date))
+            .then(b.message.cmp(&a.message))
+    });
     let budget = cache
         .limit
         .map(|limit| (limit / 100 * PREFETCH_SHARE).saturating_sub(cache.used));
@@ -103,6 +104,7 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_790_000_000;
+    const DAY: i64 = 86_400;
 
     fn candidate(id: i64, days_ago: i64, size: u64) -> Candidate {
         Candidate {
@@ -122,11 +124,11 @@ mod tests {
     }
 
     #[test]
-    fn recent_inbox_messages_come_newest_first() {
+    fn the_inbox_comes_first_newest_first_whatever_its_age() {
         let candidates = [
             candidate(1, 20, 1000),
             candidate(2, 1, 1000),
-            candidate(3, 13, 1000),
+            candidate(3, 400, 1000),
             Candidate {
                 role: FolderRole::Sent,
                 ..candidate(4, 0, 1000)
@@ -137,17 +139,40 @@ mod tests {
             },
             candidate(6, 0, WHOLE_LIMIT + 1),
             candidate(7, 0, WHOLE_LIMIT),
+            Candidate {
+                role: FolderRole::Archive,
+                ..candidate(8, 30, 1000)
+            },
+            Candidate {
+                role: FolderRole::Trash,
+                ..candidate(9, 0, 1000)
+            },
+            Candidate {
+                role: FolderRole::Junk,
+                ..candidate(10, 0, 1000)
+            },
         ];
-        let picked = prefetch(&policy(14), NOW, CacheUse::default(), &candidates);
-        assert_eq!(picked, [MessageId(7), MessageId(2), MessageId(3)]);
+        let picked = prefetch(&policy(14), CacheUse::default(), &candidates);
+        assert_eq!(
+            picked,
+            [
+                MessageId(7),
+                MessageId(2),
+                MessageId(1),
+                MessageId(3),
+                MessageId(4),
+                MessageId(8)
+            ],
+            "the Inbox newest first, then its conversations' other messages newest first"
+        );
     }
 
     #[test]
     fn zero_days_turns_it_off() {
         let candidates = [candidate(1, 0, 10)];
-        assert!(prefetch(&policy(0), NOW, CacheUse::default(), &candidates).is_empty());
-        assert_eq!(policy(0).since(NOW), None);
-        assert_eq!(policy(2).since(NOW), Some(NOW - 2 * DAY));
+        assert!(prefetch(&policy(0), CacheUse::default(), &candidates).is_empty());
+        assert!(!policy(0).on());
+        assert!(policy(1).on());
     }
 
     #[test]
@@ -157,18 +182,18 @@ mod tests {
             used: 0,
             limit: Some(100 * MIB),
         };
-        let picked = prefetch(&policy(30), NOW, cache, &candidates);
+        let picked = prefetch(&policy(30), cache, &candidates);
         assert_eq!(picked.len(), 5, "{picked:?}");
         assert_eq!(picked[0], MessageId(1));
         let fuller = CacheUse {
             used: 45 * MIB,
             ..cache
         };
-        assert!(prefetch(&policy(30), NOW, fuller, &candidates).is_empty());
+        assert!(prefetch(&policy(30), fuller, &candidates).is_empty());
         let unlimited = CacheUse {
             used: 1 << 40,
             limit: None,
         };
-        assert_eq!(prefetch(&policy(30), NOW, unlimited, &candidates).len(), 10);
+        assert_eq!(prefetch(&policy(30), unlimited, &candidates).len(), 10);
     }
 }

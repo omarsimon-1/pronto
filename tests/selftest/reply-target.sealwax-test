@@ -1,0 +1,281 @@
+# Whom the reply under a conversation answers, and what the reader says about it (phase C's
+# visual QA), in the app's own layout (Focused, conversation rows). A conversation opens at its
+# first unread message, whose card takes the focus, but `r`, `a` and Enter answer the latest
+# message, where the box sits and which its closed line names; after `n` or `p`, or a click in a
+# message (the one it opened at too), they answer that one, and the closed line names it first.
+# Left and opened again, a conversation starts afresh. With a row per message, the opened row's
+# message is the one answered and forwarded. Opening the box at the column's foot never leaves
+# the heading cut by the toolbar. A draft in a conversation says Draft in the draft colour where
+# its date goes, its card's Edit draft in view, and is never the one the box answers. The heading
+# is the conversation's subject, as its list row says it. Every name and message is fictional.
+# Run: tools/headless.sh 70 target/debug/pronto --self-test tests/selftest/reply-target.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open false
+composer-backend stand-in
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+# A conversation holding the user's draft, and newsletters whose subject changed on the way.
+notify-mail a1 Personal:inbox "Q4 planning offsite" read "from=Ingrid Solberg" ago=210 "text=Shall we do the offsite in Lillehammer again?"
+notify-mail a2 Personal:inbox "Re: Q4 planning offsite" read "from=Tomas Berg" ago=150 reply=a1 "text=Lillehammer works for me."
+notify-mail a3 Personal:inbox "Re: Q4 planning offsite" "from=Sana Malik" ago=6 reply=a2 "text=I'll book the train for Thursday."
+notify-mail a4 Personal:drafts "Re: Q4 planning offsite" read "from=Alex Berg" ago=3 reply=a3 "text=Great, I'll take the hotel."
+notify-mail h1 Personal:inbox "Harbor & Pine, issue 40" read "from=Harbor & Pine" ago=300 "text=This month: the harbour walk."
+notify-mail h2 Personal:inbox "Orbit Coffee, issue 47" "from=Harbor & Pine" ago=30 reply=h1 "text=New beans from Kenya."
+folder inbox Personal
+list-wait
+focus list
+
+# The trip opens at Ingrid's message, its first unread, with the focus in it; the box still
+# names Tomas, who wrote last, and r, a and Enter answer him.
+conversation-show trip-5
+focus list
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation focus trip-5 body
+assert-quick-reply target trip-6
+assert-quick-reply placeholder "Reply to Tomas Berg…"
+key r
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-6
+assert-quick-reply kind reply
+assert-quick-reply label "Reply to Tomas Berg"
+# Opened at the column's foot, it scrolls the heading out of view whole, not under the bar,
+# and keeps its margin below.
+assert-conversation heading-clear true
+assert-conversation reply-in-view true
+key Escape
+wait-until assert-conversation focus trip-5 body
+key a
+assert-quick-reply target trip-6
+assert-quick-reply kind reply-all
+key Escape
+wait-until assert-conversation focus trip-5 body
+key Return
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-6
+assert-quick-reply kind reply-all
+key Escape
+
+# p: Sana's message, the one before. The closed box names her at once, r answers her, and the
+# box stays on her message after Escape.
+wait-until assert-conversation focus trip-5 body
+key p
+wait-until assert-quick-reply target trip-4
+assert-quick-reply placeholder "Reply to Sana Malik…"
+key r
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-4
+assert-quick-reply label "Reply to Sana Malik"
+key Escape
+assert-quick-reply target trip-4
+# n back to Ingrid's: moved to, it is the one answered now.
+key n
+wait-until assert-quick-reply target trip-5
+assert-quick-reply placeholder "Reply to Ingrid Solberg…"
+key r
+assert-quick-reply target trip-5
+assert-quick-reply label "Reply to Ingrid Solberg"
+key Escape
+
+# A click on another message (Tomas's first, a collapsed row): the box answers it.
+conversation-click-row 1
+wait-until assert-quick-reply target trip-2
+key r
+assert-quick-reply target trip-2
+key Escape
+assert-conversation focus trip-2 header
+# Shift+Tab from his card to Ingrid's row before it: a move too.
+key <Shift>Tab
+wait-until assert-conversation focus trip-1 row
+wait-until assert-quick-reply target trip-1
+assert-quick-reply placeholder "Reply to Ingrid Solberg…"
+key Escape
+wait-until assert-pane list
+
+# Left with Escape and opened again with Enter, the trip starts afresh (phase C's review: kept
+# behind the list, it still answered Ingrid's first message, and p went on from there): the box
+# names Tomas again, r answers him, and p goes from Ingrid's message, where it opens, to Sana's.
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation focus trip-5 body
+assert-quick-reply target trip-6
+assert-quick-reply placeholder "Reply to Tomas Berg…"
+key r
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-6
+key Escape
+wait-until assert-conversation focus trip-5 body
+key p
+wait-until assert-quick-reply target trip-4
+wait-until assert-conversation focus trip-4 body
+key Escape
+wait-until assert-pane list
+
+# After a send the reader puts the focus in the answered message's body, Tomas's: no move, but
+# p goes on from there, to Ingrid's message above it (it went from the one the trip opened at,
+# past her, to Sana's).
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation focus trip-5 body
+key Return
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-6
+type "See you Friday."
+key <Control>Return
+assert-quick-sends 1
+wait-until assert-conversation focus trip-6 body
+assert-quick-reply target trip-6
+key p
+wait-until assert-quick-reply target trip-5
+wait-until assert-conversation focus trip-5 body
+key Escape
+wait-until assert-pane list
+
+# A press in Ingrid's message, where the trip opens, is a move to her as a press in any other
+# message is, the first one too (phase C's review: it counted only after another move). The
+# press on her header folds her card; p and n bring it back.
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation focus trip-5 body
+assert-quick-reply target trip-6
+conversation-click-header trip-5
+wait-until assert-quick-reply target trip-5
+assert-quick-reply placeholder "Reply to Ingrid Solberg…"
+key r
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-5
+key Escape
+wait-until assert-conversation focus trip-5 row
+key p
+wait-until assert-quick-reply target trip-4
+key n
+wait-until assert-quick-reply target trip-5
+wait-until assert-conversation focus trip-5 body
+key Escape
+wait-until assert-pane list
+
+# The offsite: the user's unsent reply says Draft where its date goes, in the draft colour, with
+# Edit draft in view; the box answers Sana, never the draft.
+list-select 0
+focus list
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation date-of a4 Draft
+assert-conversation draft-of a4 true
+assert-conversation draft-of a3 false
+assert-quick-reply target a3
+assert-quick-reply placeholder "Reply to Sana Malik and 1 other…"
+wait-until assert-drawn reader-card-edit-draft true
+assert-conversation criticals 0
+# `n` onto the draft keeps the box on Sana, and Forward takes her message, never the unsent
+# draft (phase C's review: it forwarded the draft).
+key n
+wait-until assert-conversation focus a4 body
+assert-quick-reply target a3
+key f
+assert-compose-last reply a3 forward
+composer-close
+key Escape
+wait-until assert-pane list
+
+# The newsletters open at issue 47, the first unread, under the conversation's subject, as the
+# list row says it.
+list-select 1
+assert-list-row 1 subject "Harbor & Pine, issue 40"
+focus list
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-label reader-subject "Harbor & Pine, issue 40"
+assert-conversation criticals 0
+# With a row per message (Group by Conversation off), the heading is the opened message's
+# subject, as its row says it.
+key Escape
+wait-until assert-pane list
+grouping messages
+list-wait
+list-select 1
+assert-list-row 1 subject "Orbit Coffee, issue 47"
+focus list
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-label reader-subject "Orbit Coffee, issue 47"
+key Escape
+wait-until assert-pane list
+# The row opened is the user's choice: Sana's older message answers and forwards as itself, and
+# the closed box names her (phase C's review: Forward and Reply took Tomas's latest, trip-6).
+conversation-show trip-4
+focus list
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation focus trip-4 body
+assert-quick-reply target trip-4
+assert-quick-reply placeholder "Reply to Sana Malik…"
+key f
+assert-compose-last reply trip-4 forward
+composer-close
+key r
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-4
+key Escape
+key Escape
+wait-until assert-pane list
+# Ingrid's row, the trip's first unread (the row a conversation opens at): with Group by
+# Conversation on again it is no choice of the user's, and the box answers Tomas, the latest.
+conversation-show trip-5
+wait-until assert-quick-reply target trip-5
+grouping conversations
+list-wait
+wait-until assert-quick-reply target trip-6
+
+# Only the user's moves count (phase C's review): the focus the reader puts back after a send
+# is no move, so a reply that comes in later is the one the box, Enter and r answer. The focus
+# goes back into a body, where Enter replies again (the answered reply came in while the
+# conversation was open: a collapsed row, a button Enter would expand; so the selected
+# message's body). Left and opened again, a conversation starts afresh: the move to Ingrid's
+# row above is forgotten.
+conversation-show trip-5
+focus list
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation focus trip-5 body
+assert-quick-reply target trip-6
+conversation-reply trip
+wait-until assert-conversation messages 7
+wait-until assert-quick-reply target trip-reply-1
+key Return
+assert-quick-reply focused true
+assert-quick-reply target trip-reply-1
+type "Great, see you there."
+key <Control>Return
+assert-quick-sends 2
+assert-quick-reply text ""
+assert-quick-reply target trip-reply-1
+wait-until assert-conversation focus trip-5 body
+conversation-reply trip
+wait-until assert-conversation messages 8
+wait-until assert-quick-reply target trip-reply-2
+key Return
+assert-quick-reply focused true
+assert-quick-reply target trip-reply-2
+key Escape
+wait-until assert-conversation focus trip-5 body
+key r
+assert-quick-reply target trip-reply-2
+key Escape
+
+# Opened at another of its messages (a notification's click), the trip shown in place starts
+# afresh there: the reader moves the focus into that message, no move of the user's, and the box
+# answers the latest message still.
+assert-row-conversation 0 trip-1
+conversation-open-at 0 trip-4
+wait-until assert-conversation focus trip-4 body
+sleep 200
+assert-quick-reply target trip-reply-2
+key r
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-reply-2
+key Escape
+assert-conversation criticals 0

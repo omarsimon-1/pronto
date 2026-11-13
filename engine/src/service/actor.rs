@@ -27,6 +27,7 @@
 
 use super::{Shared, bodies, log_in_with_password, log_in_with_token};
 use crate::api::{Event, FolderChange, FolderError, RequestId, SyncStatus};
+use crate::imap::bodies::BodyFetchError;
 use crate::imap::{
     self, Arrived, ConnectOptions, Connection, Elsewhere, FolderLocks, Idled, Progress, Stop,
     SyncError, SyncOptions, SyncReport,
@@ -34,7 +35,7 @@ use crate::imap::{
 use crate::smtp::submit::Timeouts;
 use futures_util::FutureExt;
 use sealwax_domain::account::{AccountSettings, AuthMethod, LoginFailure};
-use sealwax_domain::model::{AccountId, BlobKey, FolderId, FolderRole};
+use sealwax_domain::model::{AccountId, BlobKey, FolderId, FolderRole, MessageId};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -69,7 +70,7 @@ pub struct SyncConfig {
     pub backoff_max: Duration,
     /// `SyncProgress` at most this often per account.
     pub progress_every: Duration,
-    /// How long a body download connection stays open without work.
+    /// How long a body download connection stays open without work, kept warm meanwhile.
     pub body_linger: Duration,
     /// How long LOGOUT may take when the engine stops.
     pub logout_wait: Duration,
@@ -80,6 +81,16 @@ pub struct SyncConfig {
     pub submission: Timeouts,
     /// A POP3 account's passes (M8): POP3 has no IDLE, and its servers dislike frequent polls.
     pub pop3_poll: Duration,
+    /// Where HIGHESTMODSEQ is the account's (Gmail), the account pass compares it only this often
+    /// and at the first pass after connecting ([`SyncOptions::flag_sweep`]): a flag-only change
+    /// outside INBOX (INBOX has IDLE) shows within this long.
+    pub flag_sweep: Duration,
+    /// How long the IDLE connection's FETCH of the bodies of the mail it just stored may take
+    /// (`bodies::fetch_arrived`) before the body connection takes over what is left and this
+    /// one connects again, besides the time its bytes take on a slow link (phase C:
+    /// `bodies::arrived_limit`): a stalled connection held a reader who opened the message until
+    /// the read timeout (a minute).
+    pub inline_bodies: Duration,
 }
 
 impl Default for SyncConfig {
@@ -95,11 +106,16 @@ impl Default for SyncConfig {
             backoff_min: Duration::from_secs(1),
             backoff_max: Duration::from_secs(300),
             progress_every: Duration::from_millis(100),
-            body_linger: Duration::from_secs(60),
+            // The fork's Superhuman pass: 60 s before, after which an open paid for a login
+            // (TLS, the login, a keyring read; a second or more on Gmail).
+            body_linger: Duration::from_secs(12 * 60),
             logout_wait: Duration::from_millis(300),
             connect: ConnectOptions::default(),
             submission: Timeouts::default(),
             pop3_poll: Duration::from_secs(300),
+            flag_sweep: Duration::from_secs(10 * 60),
+            // The round trips; the bytes' time comes on top (two MiB at most: 16 s more).
+            inline_bodies: Duration::from_secs(8),
         }
     }
 }
@@ -319,6 +335,34 @@ fn crash_report(account: Option<AccountId>, crashes: u32) -> Option<Event> {
 /// How long a move whose target UID is unknown keeps its messages out of the target's new mail.
 const MOVED_KEPT: Duration = Duration::from_secs(600);
 
+/// After a send whose Sent copy the server files itself (Gmail, within about a second of the
+/// submission), when the Sent folder is passed, and again after [`SENT_AGAIN`] if that pass
+/// found nothing new; the account pass would find it only up to `account_pass` later.
+const SENT_SAVED: Duration = Duration::from_millis(1_500);
+const SENT_AGAIN: Duration = Duration::from_secs(4);
+
+/// A pass over the Sent folder soon after a send, so the message sent joins its conversation at
+/// once (the fork's Superhuman pass).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SentLook {
+    at: Instant,
+    /// Passes left while they find nothing new.
+    tries: u8,
+}
+
+impl SentLook {
+    /// A look at `at` with `tries`, with the one already waiting: the sooner, with the more tries.
+    fn merged(waiting: Option<SentLook>, at: Instant, tries: u8) -> SentLook {
+        match waiting {
+            Some(look) => SentLook {
+                at: look.at.min(at),
+                tries: look.tries.max(tries),
+            },
+            None => SentLook { at, tries },
+        }
+    }
+}
+
 /// Message-IDs moved into each folder, with when their move started.
 type MovedInto = HashMap<FolderId, Vec<(String, Instant)>>;
 
@@ -427,6 +471,8 @@ async fn forward_new_mail(
             folder,
             messages: kept,
         });
+        // An answer to a conversation waiting in Reminders ends its reminder (phase C).
+        shared.nudge_reminders();
     }
 }
 
@@ -457,6 +503,10 @@ struct Status {
     progress: Mutex<Option<Instant>>,
     /// The submission server refused the login: the account shows it until a login works.
     smtp: Mutex<Option<SyncStatus>>,
+    /// An account pass is due after a login, or runs, on the command connection: it, not the
+    /// IDLE connection's pass beside it (which starts at once since the fork's Superhuman pass),
+    /// says when the account is synced.
+    passing: std::sync::atomic::AtomicBool,
 }
 
 impl Status {
@@ -467,7 +517,17 @@ impl Status {
             shown: Mutex::new(None),
             progress: Mutex::new(None),
             smtp: Mutex::new(None),
+            passing: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn set_passing(&self, passing: bool) {
+        self.passing
+            .store(passing, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn passing(&self) -> bool {
+        self.passing.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// What the submission server's refused login shows, if it did.
@@ -529,15 +589,7 @@ pub(super) async fn discard(shared: &Shared, orphaned: Vec<BlobKey>) {
     if orphaned.is_empty() {
         return;
     }
-    let blobs = shared.blobs.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        for key in &orphaned {
-            if let Err(error) = blobs.remove(key) {
-                tracing::warn!(%error, "a raw message no row refers to couldn't be deleted");
-            }
-        }
-    })
-    .await;
+    crate::bodies::discard_blobs(&shared.store, &shared.blobs, orphaned).await;
 }
 
 /// Stops the retries (a refused login, a bad certificate) until something changes.
@@ -620,6 +672,10 @@ async fn run(
         arrivals,
         moved,
         folder_jobs: VecDeque::new(),
+        sent_look: None,
+        prefetched: false,
+        next_sweep: Instant::now(),
+        unseen: Arc::default(),
     };
     poller.run().await;
 }
@@ -665,6 +721,16 @@ struct Poller {
     moved: Moved,
     /// Folder changes waiting for the command connection, oldest first.
     folder_jobs: VecDeque<FolderJob>,
+    /// The Sent folder's pass after a send.
+    sent_look: Option<SentLook>,
+    /// The prefetch was planned after an account pass of this actor: the first plans it even
+    /// when it stored nothing (a restart), later ones when they store something.
+    prefetched: bool,
+    /// When the account pass compares an account-wide HIGHESTMODSEQ again (`flag_sweep`).
+    next_sweep: Instant,
+    /// Each folder's UNSEEN at the last account pass, which compares it where it doesn't
+    /// compare an account-wide HIGHESTMODSEQ ([`SyncOptions::unseen`]).
+    unseen: Arc<Mutex<HashMap<FolderId, u32>>>,
 }
 
 /// The IDLE connection goes with the actor, also when a panic ends it ([`supervise`] starts a
@@ -706,9 +772,16 @@ impl Poller {
                         self.conn = Some(conn);
                         self.used = Instant::now();
                         self.next_account = Instant::now();
+                        self.next_sweep = Instant::now();
+                        // Its account pass is due: it says when the account is synced.
+                        self.status.set_passing(true);
                         self.ops_now = true;
                         self.outbox.now = true;
                         self.drafts_now = true;
+                        // The IDLE connection starts now, beside the account pass, with INBOX as
+                        // the store knows it, or as the pass's folder list tells it.
+                        self.find_inbox().await;
+                        self.start_idle();
                     }
                     Ok(Err(failure)) => self.failed(failure),
                     Err(interrupt) => {
@@ -828,9 +901,14 @@ impl Poller {
             if self.opened.is_some() {
                 due = due.min(self.next_opened);
             }
-            for next in [self.next_ops, self.outbox.next, self.next_drafts]
-                .into_iter()
-                .flatten()
+            for next in [
+                self.next_ops,
+                self.outbox.next,
+                self.next_drafts,
+                self.sent_look.map(|look| look.at),
+            ]
+            .into_iter()
+            .flatten()
             {
                 due = due.min(next);
             }
@@ -1011,6 +1089,12 @@ impl Poller {
                 return Ok(());
             }
         }
+        if self.sent_look.is_some_and(|look| look.at <= Instant::now()) {
+            self.look_in_sent(seen).await?;
+            if self.conn.is_none() {
+                return Ok(());
+            }
+        }
         while let Some(folder) = self.older.pop_front() {
             self.load_older(folder, seen).await?;
             if self.conn.is_none() {
@@ -1050,6 +1134,7 @@ impl Poller {
     fn options(&self) -> SyncOptions {
         let mut options = self.config().options.clone();
         options.arrivals = Some(self.arrivals.clone());
+        options.inbox = Some(self.inbox.clone());
         if self.idling() {
             options.elsewhere = (*self.inbox.borrow()).map(|folder| Elsewhere {
                 folder,
@@ -1060,12 +1145,15 @@ impl Poller {
     }
 
     async fn account_pass(&mut self, seen: u64) -> Result<(), Interrupt> {
-        let options = self.options();
+        let mut options = self.options();
+        options.flag_sweep = Instant::now() >= self.next_sweep;
+        options.unseen = Some(self.unseen.clone());
         let every = self.config().progress_every;
         let Some(conn) = self.conn.as_mut() else {
             return Ok(());
         };
         let status = self.status.clone();
+        self.status.set_passing(true);
         let passed = race(
             &self.signals,
             seen,
@@ -1078,17 +1166,23 @@ impl Poller {
                 |folder, progress| status.progress(folder, progress, every),
             ),
         )
-        .await?;
+        .await;
+        self.status.set_passing(false);
+        let passed = passed?;
         self.used = Instant::now();
         self.next_account = Instant::now() + self.config().account_pass;
         match passed {
             Ok(report) => {
                 self.failures = 0;
+                if options.flag_sweep {
+                    self.next_sweep = Instant::now() + self.config().flag_sweep;
+                }
                 let stored = report.stats.stored;
                 self.done(report).await;
                 self.status.set(self.healthy());
                 self.find_inbox().await;
-                if stored > 0 {
+                if stored > 0 || !self.prefetched {
+                    self.prefetched = true;
                     bodies::prefetch(&self.shared);
                 }
                 self.start_idle();
@@ -1099,10 +1193,60 @@ impl Poller {
     }
 
     async fn folder_pass(&mut self, folder: FolderId, seen: u64) -> Result<(), Interrupt> {
+        self.pass_folder(folder, seen).await.map(|_| ())
+    }
+
+    /// The Sent folder's pass after a send ([`SentLook`]), and once more a moment later while
+    /// it finds nothing new.
+    async fn look_in_sent(&mut self, seen: u64) -> Result<(), Interrupt> {
+        let Some(look) = self.sent_look.take() else {
+            return Ok(());
+        };
+        let sent = self
+            .shared
+            .store
+            .account_folders(self.account)
+            .recv()
+            .await
+            .ok()
+            .and_then(|folders| {
+                folders
+                    .into_iter()
+                    .find(|folder| folder.role == FolderRole::Sent && folder.selectable)
+            });
+        let Some(sent) = sent else {
+            return Ok(());
+        };
+        let stored = self.pass_folder(sent.folder, seen).await?;
+        tracing::debug!(
+            account = self.account.0,
+            stored,
+            "looked in Sent after a send"
+        );
+        if stored == 0 && look.tries > 1 && self.conn.is_some() {
+            self.sent_look = Some(SentLook {
+                at: Instant::now() + SENT_AGAIN,
+                tries: look.tries - 1,
+            });
+        }
+        Ok(())
+    }
+
+    /// Passes the Sent folder `after` this long, up to `tries` times while nothing new is found.
+    fn look_in_sent_after(&mut self, after: Duration, tries: u8) {
+        self.sent_look = Some(SentLook::merged(
+            self.sent_look,
+            Instant::now() + after,
+            tries,
+        ));
+    }
+
+    /// A pass over `folder`; the rows it stored.
+    async fn pass_folder(&mut self, folder: FolderId, seen: u64) -> Result<u32, Interrupt> {
         let options = self.options();
         let every = self.config().progress_every;
         let Some(conn) = self.conn.as_mut() else {
-            return Ok(());
+            return Ok(0);
         };
         let status = self.status.clone();
         let passed = race(
@@ -1119,17 +1263,24 @@ impl Poller {
         )
         .await?;
         self.used = Instant::now();
+        let mut stored = 0;
         match passed {
             Ok(report) => {
+                stored = report.stats.stored;
                 self.done(report).await;
                 if self.status.current() == Some(SyncStatus::Syncing) {
                     self.status.set(self.healthy());
+                }
+                // A reply in Sent, a copy in Archive: the members of Inbox conversations that
+                // other folders hold are prefetched too.
+                if stored > 0 {
+                    bodies::prefetch(&self.shared);
                 }
             }
             Err(SyncError::Imap(imap::ImapError::No(_)) | SyncError::NotSelectable) => {}
             Err(error) => self.pass_failed(&error),
         }
-        Ok(())
+        Ok(stored)
     }
 
     async fn load_older(&mut self, folder: FolderId, seen: u64) -> Result<(), Interrupt> {
@@ -1191,14 +1342,16 @@ impl Poller {
         });
     }
 
-    /// The IDLE connection, once INBOX is known and the server offers IDLE; again after an
-    /// account pass when its task ended, which it does by itself only in a panic.
+    /// The IDLE connection, when the server offers IDLE: right after the command connection's
+    /// login (the fork's Superhuman pass; it waits for INBOX to be known, at the latest from the
+    /// first account pass's folder list), and again after an account pass when its task ended,
+    /// which it does by itself only in a panic.
     fn start_idle(&mut self) {
         let offered = self
             .conn
             .as_ref()
             .is_some_and(|conn| conn.caps().has("IDLE"));
-        if !offered || self.idling() || self.inbox.borrow().is_none() {
+        if !offered || self.idling() {
             return;
         }
         if let Some(Err(ended)) = self.idle.take().and_then(FutureExt::now_or_never)
@@ -1252,6 +1405,14 @@ async fn idle(
             }
         }
         let seen = signals.borrow().reconnects;
+        // INBOX first: an account new to the store learns it from its first account pass.
+        let mut known = inbox.clone();
+        let wait = async move { known.wait_for(Option::is_some).await.is_ok() };
+        match race(&signals, seen, wait).await {
+            Ok(true) => {}
+            Ok(false) | Err(Interrupt::Stop(_)) => return,
+            Err(Interrupt::Reconnect) => continue,
+        }
         let conn = match race(&signals, seen, log_in(&shared, &settings)).await {
             Ok(Ok(conn)) => conn,
             Ok(Err(failure)) => {
@@ -1280,7 +1441,12 @@ async fn idle(
             seen,
         };
         match watch.keep_current(conn).await {
-            Kept::Lost => failures += 1,
+            // A connection that passed was a working one: losing it (the server's restart, a
+            // stalled inline fetch) starts the backoff afresh, at once and then doubling, as
+            // the command connection's good pass does. Counted on, every such loss in a long
+            // session added to a backoff that grew to `backoff_max` for the rest of it.
+            Kept::Lost { passed: true } => failures = 1,
+            Kept::Lost { passed: false } => failures += 1,
             Kept::Reconnect => failures = 0,
             Kept::Stopped => return,
             Kept::Logout(conn, wait) => {
@@ -1293,7 +1459,10 @@ async fn idle(
 
 /// How the IDLE connection's loop ended.
 enum Kept {
-    Lost,
+    /// The connection was lost; `passed`: after a pass went through on it.
+    Lost {
+        passed: bool,
+    },
     Reconnect,
     Stopped,
     Logout(Box<Connection>, Duration),
@@ -1322,15 +1491,18 @@ impl Idling<'_> {
         }
     }
 
-    /// A pass, NOOP (another pass if it reported a change), IDLE; again on every wake.
+    /// A pass and new mail's bodies, NOOP (another pass if it or that body fetch reported a
+    /// change), IDLE; again on every wake.
     async fn keep_current(&self, mut conn: Connection) -> Kept {
+        // A pass went through on this connection: losing it later isn't a failure to connect.
+        let mut passed = false;
         loop {
             let Some(folder) = *self.inbox.borrow() else {
                 return Kept::Stopped;
             };
             let every = self.config.progress_every;
             let status = self.status;
-            let passed = race(
+            let outcome = race(
                 self.signals,
                 self.seen,
                 imap::sync_folder(
@@ -1343,13 +1515,51 @@ impl Idling<'_> {
                 ),
             )
             .await;
-            match passed {
+            match outcome {
                 Ok(Ok(report)) => {
+                    passed = true;
                     let stored = report.stats.stored;
+                    let arrived: Vec<MessageId> = report
+                        .arrived
+                        .iter()
+                        .flat_map(|arrived| arrived.messages.iter().copied())
+                        .collect();
                     discard(self.shared, report.orphaned_blobs).await;
-                    // Progress showed the account syncing; the pass is over.
-                    if self.status.current() == Some(SyncStatus::Syncing) {
+                    // Progress showed the account syncing; the pass is over (unless the
+                    // account pass beside it is still at work: it says so when it ends).
+                    if self.status.current() == Some(SyncStatus::Syncing) && !self.status.passing()
+                    {
                         self.status.set(SyncStatus::Synced);
+                    }
+                    // New mail opens at once: its small bodies come on this connection, INBOX
+                    // still open, before it idles again (the fork's Superhuman pass).
+                    if !arrived.is_empty() {
+                        let fetched = race(
+                            self.signals,
+                            self.seen,
+                            bodies::fetch_arrived(
+                                self.shared,
+                                &mut conn,
+                                folder,
+                                arrived,
+                                self.config.inline_bodies,
+                            ),
+                        )
+                        .await;
+                        match fetched {
+                            Ok(Ok(())) => {}
+                            // Lost, or cut off inside its FETCH (`inline_bodies`: the connection
+                            // is then in no known state): it connects again, and the fetch's
+                            // claim hands what it had left to the body connection.
+                            Ok(Err(BodyFetchError::Imap(error))) if error.is_connection() => {
+                                tracing::info!(account = self.account.0, %error, "the IDLE connection's bodies failed");
+                                return Kept::Lost { passed };
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(account = self.account.0, %error, "new mail's bodies couldn't be kept");
+                            }
+                            Err(interrupt) => return Self::interrupted(interrupt, conn),
+                        }
                     }
                     if stored > 0 {
                         bodies::prefetch(self.shared);
@@ -1357,14 +1567,19 @@ impl Idling<'_> {
                 }
                 Ok(Err(error)) => {
                     tracing::info!(account = self.account.0, %error, "the IDLE connection's pass failed");
-                    return Kept::Lost;
+                    return Kept::Lost { passed };
                 }
                 Err(interrupt) => return Self::interrupted(interrupt, conn),
+            }
+            // The body fetch read a notice (mail that came meanwhile) that no NOOP or IDLE will
+            // repeat: another pass, not IDLE on a stale INBOX.
+            if conn.noticed {
+                continue;
             }
             match race(self.signals, self.seen, conn.noop()).await {
                 Ok(Ok(true)) => continue,
                 Ok(Ok(false)) => {}
-                Ok(Err(_)) => return Kept::Lost,
+                Ok(Err(_)) => return Kept::Lost { passed },
                 Err(interrupt) => return Self::interrupted(interrupt, conn),
             }
             let signals = self.signals.clone();
@@ -1385,7 +1600,7 @@ impl Idling<'_> {
                 }
                 Err(error) => {
                     tracing::info!(account = self.account.0, %error, "IDLE ended without the server");
-                    return Kept::Lost;
+                    return Kept::Lost { passed };
                 }
             }
         }

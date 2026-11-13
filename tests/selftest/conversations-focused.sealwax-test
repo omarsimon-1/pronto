@@ -1,0 +1,134 @@
+# Conversation rows at the app's own defaults (Focused, one row a conversation; the Superhuman
+# pass, phase B; docs/superhuman/conversations.md). The list opens with its cursor on the first
+# conversation, laid out behind it, unseen and unread. A filter keeps the selected conversation
+# where it still lists it, the keyboard focus with it; else the cursor goes to the first row,
+# and the focus with it (no ring on another row). Enter opens the conversation in the list's
+# place at its first unread message, read; j goes on to the next conversation from there;
+# Escape, or a click on Back, comes back to the list on that row. Every message is fictional.
+# Run: tools/headless.sh 62 target/debug/pronto --self-test tests/selftest/conversations-focused.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+conversation-account Alex alex.berg@example.test
+conversation-add singles
+conversation-add typical
+conversation-add trip
+# The window shows the account's Inbox as soon as its folders are there (phase C's first view),
+# so the samples come into it one at a time and the cursor stays on the first to come, which the
+# later ones push down: a cursor never moves under the user (without the two lines below it sits
+# on row 2). Opened again, the Inbox opens filled, its cursor on the first row: how a view
+# opens is what this script checks.
+folder archive
+folder inbox
+assert-view-mode focused
+assert-action-state win.group-by-conversation true
+assert-list-count 26
+assert-label list-subtitle "26 · Alex"
+
+# The cursor on the first conversation, laid out unseen behind the list: nothing is read.
+assert-list-selected 0
+assert-row-conversation 0 trip-1
+wait-until assert-reader-warm true
+assert-reader-on-screen false
+sleep 300
+assert-list-row 0 unread true
+focus list
+assert-focus-row 0
+screenshot $DIR/../../.local/selftest/conversations-focused.png
+
+# Show Unread Only keeps the conversation under the cursor, which it lists, the focus on it.
+key <Shift>u
+assert-list-filter unread
+assert-list-count 2
+assert-list-selected 0
+assert-selected-conversation trip-1
+assert-focus-row 0
+key j
+assert-selected-conversation typical-1
+key <Shift>u
+assert-list-filter all
+assert-list-selected 1
+assert-selected-conversation typical-1
+assert-focus-row 1
+# A read conversation isn't listed unread: the cursor goes to the first row, the focus too.
+list-select 4
+assert-list-row 4 unread false
+key <Shift>u
+assert-list-count 2
+assert-list-selected 0
+assert-focus-row 0
+key <Shift>u
+assert-list-filter all
+
+# Enter opens the conversation in the list's place, at its first unread message, read.
+list-select 0
+focus list
+key Return
+assert-pane reader
+wait-until assert-conversation selected trip-5
+assert-reader-on-screen true
+wait-until assert-list-row 0 unread false
+# j: the next conversation, at its first unread message, still in the list's place.
+key j
+assert-list-selected 1
+wait-until assert-conversation selected typical-3
+assert-pane reader
+# Escape: back to the list, on that row. The focus may be in the message's WebView, which hands
+# a key it doesn't use back to the window once its web process has answered: a moment later
+# under load, so the checks wait for it (as a11y-window's do).
+key Escape
+wait-until assert-pane list
+assert-list-selected 1
+wait-until assert-focus-row 1
+# Back by a click after j and j: the focus on the row the reader showed last, no ring on the
+# row it was opened from.
+key Return
+assert-pane reader
+key j
+key j
+assert-list-selected 3
+click reader-back
+assert-pane list
+assert-list-selected 3
+wait-until assert-focus-row 3
+
+# A notification's click on the conversation the reader has laid out already (row 0, read now:
+# at its newest message) opens it at the notification's message, not where the reader had it.
+list-select 0
+wait-until assert-conversation selected trip-6
+conversation-open-at 0 trip-3
+assert-pane reader
+wait-until assert-conversation selected trip-3
+assert-list-selected 0
+key Escape
+wait-until assert-pane list
+
+# Group by Conversation off: a row a message, the selection on the message shown.
+grouping messages
+assert-list-count 38
+assert-action-state win.group-by-conversation false
+grouping conversations
+assert-list-count 26
+
+# A reply that comes in under the cursor (the conversation laid out behind the list, read, here
+# at a notification's message) opens where it starts now, its first unread message, not where
+# the reader had it, the reply a collapsed row (phase C's review); it is read once on screen.
+# The reader follows the conversation in place until then.
+list-select 0
+conversation-open-at 0 trip-3
+wait-until assert-conversation selected trip-3
+key Escape
+wait-until assert-pane list
+assert-list-selected 0
+conversation-reply trip
+wait-until assert-list-row 0 unread true
+assert-conversation selected trip-3
+focus list
+key Return
+assert-pane reader
+wait-until assert-conversation selected trip-reply-1
+wait-until assert-conversation focus trip-reply-1 body
+wait-until assert-list-row 0 unread false
+key Escape
+wait-until assert-pane list

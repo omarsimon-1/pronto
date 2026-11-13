@@ -1,6 +1,8 @@
 //! Turns a stored message into what the reader shows, off the GTK thread: the body (HTML with
 //! its style, remote-image flag and inline parts, plain text with format=flowed joined, or why
-//! it can't be shown), the attachment cards, and whether it is signed (ML-064).
+//! it can't be shown), the attachment cards, and whether it is signed (ML-064). The raw message
+//! is parsed once for all of it (`message::Parsed`); the reader keeps what this returns
+//! ([`super::cache`]), so a message shown again isn't read or parsed again.
 
 use super::engine::{InlinePart, InlineParts, percent_decode};
 use super::protection::Unreadable;
@@ -12,6 +14,7 @@ use sealwax_domain::model::{Attachment, MessageDetail, MessageId};
 use sealwax_domain::reading::{self, Encryption, InlinePgp, Signature};
 use sealwax_domain::theme::BodyStyle;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// A message references at most this many inline parts; more are left out.
 pub const MAX_INLINE_PARTS: usize = 64;
@@ -21,7 +24,8 @@ pub const MAX_INLINE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub enum Body {
     Html {
-        html: String,
+        /// Shared, not copied, by the prepared-body cache and the card that shows it.
+        html: Arc<str>,
         style: BodyStyle,
         remote_images: bool,
         parts: InlineParts,
@@ -58,7 +62,8 @@ pub fn prepare(detail: &MessageDetail, raw: Option<&[u8]>) -> Prepared {
             signed: None,
         };
     };
-    let inspection = reading::inspect(raw);
+    let parsed = message::Parsed::new(raw);
+    let inspection = parsed.inspect();
     let kept: Vec<Attachment> = detail
         .attachments
         .iter()
@@ -82,7 +87,7 @@ pub fn prepare(detail: &MessageDetail, raw: Option<&[u8]>) -> Prepared {
         };
     }
     if !detail.html_parts.is_empty() {
-        let html = join(raw, &detail.html_parts, "\n", &[]);
+        let html = join(&parsed, &detail.html_parts, "\n", &[]);
         if html_is_encrypted(&html) {
             return Prepared {
                 body: Body::Unreadable(Unreadable::Encrypted(Encryption::InlinePgp)),
@@ -91,7 +96,7 @@ pub fn prepare(detail: &MessageDetail, raw: Option<&[u8]>) -> Prepared {
             };
         }
         let referenced = cid_references(&html);
-        let parts = inline_parts(detail.summary.id, raw, &kept, &referenced);
+        let parts = inline_parts(detail.summary.id, &parsed, &kept, &referenced);
         let scan = html_scan::scan(&html);
         let attachments = kept
             .into_iter()
@@ -106,7 +111,7 @@ pub fn prepare(detail: &MessageDetail, raw: Option<&[u8]>) -> Prepared {
                 },
                 remote_images: scan.remote_images,
                 parts,
-                html,
+                html: Arc::from(html),
             },
             attachments,
             signed: inspection.signed,
@@ -119,7 +124,7 @@ pub fn prepare(detail: &MessageDetail, raw: Option<&[u8]>) -> Prepared {
             signed: inspection.signed,
         };
     }
-    let text = join(raw, &detail.text_parts, "\n\n", &inspection.flowed);
+    let text = join(&parsed, &detail.text_parts, "\n\n", &inspection.flowed);
     let (body, signed) = match reading::inline_pgp(&text) {
         Some(InlinePgp::Encrypted) => (
             Body::Unreadable(Unreadable::Encrypted(Encryption::InlinePgp)),
@@ -139,11 +144,16 @@ pub fn prepare(detail: &MessageDetail, raw: Option<&[u8]>) -> Prepared {
 }
 
 /// The text of the body parts at `indexes`, in order, format=flowed parts joined.
-fn join(raw: &[u8], indexes: &[u32], separator: &str, flowed: &[(u32, Flowed)]) -> String {
+fn join(
+    parsed: &message::Parsed<'_>,
+    indexes: &[u32],
+    separator: &str,
+    flowed: &[(u32, Flowed)],
+) -> String {
     indexes
         .iter()
         .filter_map(|index| {
-            let text = message::part(raw, *index)?.text?;
+            let text = parsed.part(*index)?.text?;
             Some(match flowed.iter().find(|(part, _)| part == index) {
                 Some((_, format)) => flowed::decode(&text, *format),
                 None => text,
@@ -187,7 +197,7 @@ fn shown_inline(attachment: &Attachment, referenced: &HashSet<String>) -> bool {
 /// (ML-044); the engine's part loader fetches them when the body asks.
 fn inline_parts(
     message: MessageId,
-    raw: &[u8],
+    parsed: &message::Parsed<'_>,
     attachments: &[Attachment],
     referenced: &HashSet<String>,
 ) -> InlineParts {
@@ -204,7 +214,7 @@ fn inline_parts(
             tracing::debug!(cap = MAX_INLINE_PARTS, "reader: inline parts left out");
             break;
         }
-        let Some(part) = message::part(raw, attachment.part) else {
+        let Some(part) = parsed.part(attachment.part) else {
             continue;
         };
         if part.data.is_empty() {

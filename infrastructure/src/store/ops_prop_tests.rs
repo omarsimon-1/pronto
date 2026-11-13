@@ -216,6 +216,16 @@ impl Harness {
 
     fn reopen(&mut self) {
         self.views.clear();
+        // A store opens once at a time (its lock file): the old one closes first, with a
+        // stand-in in its place meanwhile.
+        let stand_in = Store::open(
+            &self.path.with_extension("stand-in"),
+            StoreOptions::default(),
+        )
+        .unwrap();
+        std::mem::replace(&mut self.store, stand_in)
+            .close()
+            .unwrap();
         let store = Store::open(&self.path, StoreOptions::default()).unwrap();
         std::mem::replace(&mut self.store, store).close().unwrap();
         self.open_views();

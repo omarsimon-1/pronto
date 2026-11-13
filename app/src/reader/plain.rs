@@ -2,8 +2,9 @@
 //! WebView. Links are found in the text (`sealwax_domain::links::find`: http(s), `www.`,
 //! mailto and bare addresses, never `javascript:`, `file:`, `data:` or relative targets), show
 //! their target in the reader's status strip on hover, and open through the reader's vetted
-//! opener. Quoted lines are muted, and when the page asks, the trailing quoted history
-//! collapses behind a "…" toggle (`sealwax_domain::quotes`).
+//! opener. Quoted lines are muted, and when the page asks (always, since the fork's Superhuman
+//! pass), the trailing quoted history collapses behind a quiet "•••" pill
+//! (`sealwax_domain::quotes`).
 
 use super::links::Links;
 use super::view::{Hover, Link};
@@ -114,6 +115,9 @@ pub fn message_text(
 pub fn shown_text(widget: &gtk::Widget) -> String {
     let mut stack = vec![widget.clone()];
     while let Some(widget) = stack.pop() {
+        if widget.has_css_class(super::STAGED) {
+            continue;
+        }
         if let Some(view) = reader_text(&widget) {
             let buffer = view.buffer();
             return buffer
@@ -140,6 +144,9 @@ pub fn links_in(widget: &gtk::Widget) -> Vec<String> {
     let mut found = Vec::new();
     let mut stack = vec![widget.clone()];
     while let Some(widget) = stack.pop() {
+        if widget.has_css_class(super::STAGED) {
+            continue;
+        }
         if let Some(view) = reader_text(&widget) {
             let buffer = view.buffer();
             let mut iter = buffer.start_iter();
@@ -187,7 +194,7 @@ fn colour(view: &gtk::TextView, theme: &Theme) {
     });
 }
 
-/// Hides the text from char `start` to the end behind a "…" toggle placed where it starts.
+/// Hides the text from char `start` to the end behind a "•••" toggle placed where it starts.
 fn collapse(view: &gtk::TextView, start: i32) {
     let buffer = view.buffer();
     let Some(hidden) = buffer.create_tag(Some(HIDDEN_TAG), &[("invisible", &true)]) else {
@@ -201,10 +208,10 @@ fn collapse(view: &gtk::TextView, start: i32) {
         &buffer.iter_at_offset(start + 1),
         &buffer.end_iter(),
     );
-    // A label child, not the button's own label: GTK names a button by its own label ("…"),
+    // A label child, not the button's own label: GTK names a button by its own label ("•••"),
     // over the label property a screen reader should hear.
     let toggle = gtk::Button::builder()
-        .child(&gtk::Label::new(Some("…")))
+        .child(&gtk::Label::new(Some("•••")))
         .tooltip_text("Show quoted text")
         .css_classes(["text-button", "sw-quote-toggle"])
         .build();

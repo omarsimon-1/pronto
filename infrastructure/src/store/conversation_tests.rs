@@ -106,6 +106,25 @@ fn shown(conversation: &Conversation) -> Vec<MessageId> {
 }
 
 #[test]
+fn a_conversation_has_its_rows_subject_whatever_message_is_read() {
+    let fx = local();
+    // The first message stored names the conversation, as its list row does; the reader's
+    // heading says it whichever message the conversation is read from (phase C's visual QA:
+    // the heading took the first unread message's subject).
+    let mut first = mail(fx.inbox, 1, "a", None, 10);
+    first.headers.subject = "Harbor & Pine, issue 40".into();
+    let mut later = mail(fx.inbox, 2, "b", Some("a"), 20);
+    later.headers.subject = "Re: Orbit Coffee, issue 47".into();
+    let ids = ingest(&fx.store, vec![first, later]);
+    for id in &ids {
+        assert_eq!(
+            conversation(&fx.store, *id).subject,
+            "Harbor & Pine, issue 40"
+        );
+    }
+}
+
+#[test]
 fn oldest_first_by_date_then_id_with_each_folders_role() {
     let fx = local();
     // Arrival order isn't date order: a first sync goes newest first.

@@ -1,15 +1,15 @@
-//! Check for Updates (ADR-021 amendment, 2026-10-20): the version GitHub names as Sealwax's latest
+//! Check for Updates (ADR-021 amendment, 2026-10-20): the version GitHub names as Pronto's latest
 //! release against the running one, and the command that installs it. The tag comes from the
 //! network and ends up in a command the user pastes into a terminal, so only `vX.Y.Z` with
 //! plain numbers is read, and the command is built from the numbers, never from the tag's text.
 
 use std::fmt;
 
-/// Sealwax's public repository, whose releases carry the package.
-pub const REPOSITORY: &str = "PixDevsApps/sealwax";
+/// Pronto's repository, whose releases carry the package.
+pub const REPOSITORY: &str = "omarsimon-1/pronto";
 
 /// The name every release gives its package (`tools/release.py`'s `STABLE_NAME`).
-pub const PACKAGE: &str = "sealwax-x86_64.pkg.tar.zst";
+pub const PACKAGE: &str = "pronto-x86_64.pkg.tar.zst";
 
 /// A release's version: three plain numbers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -52,7 +52,7 @@ impl fmt::Display for Version {
     }
 }
 
-/// The running Sealwax against the latest release.
+/// The running Pronto against the latest release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// The running version is the latest release.
@@ -75,9 +75,9 @@ pub fn compare(running: Version, latest: Version) -> Outcome {
 /// package to `/tmp` and installs it with pacman, which replaces the version installed.
 pub fn update_command(version: Version) -> String {
     format!(
-        "curl -L -o /tmp/sealwax.pkg.tar.zst \
+        "curl -L -o /tmp/pronto.pkg.tar.zst \
          https://github.com/{REPOSITORY}/releases/download/{}/{PACKAGE} \
-         && sudo pacman -U /tmp/sealwax.pkg.tar.zst",
+         && sudo pacman -U /tmp/pronto.pkg.tar.zst",
         version.tag()
     )
 }
@@ -136,9 +136,9 @@ mod tests {
     fn the_command_installs_that_release() {
         assert_eq!(
             update_command(v(0, 6, 0)),
-            "curl -L -o /tmp/sealwax.pkg.tar.zst \
-             https://github.com/PixDevsApps/sealwax/releases/download/v0.6.0/\
-             sealwax-x86_64.pkg.tar.zst && sudo pacman -U /tmp/sealwax.pkg.tar.zst"
+            "curl -L -o /tmp/pronto.pkg.tar.zst \
+             https://github.com/omarsimon-1/pronto/releases/download/v0.6.0/\
+             pronto-x86_64.pkg.tar.zst && sudo pacman -U /tmp/pronto.pkg.tar.zst"
         );
     }
 

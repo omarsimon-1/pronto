@@ -1,0 +1,50 @@
+# The contact pane's cost to j, k, archive, Enter and Escape (docs/superhuman/contact.md; not run
+# by CI, like every perf-* script): perf-reader's rounds at the app's own defaults (Focused, the
+# conversation in the list's place at 1440x900, where the pane shows beside it), with the pane
+# and without it (Contact Details off), alternating, on a 2,000-message fictional store. The
+# pane fills after the frame that shows the conversation, so the times should match. With a
+# release build:
+#   cargo build --release -p pronto -p sealwax-fixtures
+#   tools/headless.sh 67 target/release/pronto --self-test tests/selftest/perf-contact.sealwax-test
+
+desktop tiling
+layout-defaults app
+fixtures --count 2000 --seed 7 --folders spread
+resize 1440 900
+list-wait
+list-select 0
+focus list
+wait-until assert-reader-warm true
+
+# Enter and Escape: with the pane, without it, with it.
+measure-open 6
+action win.contact-details
+measure-open 6
+action win.contact-details
+measure-open 6
+
+# j, k and archive in the open conversation: with the pane, without it, with it, without it.
+focus list
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-shown contact-pane true
+measure-leave j 30
+measure-leave k 15
+measure-leave e 10
+action win.contact-details
+wait-until assert-shown contact-pane false
+measure-leave j 30
+measure-leave k 15
+measure-leave e 10
+action win.contact-details
+wait-until assert-shown contact-pane true
+measure-leave j 30
+measure-leave k 15
+measure-leave e 10
+action win.contact-details
+wait-until assert-shown contact-pane false
+measure-leave j 30
+measure-leave k 15
+measure-leave e 10
+perf-memory "end"
+perf-report

@@ -12,6 +12,13 @@ pub trait MessageSource {
     /// The reads one message needs, sent together; `None` while no store is open.
     fn read(&self, id: MessageId) -> Option<Reads>;
 
+    /// The message alone, without its raw message: a message the reader prepared before is
+    /// checked against it (the raw message it came from still stored) instead of read and
+    /// parsed again. `None` while no store is open, or for a source with only [`Self::read`].
+    fn detail(&self, _id: MessageId) -> Option<Reply<Versioned<Option<MessageDetail>>>> {
+        None
+    }
+
     /// The reader showed the body of `id` at `at` (Unix seconds): the disk cap keeps the bodies
     /// opened last (ML-044).
     fn opened(&self, _id: MessageId, _at: i64) {}
@@ -75,6 +82,10 @@ impl MessageSource for Store {
         })
     }
 
+    fn detail(&self, id: MessageId) -> Option<Reply<Versioned<Option<MessageDetail>>>> {
+        Some(self.message(id))
+    }
+
     fn opened(&self, id: MessageId, at: i64) {
         let _ = self.touch_body(id, at);
     }
@@ -114,6 +125,11 @@ impl MessageSource for crate::mailbox::Mailbox {
     fn read(&self, id: MessageId) -> Option<Reads> {
         self.store()
             .and_then(|store| MessageSource::read(&*store, id))
+    }
+
+    fn detail(&self, id: MessageId) -> Option<Reply<Versioned<Option<MessageDetail>>>> {
+        self.store()
+            .and_then(|store| MessageSource::detail(&*store, id))
     }
 
     fn opened(&self, id: MessageId, at: i64) {

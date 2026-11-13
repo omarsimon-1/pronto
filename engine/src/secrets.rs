@@ -120,10 +120,82 @@ impl KeyringStore {
             .await
             .map_err(|_| SecretError::Timeout(OPEN_TIMEOUT))?
             .map_err(keyring_error)?;
-        Ok(Self {
+        let store = Self {
             keyring,
             application: application.to_owned(),
-        })
+        };
+        // Only the installed app migrates real credentials. Debug builds and test IDs
+        // keep their existing isolation from the user's accounts.
+        // A failed copy must not cost the session its keyring: secrets kept in memory would be
+        // gone at the next start. The marker is written only by a completed pass and each item
+        // is copied only where missing, so the next launch tries again.
+        if application == "io.github.omarsimon1.Pronto"
+            && let Err(error) = store.migrate_from("io.github.omarsimon1.Dispatchy").await
+        {
+            tracing::warn!(
+                "could not copy Dispatchy's keyring items, trying again at the next launch: {error}"
+            );
+        }
+        Ok(store)
+    }
+
+    /// Copy each missing password and refresh token, then leave a marker in the keyring.
+    /// This makes retries safe and prevents a later sign-out/removal from resurrecting
+    /// an old credential. Nothing, including the marker, is written to a plain file.
+    async fn migrate_from(&self, legacy: &str) -> Result<(), SecretError> {
+        self.ensure_unlocked().await?;
+        let marker = [
+            ("application", self.application.as_str()),
+            ("migration", "dispatchy-v1"),
+        ];
+        if !self
+            .keyring
+            .search_items(&marker)
+            .await
+            .map_err(keyring_error)?
+            .is_empty()
+        {
+            return Ok(());
+        }
+        let items = self
+            .keyring
+            .search_items(&[("application", legacy)])
+            .await
+            .map_err(keyring_error)?;
+        for item in items {
+            let attributes = item.attributes().await.map_err(keyring_error)?;
+            let Some(account) = attributes.get("account") else {
+                continue;
+            };
+            let kind = match attributes.get("kind").map(String::as_str) {
+                Some("password") => SecretKind::Password,
+                Some("refresh-token") => SecretKind::RefreshToken,
+                _ => continue,
+            };
+            let target = self.attributes(account, kind);
+            if self
+                .keyring
+                .search_items(&target)
+                .await
+                .map_err(keyring_error)?
+                .is_empty()
+            {
+                let secret = item.secret().await.map_err(keyring_error)?;
+                self.keyring
+                    .create_item("Pronto migrated account", &target, secret, false)
+                    .await
+                    .map_err(keyring_error)?;
+            }
+        }
+        self.keyring
+            .create_item(
+                "Pronto migration completed",
+                &marker,
+                oo7::Secret::blob(b"complete"),
+                true,
+            )
+            .await
+            .map_err(keyring_error)
     }
 
     async fn ensure_unlocked(&self) -> Result<(), SecretError> {
@@ -277,7 +349,7 @@ mod tests {
             .store(
                 account,
                 SecretKind::Password,
-                "Sealwax test password",
+                "Pronto test password",
                 b"hunter2",
             )
             .await
@@ -286,7 +358,7 @@ mod tests {
             .store(
                 account,
                 SecretKind::RefreshToken,
-                "Sealwax test token",
+                "Pronto test token",
                 b"token-1",
             )
             .await
@@ -295,7 +367,7 @@ mod tests {
             .store(
                 account,
                 SecretKind::RefreshToken,
-                "Sealwax test token",
+                "Pronto test token",
                 b"token-2",
             )
             .await
@@ -364,13 +436,90 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "needs a private Secret Service (run under tools/headless.sh)"]
+    fn keyring_migration_copies_missing_items_and_never_resurrects_deleted_ones() {
+        runtime().block_on(async {
+            let old = KeyringStore::open("io.github.omarsimon1.Dispatchy.MigrationTest")
+                .await
+                .unwrap();
+            let new = KeyringStore::open("io.github.omarsimon1.Pronto.MigrationTest")
+                .await
+                .unwrap();
+            for store in [&old, &new] {
+                store
+                    .keyring
+                    .delete(&[("application", store.application.as_str())])
+                    .await
+                    .unwrap();
+            }
+            old.store("a", SecretKind::Password, "fictional", b"old-password")
+                .await
+                .unwrap();
+            old.store("a", SecretKind::RefreshToken, "fictional", b"old-token")
+                .await
+                .unwrap();
+            new.store("a", SecretKind::Password, "fictional", b"new-password")
+                .await
+                .unwrap();
+            new.migrate_from(&old.application).await.unwrap();
+            assert_eq!(
+                new.read("a", SecretKind::Password)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .as_slice(),
+                b"new-password"
+            );
+            assert_eq!(
+                new.read("a", SecretKind::RefreshToken)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .as_slice(),
+                b"old-token"
+            );
+            assert_eq!(
+                old.read("a", SecretKind::Password)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .as_slice(),
+                b"old-password"
+            );
+            assert_eq!(
+                old.read("a", SecretKind::RefreshToken)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .as_slice(),
+                b"old-token"
+            );
+            new.delete_account("a").await.unwrap();
+            new.migrate_from(&old.application).await.unwrap();
+            assert!(
+                new.read("a", SecretKind::RefreshToken)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            for store in [&old, &new] {
+                store
+                    .keyring
+                    .delete(&[("application", store.application.as_str())])
+                    .await
+                    .unwrap();
+            }
+        });
+    }
+
     /// Talks to the live Secret Service; run with
     /// `cargo test -p sealwax-engine -- --ignored keyring_round_trip` in a desktop session.
     #[test]
     #[ignore = "needs the session's Secret Service"]
     fn keyring_round_trip() {
         runtime().block_on(async {
-            let store = KeyringStore::open("io.github.pixdevsapps.Sealwax.Devel.test")
+            let store = KeyringStore::open("io.github.omarsimon1.Pronto.Devel.test")
                 .await
                 .unwrap();
             round_trip(&store).await;
@@ -383,7 +532,7 @@ mod tests {
     #[ignore = "needs a session bus without a Secret Service"]
     fn falls_back_to_memory_without_a_keyring() {
         runtime().block_on(async {
-            let secrets = Secrets::open("io.github.pixdevsapps.Sealwax.Devel.test").await;
+            let secrets = Secrets::open("io.github.omarsimon1.Pronto.Devel.test").await;
             assert!(!secrets.is_persistent());
             round_trip(&secrets).await;
         });

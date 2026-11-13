@@ -3,7 +3,7 @@
 # that says what it is and the states its role needs (assert-accessible), Tab and Shift+Tab
 # (real key presses) go round each step's fields and buttons and stay in the dialog, and Escape
 # goes back a step and closes on the first. Every address, name and server is fictional.
-# Run: tools/headless.sh 71 target/debug/sealwax --self-test tests/selftest/a11y-setup.sealwax-test
+# Run: tools/headless.sh 71 target/debug/pronto --self-test tests/selftest/a11y-setup.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -121,7 +121,7 @@ engine-reply detected microsoft
 assert-setup step microsoft
 assert-accessible dialog
 assert-accessible-state setup-microsoft-button disabled true
-write-file $TMP/config/sealwax/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
+write-file $TMP/config/pronto/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
 wait-until assert-sensitive setup-microsoft-button true
 assert-accessible dialog
 setup-click setup-microsoft-button
@@ -138,7 +138,7 @@ assert-announced none
 setup-click setup-microsoft-button
 engine-expect sign-in address=kari@outlook.example.test
 wait-until assert-shown setup-still-waiting true
-assert-announced "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Sealwax first: see the user guide."
+assert-announced "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Pronto first: see the user guide."
 assert-accessible dialog
 assert-accessible-name setup-cancel Cancel
 setup-key escape
@@ -163,6 +163,8 @@ engine-expect verify address=kari@example.test
 engine-reply verified ok
 engine-expect add-account address=kari@example.test
 engine-reply added ok
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 wait-until assert-setup open false
 action win.remove-account
 assert-shown remove-account true

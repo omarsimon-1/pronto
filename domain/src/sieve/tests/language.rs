@@ -427,7 +427,7 @@ fn every_refused_extension_is_named() {
         assert!(message.contains(&format!("\"{name}\"")), "{message}");
     }
     let (_, _, message) = error("require \"kari@example.test with spaces\";");
-    assert_eq!(message, "an extension Sealwax doesn't know");
+    assert_eq!(message, "an extension Pronto doesn't know");
 }
 
 #[test]

@@ -1,7 +1,7 @@
-//! Other processes for the self-test, from Stet's session self-test: a second `sealwax` that
-//! hands its command line to this instance (`spawn`); Sealwax instances of their own to signal
+//! Other processes for the self-test, from Stet's session self-test: a second `pronto` that
+//! hands its command line to this instance (`spawn`); Pronto instances of their own to signal
 //! (`spawn-bg`, `signal`, `wait-process`); D-Bus calls to this instance (`bus-open`,
-//! `bus-activate`); and a private D-Bus bus whose only service directory holds Sealwax's own test
+//! `bus-activate`); and a private D-Bus bus whose only service directory holds Pronto's own test
 //! service file, for D-Bus activation (`test-bus-*`).
 
 use super::{Harness, StepResult, WAIT_TIMEOUT, blocking, equal};
@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-/// How long a background Sealwax may take to end once asked.
+/// How long a background Pronto may take to end once asked.
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// A background Sealwax quits by itself after this long, should a test lose track of it.
+/// A background Pronto quits by itself after this long, should a test lose track of it.
 const SAFETY_EXIT_MS: &str = "120000";
 
 const APPLICATION: &str = "org.freedesktop.Application";
@@ -28,7 +28,7 @@ const APPLICATION: &str = "org.freedesktop.Application";
 pub struct TestBus {
     daemon: Child,
     address: String,
-    /// The id the activated Sealwax registers.
+    /// The id the activated Pronto registers.
     app_id: String,
     /// Its configuration, data, state and cache directories.
     home: PathBuf,
@@ -45,7 +45,7 @@ impl Drop for TestBus {
 }
 
 impl Harness {
-    /// A second `sealwax` with this instance's id, as a user in another terminal would run it:
+    /// A second `pronto` with this instance's id, as a user in another terminal would run it:
     /// it forwards its command line here and exits with `expected`.
     pub(super) async fn spawn(&self, args: &[String], expected: i32) -> StepResult {
         let exe = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -66,13 +66,13 @@ impl Harness {
             return Ok(());
         }
         Err(format!(
-            "sealwax exited with {}, wanted {expected}: {}",
+            "pronto exited with {}, wanted {expected}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
         ))
     }
 
-    /// A Sealwax of its own in the background: its own id (`<this id>.<name>`) and folders under
+    /// A Pronto of its own in the background: its own id (`<this id>.<name>`) and folders under
     /// `$TMP/<name>/`, its output in `$TMP/<name>.out` and `.err`.
     pub(super) fn spawn_bg(&self, name: &str, args: &[String]) -> StepResult {
         let app_id = format!("{}.{name}", self.app_id);
@@ -90,7 +90,7 @@ impl Harness {
         Ok(())
     }
 
-    /// `sealwax args…` in `$TMP`, its output in `$TMP/<name>.out` and `.err`.
+    /// `pronto args…` in `$TMP`, its output in `$TMP/<name>.out` and `.err`.
     fn command(&self, name: &str, args: &[String]) -> Result<Command, String> {
         let exe = std::env::current_exe().map_err(|error| error.to_string())?;
         let output = |extension: &str| {
@@ -190,7 +190,7 @@ impl Harness {
 
     /// Starts a private `dbus-daemon` whose only service directory is `$TMP/testbus/services`,
     /// holding one service file for the id `<this id>.Activated` that runs this executable with
-    /// `--gapplication-service`, as the installed `.service` file does. That Sealwax gets
+    /// `--gapplication-service`, as the installed `.service` file does. That Pronto gets
     /// folders of its own under `$TMP/activated`; the bus's and its output go to
     /// `$TMP/testbus/daemon.out` and `daemon.err`.
     pub(super) async fn start_test_bus(&self) -> StepResult {
@@ -237,8 +237,8 @@ impl Harness {
             &format!(
                 "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN\"\n \
                  \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">\n\
-                 <!-- Sealwax's activation self-test: its one service directory holds only \
-                 Sealwax's own test service file. -->\n\
+                 <!-- Pronto's activation self-test: its one service directory holds only \
+                 Pronto's own test service file. -->\n\
                  <busconfig>\n  <type>session</type>\n  <keep_umask/>\n  <listen>{address}</listen>\n  \
                  <auth>EXTERNAL</auth>\n  <servicedir>{}</servicedir>\n  \
                  <policy context=\"default\">\n    <allow send_destination=\"*\" eavesdrop=\"true\"/>\n    \
@@ -275,7 +275,7 @@ impl Harness {
         Ok(())
     }
 
-    /// `sealwax args…` on the test bus with the activated id, as a terminal there would run it.
+    /// `pronto args…` on the test bus with the activated id, as a terminal there would run it.
     pub(super) fn test_bus_spawn(&self, name: &str, args: &[String]) -> StepResult {
         let mut command = self.command(name, args)?;
         {
@@ -322,12 +322,12 @@ impl Harness {
         .await?
     }
 
-    /// Sends `signal` to the Sealwax that owns the activated id on the test bus.
+    /// Sends `signal` to the Pronto that owns the activated id on the test bus.
     pub(super) async fn test_bus_signal(&self, signal: &str) -> StepResult {
         let (address, app_id) = self.test_bus()?;
         let pid = blocking(move || owner_pid(&address, &app_id))
             .await?
-            .ok_or("no Sealwax owns the activated id")?;
+            .ok_or("no Pronto owns the activated id")?;
         send_signal(pid, signal)
     }
 
@@ -338,7 +338,7 @@ impl Harness {
             .await?
     }
 
-    /// Stops the test bus; a Sealwax it started that still runs is stopped first, and fails the
+    /// Stops the test bus; a Pronto it started that still runs is stopped first, and fails the
     /// step.
     pub(super) async fn stop_test_bus(&self) -> StepResult {
         let Some(bus) = self.bus.take() else {
@@ -350,13 +350,13 @@ impl Harness {
             .ok()
             .flatten();
         if let Some(pid) = leftover {
-            println!("  # stopping the activated Sealwax (process {pid}) that still runs");
+            println!("  # stopping the activated Pronto (process {pid}) that still runs");
             let _ = send_signal(pid, "KILL");
         }
         drop(bus);
         match leftover {
             Some(pid) => Err(format!(
-                "the activated Sealwax (process {pid}) was still running"
+                "the activated Pronto (process {pid}) was still running"
             )),
             None => Ok(()),
         }
@@ -377,7 +377,7 @@ impl Harness {
 
     pub(super) async fn check_bus_owner(&self, wanted: bool) -> StepResult {
         equal(
-            "activated Sealwax on the test bus",
+            "activated Pronto on the test bus",
             self.test_bus_owned().await?,
             wanted,
         )
@@ -399,7 +399,7 @@ fn object_path(app_id: &str) -> String {
     format!("/{}", app_id.replace('.', "/").replace('-', "_"))
 }
 
-/// Configuration, data, state and cache folders of their own under `home`, so another Sealwax
+/// Configuration, data, state and cache folders of their own under `home`, so another Pronto
 /// never touches the user's.
 fn xdg_environment(home: &Path) -> Vec<(&'static str, String)> {
     let dir = |name: &str| home.join(name).to_string_lossy().into_owned();
@@ -524,15 +524,17 @@ fn proc_status(pid: u32) -> Option<Proc> {
     })
 }
 
-/// `assert-web-sandbox`: `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS` is gone from Sealwax's
-/// environment, and every WebKit web process Sealwax started runs in WebKit's sandbox: started
+/// `assert-web-sandbox`: `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS` is gone from Pronto's
+/// environment, and every WebKit web process Pronto started runs in WebKit's sandbox: started
 /// by bubblewrap, in a PID namespace of its own (M9). Without the sandbox a web process is
-/// Sealwax's own child, in Sealwax's namespaces.
-pub(super) fn web_sandbox() -> StepResult {
+/// Pronto's own child, in Pronto's namespaces.
+/// Every web process runs in WebKit's sandbox; with `wanted`, there are that many (the reader's
+/// and the composer's: one each since the fork's phase B, whatever the cards).
+pub(super) fn web_sandbox(wanted: Option<usize>) -> StepResult {
     let mut problems = Vec::new();
     if std::env::var_os(crate::config::SANDBOX_OFF_ENV).is_some() {
         problems.push(format!(
-            "{} is in Sealwax's environment",
+            "{} is in Pronto's environment",
             crate::config::SANDBOX_OFF_ENV
         ));
     }
@@ -579,6 +581,9 @@ pub(super) fn web_sandbox() -> StepResult {
             "web processes outside the sandbox: {}",
             outside.join(", ")
         ));
+    }
+    if let Some(wanted) = wanted.filter(|wanted| *wanted != web.len()) {
+        problems.push(format!("{} web processes run, not {wanted}", web.len()));
     }
     if problems.is_empty() {
         println!(

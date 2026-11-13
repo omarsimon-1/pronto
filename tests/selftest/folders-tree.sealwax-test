@@ -7,7 +7,7 @@
 # a folder under a folded one opens it; a folded folder counts its subfolders' unread mail with
 # its own (2026-10-19). The folder row's menu offers New Subfolder, Rename and Delete Folder
 # where they apply, the account heading's New Folder. Every name is fictional.
-# Run: tools/headless.sh 81 target/debug/sealwax --self-test tests/selftest/folders-tree.sealwax-test
+# Run: tools/headless.sh 81 target/debug/pronto --self-test tests/selftest/folders-tree.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -29,7 +29,7 @@ folder inbox Work
 assert-sidebar-tree Work "Inbox,>Kvitteringer,>>2026,Drafts,Sent,Archive,Junk,Trash"
 action nav.more::account-1
 assert-sidebar-tree Work "Inbox,>Kvitteringer,>>2026,Drafts,Sent,Archive,Junk,Trash,Arkiv 2019,Kunder,>Acme,>Fjord,Prosjekter/Høst"
-wait-until assert-file-contains $TMP/state/sealwax/layout.toml "more_open = [\"work\"]\n"
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "more_open = [\"work\"]\n"
 assert-folder-level Work:inbox 1
 assert-folder-level Work:INBOX/Kvitteringer 2
 assert-folder-level Work:INBOX/Kvitteringer/2026 3
@@ -46,10 +46,10 @@ folder-arrow Work:Kunder
 assert-sidebar-tree Work "Inbox,>Kvitteringer,>>2026,Drafts,Sent,Archive,Junk,Trash,Arkiv 2019,Kunder,Prosjekter/Høst"
 assert-folder-expanded Work:Kunder false
 assert-label list-title Inbox
-wait-until assert-file-contains $TMP/state/sealwax/layout.toml "[folded]\nwork = [\"Kunder\"]\n"
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "[folded]\nwork = [\"Kunder\"]\n"
 folder-arrow Work:Kunder
 assert-folder-expanded Work:Kunder true
-wait-until assert-file-lacks $TMP/state/sealwax/layout.toml "[folded]"
+wait-until assert-file-lacks $TMP/state/pronto/layout.toml "[folded]"
 
 # From the keyboard: Left folds, Right opens, on a folder with subfolders only.
 focus-folder Work:INBOX/Kvitteringer

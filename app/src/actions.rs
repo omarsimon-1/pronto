@@ -1,6 +1,7 @@
 //! The registry's actions in GTK (ADR-017): GActions on the application and the window,
-//! application accelerators, and scoped shortcuts on the list, reader and composer widgets.
-//! Nothing here decides what exists; it only wires up `sealwax_domain::actions`.
+//! application accelerators, scoped shortcuts on the list, reader and composer widgets, and the
+//! window's keys that yield to the focused widget (`Scope::Window`: Ctrl+K, on the window in the
+//! bubble phase). Nothing here decides what exists; it only wires up `sealwax_domain::actions`.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -279,16 +280,35 @@ impl Dispatch {
             .filter(|(_, at)| now.duration_since(*at) <= SEQUENCE_TIMEOUT)
             .map(|(key, _)| key.as_str())
     }
+
+    /// Whether `key` does something here: a command's own key, the first key of a sequence,
+    /// or the second of the sequence waiting for it.
+    fn handles(&self, key: &str, now: Instant) -> bool {
+        self.singles.contains_key(key)
+            || self.sequences.contains_key(key)
+            || self
+                .pending(now)
+                .and_then(|first| self.sequences.get(first))
+                .is_some_and(|seconds| seconds.contains_key(key))
+    }
 }
 
 /// The scoped shortcuts of one scope (ADR-017): one-key shortcuts, two-key sequences and the
 /// scope's keys with modifiers. Every widget they are attached to shares one list of
-/// shortcuts, which [`ScopedShortcuts::update`] refills when `keys.toml` changes.
+/// shortcuts, which [`ScopedShortcuts::update`] refills when `keys.toml` changes. The window's
+/// (`Scope::Window`) are the keys that yield, attached to the window in the bubble phase: they
+/// run after every focused widget that doesn't keep the key.
 pub struct ScopedShortcuts {
     scope: Scope,
     model: gio::ListStore,
     dispatch: Rc<RefCell<Dispatch>>,
+    /// Hear of a key whose command is off now ([`ScopedShortcuts::connect_refused`]).
+    refused: Rc<RefCell<Vec<Refused>>>,
 }
+
+/// Told of a command whose key was pressed while it is off; `true` when it said why, which
+/// keeps the key.
+type Refused = Rc<dyn Fn(ActionId) -> bool>;
 
 impl ScopedShortcuts {
     pub fn new(scope: Scope, keymap: &Keymap) -> Self {
@@ -296,6 +316,7 @@ impl ScopedShortcuts {
             scope,
             model: gio::ListStore::new::<gtk::Shortcut>(),
             dispatch: Rc::new(RefCell::new(Dispatch::default())),
+            refused: Rc::default(),
         };
         shortcuts.update(keymap);
         shortcuts
@@ -308,6 +329,19 @@ impl ScopedShortcuts {
     /// The shortcuts every attached controller uses.
     pub fn model(&self) -> &gio::ListStore {
         &self.model
+    }
+
+    /// Whether the scope's shortcuts act on `key` (canonical: `<Control>a`) now.
+    pub fn handles(&self, key: &str) -> bool {
+        self.dispatch.borrow().handles(key, Instant::now())
+    }
+
+    /// Runs `handler` with the command of a key pressed while the command is off (it doesn't
+    /// apply to the selection): it may say why, and returns whether it did, which keeps the key
+    /// (phase C: `h` where nothing can be reminded). Otherwise the key goes on, as before. Each
+    /// handler connected is asked in turn until one says why.
+    pub fn connect_refused(&self, handler: impl Fn(ActionId) -> bool + 'static) {
+        self.refused.borrow_mut().push(Rc::new(handler));
     }
 
     /// The first key of a sequence waiting for its second, such as `g`.
@@ -331,6 +365,7 @@ impl ScopedShortcuts {
                     return None;
                 };
                 let dispatch = self.dispatch.clone();
+                let refused = self.refused.clone();
                 let action = gtk::CallbackAction::new(move |widget, _| {
                     let outcome = dispatch.borrow_mut().press(&key, Instant::now());
                     match outcome {
@@ -340,7 +375,13 @@ impl ScopedShortcuts {
                             let named = gtk::NamedAction::new(&action.detailed_name());
                             let ran =
                                 named.activate(gtk::ShortcutActionFlags::empty(), widget, None);
-                            if ran || sequence {
+                            let handlers = if ran {
+                                Vec::new()
+                            } else {
+                                refused.borrow().clone()
+                            };
+                            let explained = handlers.iter().any(|handler| handler(action));
+                            if ran || sequence || explained {
                                 glib::Propagation::Stop
                             } else {
                                 glib::Propagation::Proceed
@@ -363,7 +404,46 @@ impl ScopedShortcuts {
         widget: &impl IsA<gtk::Widget>,
         phase: gtk::PropagationPhase,
     ) -> gtk::ShortcutController {
-        let controller = gtk::ShortcutController::for_model(&self.model);
+        self.attach_model(widget, phase, &self.model)
+    }
+
+    /// [`ScopedShortcuts::attach`] in the bubble phase for a pane beside the scope's own (the
+    /// folder list beside the message list), without the scope's Tab and Shift+Tab, which stay
+    /// the keyboard focus's there, and without its Enter and Space, which are that pane's
+    /// rows' and buttons' own (GtkListBox activates a row and lets the key go on: Enter on a
+    /// folder also opened the selected message).
+    pub fn attach_beside(&self, widget: &impl IsA<gtk::Widget>) -> gtk::ShortcutController {
+        let filter = gtk::CustomFilter::new(|item| {
+            let key = item
+                .downcast_ref::<gtk::Shortcut>()
+                .and_then(gtk::Shortcut::trigger)
+                .and_downcast::<gtk::KeyvalTrigger>()
+                .map(|trigger| trigger.keyval());
+            !matches!(
+                key,
+                Some(
+                    gdk::Key::Tab
+                        | gdk::Key::ISO_Left_Tab
+                        | gdk::Key::KP_Tab
+                        | gdk::Key::Return
+                        | gdk::Key::KP_Enter
+                        | gdk::Key::ISO_Enter
+                        | gdk::Key::space
+                        | gdk::Key::KP_Space
+                )
+            )
+        });
+        let model = gtk::FilterListModel::new(Some(self.model.clone()), Some(filter));
+        self.attach_model(widget, gtk::PropagationPhase::Bubble, &model)
+    }
+
+    fn attach_model(
+        &self,
+        widget: &impl IsA<gtk::Widget>,
+        phase: gtk::PropagationPhase,
+        model: &impl IsA<gio::ListModel>,
+    ) -> gtk::ShortcutController {
+        let controller = gtk::ShortcutController::for_model(model);
         controller.set_propagation_phase(phase);
         controller.set_name(Some(&format!("sealwax-{}-keys", scope_name(self.scope))));
         widget.add_controller(controller.clone());
@@ -507,16 +587,153 @@ mod tests {
                 sequence: false
             }
         );
-        assert_eq!(dispatch.press("i", now), Outcome::Pass);
+        assert_eq!(dispatch.press("w", now), Outcome::Pass);
+        // Phase C: `i` shows or hides the contact pane, and after `g` it is still Go to Inbox.
+        assert_eq!(
+            dispatch.press("i", now),
+            Outcome::Run {
+                action: ActionId::ContactDetails,
+                sequence: false
+            }
+        );
+        assert_eq!(dispatch.press("g", now), Outcome::Arm);
+        assert_eq!(
+            dispatch.press("i", now),
+            Outcome::Run {
+                action: ActionId::GoToInbox,
+                sequence: true
+            }
+        );
         let mut reader = Dispatch::new(Scope::Reader, &Keymap::default());
-        assert_eq!(reader.press("space", now), Outcome::Pass);
+        // Space is Select's in the list alone: in the reader it scrolls a page.
+        assert_eq!(
+            reader.press("space", now),
+            Outcome::Run {
+                action: ActionId::ScrollMessagePageDown,
+                sequence: false
+            }
+        );
+        assert_eq!(
+            reader.press("<Shift>space", now),
+            Outcome::Run {
+                action: ActionId::ScrollMessagePageUp,
+                sequence: false
+            }
+        );
+        // The Superhuman pass: `u` marks read or unread wherever mail is; Escape goes back.
         assert_eq!(
             reader.press("u", now),
+            Outcome::Run {
+                action: ActionId::ToggleRead,
+                sequence: false
+            }
+        );
+        assert_eq!(
+            reader.press("Escape", now),
             Outcome::Run {
                 action: ActionId::BackToList,
                 sequence: false
             }
         );
+        for (key, action) in [
+            ("u", ActionId::ToggleRead),
+            ("h", ActionId::RemindMe),
+            ("<Shift>u", ActionId::ShowUnreadOnly),
+            ("<Shift>s", ActionId::ShowStarredOnly),
+            ("<Control>a", ActionId::SelectAll),
+        ] {
+            assert_eq!(
+                dispatch.press(key, now),
+                Outcome::Run {
+                    action,
+                    sequence: false
+                },
+                "{key}"
+            );
+        }
+        assert_eq!(reader.press("<Shift>u", now), Outcome::Pass);
+        assert_eq!(reader.press("<Control>a", now), Outcome::Pass);
+    }
+
+    #[test]
+    fn the_window_keeps_the_keys_that_yield() {
+        let mut window = Dispatch::new(Scope::Window, &Keymap::default());
+        let now = Instant::now();
+        // Ctrl+Shift+P yields too: in a draft it is Pop Draft Out or In (the fork's phase B).
+        assert_eq!(window.triggers(), ["<Control><Shift>p", "<Control>k"]);
+        assert_eq!(
+            window.press("<Control>k", now),
+            Outcome::Run {
+                action: ActionId::CommandPalette,
+                sequence: false
+            }
+        );
+        assert_eq!(window.press("e", now), Outcome::Pass);
+        // Its other keys are accelerators, and the composer keeps its own Ctrl+K.
+        assert!(
+            !Dispatch::new(Scope::List, &Keymap::default())
+                .triggers()
+                .contains(&"<Control>k".to_owned())
+        );
+        assert!(
+            Dispatch::new(Scope::Composer, &Keymap::default())
+                .triggers()
+                .contains(&"<Control>k".to_owned())
+        );
+        // keys.toml moves it like any other key.
+        let moved = Keymap::with_overrides([(
+            ActionId::CommandPalette,
+            vec![
+                sealwax_domain::keymap::Binding::parse("<Control>b").unwrap(),
+                sealwax_domain::keymap::Binding::parse("F1").unwrap(),
+            ],
+        )]);
+        assert_eq!(
+            Dispatch::new(Scope::Window, &moved).triggers(),
+            ["<Control>b"]
+        );
+    }
+
+    #[test]
+    fn the_new_go_to_sequences_resolve() {
+        let mut dispatch = Dispatch::new(Scope::Reader, &Keymap::default());
+        let now = Instant::now();
+        for (second, action) in [("e", ActionId::GoToArchive), ("l", ActionId::GoToFolder)] {
+            assert_eq!(dispatch.press("g", now), Outcome::Arm);
+            assert_eq!(
+                dispatch.press(second, now),
+                Outcome::Run {
+                    action,
+                    sequence: true
+                }
+            );
+        }
+    }
+
+    /// The list lets GtkListView's Ctrl+A and Ctrl+Shift+A through only to a command of its
+    /// own (`MessageList::selection_key`): Select All has Ctrl+A, nothing has Ctrl+Shift+A.
+    #[test]
+    fn the_list_knows_which_keys_are_its_own() {
+        let now = Instant::now();
+        let mut list = Dispatch::new(Scope::List, &Keymap::default());
+        assert!(list.handles("<Control>a", now));
+        assert!(!list.handles("<Control><Shift>a", now));
+        assert!(list.handles("g", now));
+        assert!(
+            !list.handles("t", now),
+            "a sequence's second key waits for its first"
+        );
+        assert_eq!(list.press("g", now), Outcome::Arm);
+        assert!(list.handles("t", now));
+        assert!(!list.handles("t", now + SEQUENCE_TIMEOUT * 2));
+        // keys.toml can give Select All Ctrl+Shift+A instead.
+        let moved = Keymap::with_overrides([(
+            ActionId::SelectAll,
+            vec![sealwax_domain::keymap::Binding::parse("<Control><Shift>a").unwrap()],
+        )]);
+        let list = Dispatch::new(Scope::List, &moved);
+        assert!(list.handles("<Control><Shift>a", now));
+        assert!(!list.handles("<Control>a", now));
     }
 
     #[test]
@@ -557,7 +774,7 @@ mod tests {
         let mut dispatch = Dispatch::new(Scope::List, &Keymap::default());
         let now = Instant::now();
         assert_eq!(dispatch.press("g", now), Outcome::Arm);
-        assert_eq!(dispatch.press("e", now), Outcome::Swallow);
+        assert_eq!(dispatch.press("y", now), Outcome::Swallow);
         assert_eq!(
             dispatch.press("e", now),
             Outcome::Run {
@@ -589,22 +806,40 @@ mod tests {
             "d",
             "j",
             "u",
+            "h",
+            "e",
+            "l",
             "Escape",
             "<Control>r",
             "question",
         ] {
             assert!(triggers.contains(&key.to_owned()), "{key}");
         }
-        assert!(!triggers.contains(&"space".to_owned()));
+        // Select's `x` is the list's alone; its Space scrolls a page here.
+        assert!(!triggers.contains(&"x".to_owned()));
+        assert!(triggers.contains(&"space".to_owned()));
+        assert!(triggers.contains(&"<Shift>space".to_owned()));
         assert!(
             !triggers.contains(&"<Control>n".to_owned()),
             "an accelerator"
         );
         assert!(triggers.contains(&"<Control><Shift>e".to_owned()));
+        // Enter in a conversation replies under it (the fork's phase B).
+        assert!(triggers.contains(&"Return".to_owned()));
         let composer = Dispatch::new(Scope::Composer, &Keymap::default());
         assert_eq!(
             composer.triggers(),
             [
+                "<Control><Alt>a",
+                "<Control><Shift>Return",
+                "<Control><Shift>a",
+                "<Control><Shift>b",
+                "<Control><Shift>c",
+                "<Control><Shift>d",
+                "<Control><Shift>f",
+                "<Control><Shift>l",
+                "<Control><Shift>o",
+                "<Control><Shift>p",
                 "<Control><Shift>v",
                 "<Control><Shift>z",
                 "<Control>Return",

@@ -3,7 +3,7 @@
 //! the content filter blocks every remote load until the user allows images; WebKit's
 //! prefetch and preconnect features are off, and a second filter blocks pings, DNS prefetch and
 //! preconnects whatever the user allowed; links and form submissions are intercepted in
-//! Sealwax's isolated world and every navigation is blocked as the backstop; new windows,
+//! Pronto's isolated world and every navigation is blocked as the backstop; new windows,
 //! dialogs, permissions, downloads, the file and colour choosers, fullscreen, printing and
 //! authentication are refused; the context menu keeps only copying. Rendering is on the CPU
 //! (`hardware-acceleration-policy` NEVER), and the height comes from a ResizeObserver in the
@@ -19,7 +19,7 @@ use std::rc::Rc;
 use webkit6::prelude::*;
 use webkit6::{ContextMenuAction, PolicyDecisionType, javascriptcore};
 
-/// The isolated script world Sealwax's helper scripts run in; page content can't see it.
+/// The isolated script world Pronto's helper scripts run in; page content can't see it.
 pub const WORLD: &str = "sealwax";
 
 /// No view grows taller than this; a taller body scrolls inside its view. S2: 16,000 px
@@ -38,7 +38,7 @@ const BLANK: &str = "<!DOCTYPE html><html><head></head><body></body></html>";
 /// quarters of the previous one and at most ten steps; then the height stops growing and the
 /// rest scrolls inside. A width change starts the count again.
 const HEIGHT_JS: &str = r#"(() => {
-  const load = SEALWAX_LOAD;
+  const load = PRONTO_LOAD;
   const post = (name, value) => window.webkit.messageHandlers[name].postMessage(value);
   let last = -1;
   let lastWidth = -1;
@@ -84,13 +84,13 @@ const HEIGHT_JS: &str = r#"(() => {
   else window.addEventListener('load', loaded, {once: true});
 })();"#;
 
-/// Hands every link activation to Sealwax instead of letting WebKit navigate: WebKit would
+/// Hands every link activation to Pronto instead of letting WebKit navigate: WebKit would
 /// otherwise connect to a clicked link's host (and send `<a ping>`) before `decide-policy` is
 /// asked (S2). Form submissions are cancelled the same way. The link's text goes along for
 /// the link-mismatch check (ML-062), and the link under the pointer or the keyboard focus is
 /// reported with its box, for the status strip and the warning (nothing is fetched).
 const LINKS_JS: &str = r#"(() => {
-  const load = SEALWAX_LOAD;
+  const load = PRONTO_LOAD;
   const find = (target) =>
     target instanceof Element ? target.closest('a[href], area[href], a[*|href]') : null;
   const describe = (link) => {
@@ -129,14 +129,15 @@ const LINKS_JS: &str = r#"(() => {
   document.addEventListener('focusout', (event) => hover(find(event.relatedTarget), true), true);
 })();"#;
 
-/// Collapses quoted history behind a "…" toggle (DESIGN.md "HTML mail inside the theme"), only
-/// when the page asks for it: the last quote container when no text follows it
+/// Collapses quoted history behind a "•••" toggle (DESIGN.md "HTML mail inside the theme"; a
+/// small pill in the theme's colours, `--sealwax-quote-fill` and `--sealwax-quote-text`), when
+/// the page asks for it: the last quote container when no text follows it
 /// (`blockquote[type=cite]`, Gmail's, Yahoo's, Thunderbird's prefix with its quote), and
 /// Outlook's reply header (`#divRplyFwdMsg`, `#appendonsend`, the "From:" block under a top
-/// border) with everything after it. The toggle is Sealwax's own element, handled here;
+/// border) with everything after it. The toggle is Pronto's own element, handled here;
 /// message scripts stay off. The state goes out as `quotes`; the height follows by itself.
 const QUOTES_JS: &str = r#"(() => {
-  const load = SEALWAX_LOAD;
+  const load = PRONTO_LOAD;
   const body = document.body;
   const post = (blocks, expanded) =>
     window.webkit.messageHandlers.quotes.postMessage({load, blocks, expanded});
@@ -187,13 +188,14 @@ const QUOTES_JS: &str = r#"(() => {
   }
   if (!hidden.length) { post(0, false); return; }
   const toggle = document.createElement('div');
-  toggle.textContent = '…';
+  toggle.textContent = '\u2022\u2022\u2022';
   toggle.setAttribute('role', 'button');
   toggle.setAttribute('tabindex', '0');
   toggle.setAttribute('data-sealwax-quote-toggle', '');
-  toggle.style.cssText = 'display:inline-block;margin:6px 0;padding:0 8px;border-radius:4px;' +
-    'background:rgba(128,128,128,.22);color:inherit;font:bold 13px/20px sans-serif;' +
-    'letter-spacing:1px;cursor:pointer;user-select:none';
+  toggle.style.cssText = 'display:inline-block;margin:10px 0 2px;padding:0 9px;' +
+    'border-radius:9px;background:var(--sealwax-quote-fill,rgba(128,128,128,.18));' +
+    'color:var(--sealwax-quote-text,inherit);font:bold 9px/16px sans-serif;' +
+    'letter-spacing:2px;cursor:pointer;user-select:none';
   hidden[0][0].parentNode.insertBefore(toggle, hidden[0][0]);
   let expanded = true;
   const show = (open) => {
@@ -231,7 +233,7 @@ const QUOTES_JS: &str = r#"(() => {
 /// Only the root's background and the body's clip change, so the layout never moves; the column
 /// is found again whenever the root's size changes. The state goes out as `margins`.
 const MARGINS_JS: &str = r#"(() => {
-  const load = SEALWAX_LOAD;
+  const load = PRONTO_LOAD;
   const root = document.documentElement;
   const body = document.body;
   const post = (fitted) => window.webkit.messageHandlers.margins.postMessage({load, fitted});
@@ -444,7 +446,7 @@ type Handler = Rc<dyn Fn(&ViewEvent)>;
 #[derive(Default)]
 struct State {
     /// `load_html` calls whose navigation decision hasn't come yet: those `about:blank`
-    /// navigations are Sealwax's own; every other navigation is refused.
+    /// navigations are Pronto's own; every other navigation is refused.
     expected: Cell<u32>,
     /// The current load; height and frame reports from an earlier document carry another.
     load: Cell<u64>,
@@ -577,7 +579,7 @@ impl MessageView {
         self.state.load.set(load);
         self.state.committed.set(false);
         self.ucm.remove_all_scripts();
-        let tagged = |script: &str| script.replace("SEALWAX_LOAD", &load.to_string());
+        let tagged = |script: &str| script.replace("PRONTO_LOAD", &load.to_string());
         let mut scripts = Vec::new();
         if self.state.fit_margins.get() {
             scripts.push(tagged(MARGINS_JS));
@@ -648,7 +650,7 @@ impl MessageView {
         self.view.stop_loading();
     }
 
-    /// Runs `body` (a function body) in Sealwax's isolated world.
+    /// Runs `body` (a function body) in Pronto's isolated world.
     pub async fn eval(&self, body: &str) -> Result<javascriptcore::Value, glib::Error> {
         self.view
             .call_async_javascript_function_future(body, None, Some(WORLD), None)
@@ -995,7 +997,7 @@ fn decide(decision: &webkit6::PolicyDecision, kind: PolicyDecisionType, state: &
 fn hardened_settings(fonts: &WebViewFonts) -> webkit6::Settings {
     let settings = webkit6::Settings::new();
     // Script markup is off: no message script runs. JavaScript itself stays on only for
-    // Sealwax's isolated-world helpers.
+    // Pronto's isolated-world helpers.
     settings.set_enable_javascript(true);
     settings.set_enable_javascript_markup(false);
     settings.set_auto_load_images(true);

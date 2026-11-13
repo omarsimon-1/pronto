@@ -5,7 +5,7 @@
 //! IMAP side is read with the plain testbed client. Needs the testbed running and seeded, one
 //! test at a time (the log test sets a subscriber for its thread):
 //!
-//! SEALWAX_TESTBED_CA=tools/testbed/certs/ca.pem cargo test -p sealwax-engine --release \
+//! PRONTO_TESTBED_CA=tools/testbed/certs/ca.pem cargo test -p sealwax-engine --release \
 //!   --test pop3_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -453,7 +453,7 @@ async fn a_second_session_while_one_holds_the_maildrop() {
 #[tokio::test]
 #[ignore = "needs the testbed: tools/testbed/up.sh and seed.sh"]
 async fn faults_through_the_proxy() {
-    let runs: usize = std::env::var("SEALWAX_POP3_SEEDS")
+    let runs: usize = std::env::var("PRONTO_POP3_SEEDS")
         .ok()
         .and_then(|runs| runs.parse().ok())
         .unwrap_or(5);

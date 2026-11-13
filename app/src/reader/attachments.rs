@@ -166,8 +166,8 @@ impl Card {
     fn new(reader: &Reader, message: MessageId, attachment: &Attachment) -> Rc<Card> {
         let name = rules::safe_file_name(attachment.name.as_deref(), &attachment.mime_type);
         let danger = rules::danger(attachment.name.as_deref(), &attachment.mime_type);
+        // The gap is the card's CSS border-spacing (GTK adds a Box's spacing to it).
         let root = gtk::Box::builder()
-            .spacing(10)
             .css_classes(["sw-attachment-card"])
             .build();
         root.set_widget_name("reader-attachment");
@@ -376,6 +376,7 @@ impl Card {
         }
         self.last.set(Some(action));
         let generation = self.next_generation();
+        let asked_on = inner.target.get();
         self.idle();
         let target = match action {
             Action::Save => match files::choose_save(&inner, "Save Attachment", &self.name).await {
@@ -406,8 +407,15 @@ impl Card {
         self.idle();
         match target {
             Some(file) => self.save_to(&inner, &file, bytes).await,
-            // An attachment that arrived after the user moved to another message isn't opened.
-            None if self.root.root().is_none() => {}
+            // An attachment that arrived after the user moved to another message isn't opened:
+            // the page it was asked on may still be laid out (left on screen while the next is
+            // read, or kept warm), so its card being in the window doesn't say it is wanted.
+            None if moved_on(
+                asked_on,
+                inner.target.get(),
+                inner.hidden.get(),
+                self.root.root().is_some(),
+            ) => {}
             None => self.open_from(&inner, bytes).await,
         }
     }
@@ -493,6 +501,18 @@ async fn download_all_cards(button: gtk::Button, cards: Vec<Rc<Card>>) {
     files::toast(&inner, &saved_text(saved, total, &place));
 }
 
+/// Whether the user left the message an attachment was asked to open on: the reader was told to
+/// show another (`now` is no longer `asked_on`) or nothing, its page is hidden while the next is
+/// read, or the attachment's card is out of the window.
+fn moved_on(
+    asked_on: Option<MessageId>,
+    now: Option<MessageId>,
+    hidden: bool,
+    in_window: bool,
+) -> bool {
+    hidden || !in_window || now.is_none() || now != asked_on
+}
+
 /// "Saved 3 attachments to Downloads", or how many of them.
 fn saved_text(saved: usize, total: usize, place: &str) -> String {
     match (saved, total) {
@@ -517,11 +537,11 @@ fn action_button(label: &str, name: &str) -> gtk::Button {
 fn warning(danger: Danger) -> &'static str {
     match danger {
         Danger::Program => {
-            "Sealwax won't open this file: it can run programs on your computer. Save it only \
+            "Pronto won't open this file: it can run programs on your computer. Save it only \
              if you trust the sender."
         }
         Danger::Disguised => {
-            "Sealwax won't open this file: its name hides what kind of file it is. Save it only \
+            "Pronto won't open this file: its name hides what kind of file it is. Save it only \
              if you trust the sender."
         }
     }
@@ -636,6 +656,17 @@ impl Reader {
 mod tests {
     use super::*;
     use sealwax_engine::api::BodyError;
+
+    #[test]
+    fn an_attachment_opens_only_on_the_message_it_was_asked_on() {
+        let (first, second) = (Some(MessageId(1)), Some(MessageId(2)));
+        assert!(!moved_on(first, first, false, true));
+        assert!(moved_on(first, second, false, true), "another message");
+        assert!(moved_on(first, None, false, true), "the reader was cleared");
+        assert!(moved_on(first, first, true, true), "the page is hidden");
+        assert!(moved_on(first, first, false, false), "the card is gone");
+        assert!(moved_on(None, None, false, true));
+    }
 
     #[test]
     fn failures_read_as_sentences() {

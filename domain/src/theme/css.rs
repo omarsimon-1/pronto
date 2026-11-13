@@ -1,18 +1,22 @@
 //! The generated application stylesheet: libadwaita's colour variables mapped as in
-//! DESIGN.md's token table, and Sealwax's own `--sw-*` variables that `app/src/style.css`
+//! DESIGN.md's token table, and Pronto's own `--sw-*` variables that `app/src/style.css`
 //! uses. Widgets never name a palette key; they use these variables through CSS classes.
 
 use super::Theme;
 use super::color::Rgb;
+use super::palette::Mode;
 use super::roles::avatar_index;
-use super::typography::css_family;
+use super::typography::{FONT_WEIGHTS, css_family};
 use super::webview::{PAPER, PAPER_TEXT};
 use crate::account::AccountColor;
 use std::fmt::Write as _;
 
 /// Component sizes from the approved mock at the default text size, in px; they scale with
-/// the spacing scale and become `--sw-size-<name>`.
-pub const COMPONENT_SIZES: [(&str, u32); 14] = [
+/// the spacing scale and become `--sw-size-<name>`. The message list's single-line row (the
+/// Superhuman pass, 2026-10-28): its height, the unread dot's gutter (the select mode's
+/// checkbox takes it) and the sender column. The date's column is sized by the list itself, for
+/// its widest label (phase B).
+pub const COMPONENT_SIZES: [(&str, u32); 17] = [
     ("avatar", 32),
     ("avatar-small", 24),
     ("avatar-large", 38),
@@ -27,7 +31,15 @@ pub const COMPONENT_SIZES: [(&str, u32); 14] = [
     ("attachment-type-width", 34),
     ("attachment-type-height", 40),
     ("empty-icon", 40),
+    ("list-row", 38),
+    ("list-gutter", 28),
+    ("list-sender", 180),
 ];
+
+/// How long the CSS fades on hover, press, focus and selection last, in ms (DESIGN.md
+/// "Motion": short fades of 150 ms at most, nothing that delays input). Off while the desktop
+/// asks for reduced motion (the app's `still` stylesheet).
+pub const MOTION_MS: u32 = 120;
 
 /// The CSS class that gives an avatar its tint: `sw-avatar-tint-<0..6>`.
 pub fn avatar_class(address: &str) -> String {
@@ -84,8 +96,8 @@ impl Theme {
         ]
     }
 
-    /// Sealwax's own variables, in output order: mail roles, control states, paper, avatar
-    /// tints, fonts, text sizes, spacing, component sizes and corners.
+    /// Pronto's own variables, in output order: mail roles, control states, paper, avatar
+    /// tints, fonts, weights, text sizes, spacing, component sizes and corners.
     pub fn sealwax_variables(&self) -> Vec<(String, String)> {
         let mail = &self.mail;
         let ui = &self.ui;
@@ -94,14 +106,24 @@ impl Theme {
         let mut push = |name: &str, value: String| variables.push((name.to_owned(), value));
 
         push("--sw-secondary-fg-color", mail.secondary_text.to_string());
-        push(
-            "--sw-hover-secondary-fg-color",
-            self.rows.hover_secondary_text.to_string(),
-        );
-        push(
-            "--sw-selected-secondary-fg-color",
-            self.rows.selected_secondary_text.to_string(),
-        );
+        // The rows' roles on the list's own surface, then as `--sw-window-*` on the window's,
+        // which style.css puts in their place while the list is alone in the window.
+        for (surface, rows) in [("", &self.rows), ("window-", &self.window_rows)] {
+            for (name, color) in [
+                ("hover-secondary-fg-color", rows.hover_secondary_text),
+                ("selected-secondary-fg-color", rows.selected_secondary_text),
+                ("row-hover-bg-color", rows.hover_background),
+                ("row-selected-bg-color", rows.selected_background),
+                ("read-fg-color", rows.read_text),
+                ("tertiary-fg-color", rows.tertiary_text),
+                ("hover-tertiary-fg-color", rows.hover_tertiary_text),
+                ("selected-tertiary-fg-color", rows.selected_tertiary_text),
+                ("draft-fg-color", rows.draft),
+                ("reminder-color", rows.reminder),
+            ] {
+                push(&format!("--sw-{surface}{name}"), color.to_string());
+            }
+        }
         push("--sw-star-color", mail.star.to_string());
         push("--sw-unread-color", mail.unread.to_string());
         push(
@@ -114,6 +136,14 @@ impl Theme {
         );
         push("--sw-error-soft-bg-color", ui.error_soft.to_string());
         push("--sw-warning-soft-bg-color", ui.warning_soft.to_string());
+        push("--sw-raised-bg-color", ui.raised.to_string());
+        push(
+            "--sw-raised-secondary-fg-color",
+            super::roles::raised_secondary_text(&self.palette, ui.raised, c).to_string(),
+        );
+        push("--sw-composer-bg-color", ui.composer.to_string());
+        push("--sw-primary-bg-color", ui.primary.to_string());
+        push("--sw-primary-fg-color", ui.primary_text.to_string());
         push("--sw-paper-bg-color", PAPER.to_string());
         push("--sw-paper-fg-color", PAPER_TEXT.to_string());
 
@@ -190,6 +220,9 @@ impl Theme {
         );
         push("--sw-font-mono", css_family(&fonts.monospace, "monospace"));
         push("--sw-font-sans", css_family(&fonts.sans, "sans-serif"));
+        for (name, weight) in self.font_weights() {
+            push(&format!("--sw-weight-{name}"), weight.to_string());
+        }
 
         let s = &self.scale;
         for (name, size) in [
@@ -211,12 +244,24 @@ impl Theme {
             push(&format!("--sw-size-{name}"), px(self.spacing.space(size)));
         }
 
+        push("--sw-motion", format!("{MOTION_MS}ms"));
         push("--window-radius", px(self.radius));
         push("--sw-radius", px(self.radius));
         push("--sw-radius-small", px(self.radius_small));
         let avatar_radius = if self.radius == 0 { 0 } else { 9999 };
         push("--sw-avatar-radius", px(avatar_radius));
         variables
+    }
+
+    /// [`FONT_WEIGHTS`] for this theme's mode.
+    pub fn font_weights(&self) -> impl Iterator<Item = (&'static str, u32)> {
+        let index = match self.mode() {
+            Mode::Dark => 0,
+            Mode::Light => 1,
+        };
+        FONT_WEIGHTS
+            .iter()
+            .map(move |(name, weights)| (*name, weights[index]))
     }
 
     /// The application-priority stylesheet: one `:root` block with every variable.
@@ -270,7 +315,7 @@ mod tests {
             format!("--accent-color: {};", p.accent),
             format!(
                 "--sw-secondary-fg-color: {};",
-                p.foreground.mix(p.background, 35)
+                p.foreground.mix(p.background, super::super::SECONDARY_MIX)
             ),
             format!("--sw-chip-selected-fg-color: {};", theme.mail.selected_chip),
             format!("--sw-star-color: {};", p.accent),
@@ -280,8 +325,32 @@ mod tests {
             "--sw-text-body: 12px;".to_owned(),
             "--sw-space-control-height: 28px;".to_owned(),
             "--sw-size-avatar: 32px;".to_owned(),
-            "--sw-font-chrome: monospace;".to_owned(),
-            "--sw-font-reading: sans-serif;".to_owned(),
+            "--sw-size-list-row: 38px;".to_owned(),
+            "--sw-size-list-sender: 180px;".to_owned(),
+            format!(
+                "--sw-row-selected-bg-color: {};",
+                theme.rows.selected_background
+            ),
+            format!("--sw-read-fg-color: {};", theme.rows.read_text),
+            format!("--sw-tertiary-fg-color: {};", theme.rows.tertiary_text),
+            format!(
+                "--sw-window-row-hover-bg-color: {};",
+                theme.window_rows.hover_background
+            ),
+            format!(
+                "--sw-window-row-selected-bg-color: {};",
+                theme.window_rows.selected_background
+            ),
+            format!(
+                "--sw-window-read-fg-color: {};",
+                theme.window_rows.read_text
+            ),
+            "--sw-font-chrome: \"Adwaita Sans\", sans-serif;".to_owned(),
+            "--sw-font-reading: \"Adwaita Sans\", sans-serif;".to_owned(),
+            "--sw-font-mono: monospace;".to_owned(),
+            "--sw-weight-regular: 500;".to_owned(),
+            "--sw-weight-bold: 700;".to_owned(),
+            "--sw-motion: 120ms;".to_owned(),
         ] {
             assert!(css.contains(&expected), "{expected}\n{css}");
         }

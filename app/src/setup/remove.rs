@@ -39,12 +39,12 @@ impl Removable {
     }
 }
 
-const BODY: &str = "Sealwax deletes the account's mail stored on this computer, its password in \
+const BODY: &str = "Pronto deletes the account's mail stored on this computer, its password in \
                     the keyring and its entry in accounts.toml. The mail on the server stays.";
 
 /// A POP3 account's: what it downloaded may be gone from the server, and its other folders
 /// never were there.
-const POP3_BODY: &str = "Sealwax deletes the account's mail stored on this computer, its \
+const POP3_BODY: &str = "Pronto deletes the account's mail stored on this computer, its \
                          password in the keyring and its entry in accounts.toml. This POP3 \
                          account's folders are only on this computer: its sent mail, its drafts \
                          and mail the server no longer has are gone for good.";

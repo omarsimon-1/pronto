@@ -1,6 +1,6 @@
 //! The ML-032 live check, for the lead to run under the user's authorization of 2026-10-05: the
 //! real engine service on scratch folders, the session's keyring under the test app-id
-//! `io.github.pixdevsapps.Sealwax.Devel.ml032`, Microsoft's sign-in page in the default browser
+//! `io.github.omarsimon1.Pronto.Devel.ml032`, Microsoft's sign-in page in the default browser
 //! (`xdg-open`) and the real Outlook servers.
 //!
 //! ```text
@@ -20,7 +20,7 @@
 //!
 //! `--forget` only deletes whatever an interrupted run left under the test app-id.
 //!
-//! The client ID comes from `SEALWAX_MICROSOFT_CLIENT_ID`, else from `config.toml`'s
+//! The client ID comes from `PRONTO_MICROSOFT_CLIENT_ID`, else from `config.toml`'s
 //! `[oauth.microsoft] client_id` (read, never written). The runner prints timings, counts,
 //! booleans and failure names only: never a token, a code, the address, the username, the page's
 //! URL or a folder name. The engine's own log lines (stderr, `RUST_LOG`, default `info`) carry
@@ -47,24 +47,25 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const APP_ID: &str = "io.github.pixdevsapps.Sealwax.Devel.ml032";
+const APP_ID: &str = "io.github.omarsimon1.Pronto.Devel.ml032";
 const SYNC_WAIT: Duration = Duration::from_secs(180);
 
 type Error = Box<dyn std::error::Error>;
 
 fn client_id() -> Result<String, Error> {
-    if let Ok(id) = std::env::var("SEALWAX_MICROSOFT_CLIENT_ID")
+    if let Ok(id) = std::env::var("PRONTO_MICROSOFT_CLIENT_ID")
         && !id.trim().is_empty()
     {
-        println!("client id: from SEALWAX_MICROSOFT_CLIENT_ID");
+        println!("client id: from PRONTO_MICROSOFT_CLIENT_ID");
         return Ok(id.trim().to_owned());
     }
     let text = std::fs::read_to_string(SealwaxDirs::from_env().config_file())?;
     let config = Config::parse(&text).map_err(|_| "config.toml has mistakes")?;
-    let id =
-        config.oauth.microsoft.client_id.ok_or(
-            "no client id: set SEALWAX_MICROSOFT_CLIENT_ID or [oauth.microsoft] client_id",
-        )?;
+    let id = config
+        .oauth
+        .microsoft
+        .client_id
+        .ok_or("no client id: set PRONTO_MICROSOFT_CLIENT_ID or [oauth.microsoft] client_id")?;
     println!("client id: from config.toml");
     Ok(id)
 }
@@ -127,6 +128,7 @@ fn start(dirs: &SealwaxDirs, client_id: &str) -> Result<Running, Error> {
         secrets: SecretBackend::Keyring,
         detect: DetectOptions::default(),
         microsoft_client_id: Some(client_id.to_owned()),
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig::default(),
     })?;

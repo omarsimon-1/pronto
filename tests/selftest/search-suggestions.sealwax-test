@@ -4,7 +4,7 @@
 # to the results), a click takes a row; Escape closes the list first and ends the search the
 # second time; the field keeps the focus and every key typed. Keys and clicks are real
 # (Broadway). Every name, address and message is fictional.
-# Run: tools/headless.sh 53 target/debug/sealwax --self-test tests/selftest/search-suggestions.sealwax-test
+# Run: tools/headless.sh 53 target/debug/pronto --self-test tests/selftest/search-suggestions.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -17,10 +17,13 @@ mail-add Personal:inbox 4h "Lunsj" "from=Kari Nordmann" read
 list-wait
 assert-list-count 3
 
-# The empty field shows the mock's placeholder and the Search key at its end.
-assert-search-key /
+# The field shows on demand (the Superhuman pass): empty, with the mock's placeholder and the
+# Search key at its end.
+assert-search-shown false
 focus search
+assert-search-shown true
 assert-focus search
+assert-search-key /
 assert-suggestions closed
 
 # One letter suggests nothing; two letters suggest the operators they start.
@@ -97,7 +100,7 @@ key Escape
 assert-field list-search ""
 assert-focus list
 assert-label list-title Inbox
-assert-search-key /
+assert-search-shown false
 
 # Down with the list closed lists every operator; each letter typed narrows the open list.
 focus search
@@ -130,8 +133,9 @@ assert-suggestion 0 after: "Sent on or after a day"
 click list-search-suggestion-0
 assert-field list-search after:
 # Broadway gives its keyboard focus to the surface clicked, here the popover's, and drops keys
-# for it once the popover hides; a click on the list's title gives it back to the window.
-click list-title
+# for it once the popover hides; a click on the field, past its text, gives it back to the
+# window (since phase B the field takes the list title's place in the header while it shows).
+click list-search
 assert-suggestions 4
 assert-suggestion 0 after:2026-10-07 Today
 assert-suggestion 1 after:2026-09-30 "The last 7 days"

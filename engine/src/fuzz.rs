@@ -1,5 +1,5 @@
 //! Entry points for the engine's fuzz targets in `fuzz/` (ML-093, docs/m9/security.md): the
-//! protocol parsers Sealwax wrote itself. The tests run them over the checked-in corpus, so a
+//! protocol parsers Pronto wrote itself. The tests run them over the checked-in corpus, so a
 //! crash once found stays fixed. Built only for tests and with the `fuzz` feature.
 
 pub use crate::imap::fuzz::imap;

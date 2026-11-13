@@ -5,14 +5,14 @@
 # goes once the account syncs. A password account that needs a sign-in gets the same banner
 # with "Type the password again" (ML-048; status-password.sealwax-test covers that flow). Every
 # address, name and link is fictional. Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 61 target/debug/sealwax --self-test tests/selftest/setup-microsoft-banner.sealwax-test
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/setup-microsoft-banner.sealwax-test
 
 desktop tiling
 resize 1440 900
 theme matte-black
 corners 0
 engine-attach
-write-file $TMP/config/sealwax/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
+write-file $TMP/config/pronto/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
 wait-until assert-setup client-id set
 assert-shown banner false
 
@@ -29,6 +29,8 @@ engine-expect sign-in address=kari@example.test account=none
 engine-reply signed-in ok kari@example.test
 engine-expect add-account auth=microsoft sign-in=last
 engine-reply added ok
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 assert-setup open false
 action win.add-account
 setup-type setup-address ola@example.test
@@ -56,7 +58,7 @@ engine-reply added ok
 assert-setup open false
 wait-until assert-label sidebar-summary "3 accounts · all synced"
 # accounts.toml, as the engine wrote it.
-write-file $TMP/config/sealwax/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n\n[[account]]\nkey = \"ola\"\nname = \"Ola Hansen\"\naddress = \"ola@example.test\"\n\n[account.imap]\nhost = \"mail.example.test\"\n\n[account.smtp]\nhost = \"mail.example.test\"\n\n[[account]]\nkey = \"anne\"\nname = \"Anne Berg\"\naddress = \"anne@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n"
+write-file $TMP/config/pronto/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n\n[[account]]\nkey = \"ola\"\nname = \"Ola Hansen\"\naddress = \"ola@example.test\"\n\n[account.imap]\nhost = \"mail.example.test\"\n\n[account.smtp]\nhost = \"mail.example.test\"\n\n[[account]]\nkey = \"anne\"\nname = \"Anne Berg\"\naddress = \"anne@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n"
 assert-shown banner false
 
 # A password account that needs its sign-in gets the banner, with its password (ML-048).
@@ -76,14 +78,14 @@ engine-reply sync-failed kari@example.test wrong-password
 wait-until assert-shown banner true
 assert-setup sign-in-needed kari
 assert-label banner-title "kari@example.test needs you to sign in again"
-assert-label banner-body "Microsoft ended the session. Sealwax keeps your mail; nothing syncs until you sign in."
+assert-label banner-body "Microsoft ended the session. Pronto keeps your mail; nothing syncs until you sign in."
 assert-label banner-primary "Sign in"
 assert-sensitive banner-primary true
 # Anne's too: still one banner, naming the first and counting the other.
 engine-reply sync-failed anne@example.test sign-in-declined
 assert-setup sign-in-needed kari,anne
 assert-label banner-title "kari@example.test needs you to sign in again"
-assert-label banner-body "Microsoft ended the session. Sealwax keeps your mail; nothing syncs until you sign in. 1 more account needs it too."
+assert-label banner-body "Microsoft ended the session. Pronto keeps your mail; nothing syncs until you sign in. 1 more account needs it too."
 # The look: across the window's top, the error tint with the text colour, the theme's fonts.
 assert-color banner-strip background error-soft
 assert-color banner-title text foreground
@@ -115,7 +117,7 @@ engine-expect sign-in address=kari@example.test provider=microsoft account=kari
 assert-setup step signing-in
 assert-label setup-caption "Sign in again"
 assert-label setup-title kari@example.test
-assert-label setup-subtitle "Sealwax keeps your mail; nothing syncs until you sign in."
+assert-label setup-subtitle "Pronto keeps your mail; nothing syncs until you sign in."
 assert-field setup-address kari@example.test
 assert-sensitive setup-address false
 assert-shown setup-name false
@@ -136,7 +138,7 @@ engine-expect cancel-sign-in sign-in=last
 setup-click setup-microsoft-button
 engine-expect sign-in address=kari@example.test account=kari
 wait-until assert-shown setup-still-waiting true
-assert-text-contains setup-still-waiting "your organization must approve Sealwax first"
+assert-text-contains setup-still-waiting "your organization must approve Pronto first"
 assert-setup focus setup-cancel
 setup-still-waiting-after 60000
 # Its Sign in again shows the open assistant.
@@ -166,7 +168,7 @@ assert-label banner-title "kari@example.test needs you to sign in again"
 engine-reply sync-finished kari@example.test
 assert-account-status kari@example.test synced
 wait-until assert-label banner-title "anne@example.test needs you to sign in again"
-assert-label banner-body "Microsoft ended the session. Sealwax keeps your mail; nothing syncs until you sign in."
+assert-label banner-body "Microsoft ended the session. Pronto keeps your mail; nothing syncs until you sign in."
 assert-setup sign-in-needed anne
 
 # Escape cancels Anne's sign-in, then closes the assistant: her banner stays.
@@ -193,7 +195,7 @@ engine-expect cancel-sign-in sign-in=last
 assert-setup open false
 
 # Without a client ID the assistant says how to set one and sends nothing.
-write-file $TMP/config/sealwax/config.toml ""
+write-file $TMP/config/pronto/config.toml ""
 wait-until assert-setup client-id none
 setup-click banner-primary
 assert-setup step microsoft

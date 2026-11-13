@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.omarsimon1.Pronto</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Pronto</name>
+  <summary>A fast, minimal email client for Omarchy</summary>
+  <description>
+    <p>Pronto is a native GTK email client with multiple accounts, offline mail,
+    keyboard navigation, safe message reading, and editable per-account signatures.</p>
+    <p>Pronto is a fork of Sealwax by Fredrick Thorsen and the Sealwax contributors.</p>
+  </description>
+  <launchable type="desktop-id">io.github.omarsimon1.Pronto.desktop</launchable>
+  <provides><binary>pronto</binary></provides>
+  <url type="homepage">https://github.com/omarsimon-1/pronto</url>
+  <content_rating type="oars-1.1"/>
+</component>

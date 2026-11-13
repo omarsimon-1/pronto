@@ -1,0 +1,36 @@
+# Switching the Split Inbox's sides at 100,000 messages (the fork's phase C,
+# docs/superhuman/split.md "UI"): Tab and Shift+Tab, from the key press to the first frame
+# painted with the other side's rows, with conversation rows in Focused, with message rows,
+# and in Split. Each switch must adopt the other side's view, opened ahead; what is left is
+# GTK's reset of a long list and the frame's paint. It prints the numbers, as perf-list does:
+# the bar (50 ms) is read from them on a quiet machine (split.md "Measured"), so the medians
+# are held only to 1 s here, which a switch gone badly wrong passes.
+#
+# Not part of tools/ci.sh (perf-*): it needs a release build and the perf-list fixture store:
+#   cargo build --release -p pronto -p sealwax-fixtures
+#   tools/headless.sh 36 target/release/pronto --self-test tests/selftest/perf-split.sealwax-test
+# The store is imported once into target/perf-list/data (about 40 s, 1.1 GB), as perf-list does,
+# and reused while it is there.
+
+desktop tiling
+layout-defaults app
+store-dir $DIR/../../target/perf-list/data
+fixtures --count 100000 --seed 1
+resize 1440 900
+list-wait
+split-inbox on
+list-wait
+assert-split-side important
+focus list
+sleep 1500
+measure-split Tab 20 1000
+measure-split <Shift>Tab 10 1000
+grouping messages
+list-wait
+sleep 800
+measure-split Tab 10 1000
+grouping conversations
+list-wait
+view-mode split
+sleep 800
+measure-split Tab 10 1000

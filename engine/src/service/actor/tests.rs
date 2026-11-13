@@ -42,6 +42,23 @@ impl Record {
     }
 }
 
+#[test]
+fn a_timer_toward_a_wall_clock_time_never_sleeps_long() {
+    use super::ops::{RECHECK, instant_at, wait_for};
+    let now = 1_790_000_000_000;
+    assert_eq!(wait_for(now + 1_500, now), Duration::from_millis(1_500));
+    assert_eq!(wait_for(now - 5, now), Duration::ZERO, "overdue: at once");
+    assert_eq!(wait_for(i64::MIN, now), Duration::ZERO);
+    // A send scheduled for tomorrow: the wall clock is asked again within the minute, so a
+    // suspend (which a sleeping timer doesn't count) delays it by no more.
+    assert_eq!(wait_for(now + 24 * 3_600_000, now), RECHECK);
+    assert_eq!(wait_for(i64::MAX, now), RECHECK);
+    assert!(RECHECK <= Duration::from_secs(60));
+    let before = Instant::now();
+    let at = instant_at(now + 24 * 3_600_000, now);
+    assert!(at >= before + RECHECK && at <= Instant::now() + RECHECK);
+}
+
 #[tokio::test]
 async fn a_panicking_actor_starts_again_after_a_growing_backoff() {
     let config = quick();

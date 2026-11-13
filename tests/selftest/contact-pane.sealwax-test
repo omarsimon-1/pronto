@@ -1,0 +1,240 @@
+# The contact pane (the fork's Superhuman pass, phase C; docs/superhuman/contact.md): an open
+# conversation shows the person behind it in the reading column's right margin, from the local
+# store alone: by default its latest sender who isn't me, else the sender of the message n or p
+# moves to. It never moves the 720 px column: it shows only where the margin holds it (Focused
+# from 1360 px; Split only with as much room), hides under an open composer card, and comes and
+# goes with Contact Details (i, the palette), which layout.toml remembers. Its address copies,
+# its Recent conversations open, its link searches all mail from them, and the keyboard reaches
+# it after the conversation, or with F6 (Next Pane) from anywhere. A wheel over it scrolls the
+# conversation. Every name and address is fictional.
+# Run: tools/headless.sh 67 target/debug/pronto --self-test tests/selftest/contact-pane.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+conversation-account Alex alex.berg@example.test
+conversation-add singles
+conversation-add typical
+conversation-add trip
+folder archive
+folder inbox
+assert-view-mode focused
+assert-action-state win.contact-details true
+
+# Laid out with the conversation under the cursor, behind the list: unseen.
+assert-list-selected 0
+assert-row-conversation 0 trip-1
+wait-until assert-reader-warm true
+wait-until assert-contact "Tomas Berg" tomas@example.test
+assert-shown contact-pane false
+
+# Enter: beside the conversation at once, the column where it always is, the scroller ending
+# at the column's gutter (its scrollbar between the two).
+focus list
+key Return
+assert-pane reader
+wait-until assert-conversation selected trip-5
+wait-until assert-shown contact-pane true
+assert-contact "Tomas Berg" tomas@example.test
+assert-contact-column 360 1080
+assert-aligned reader-back reader-page left
+assert-aligned reader-next reader-page right
+assert-contact-side right
+assert-width contact-pane 336
+assert-label contact-name "Tomas Berg"
+assert-label contact-address-text tomas@example.test
+assert-label contact-monogram TB
+assert-contact-history 7
+assert-contact-recent 5 "Notes from today" "Quick question" "Notes from today" "Quick question" "Spring workshop plans"
+assert-label contact-search-text "Search all mail from Tomas Berg"
+assert-labelled
+# The Recent rows: buttons in a list's items, so a screen reader says they can be pressed.
+assert-accessible-role contact-recent-0 button
+assert-accessible
+
+# F6 from the conversation goes to the pane, at its address, and Shift+F6 back to where the
+# focus was; the two take turns either way round, and Ctrl+Alt with an arrow does the same.
+wait-until assert-conversation focus trip-5 body
+key F6
+assert-focus contact-address
+key <Shift>F6
+assert-conversation focus trip-5 body
+key <Shift>F6
+assert-focus contact-address
+key F6
+assert-conversation focus trip-5 body
+key <Control><Alt>Right
+assert-focus contact-address
+key <Control><Alt>Left
+assert-conversation focus trip-5 body
+assert-contact "Tomas Berg" tomas@example.test
+
+
+# p and n: the sender of the message moved to.
+key p
+wait-until assert-contact "Sana Malik" sana@example.test
+key n
+wait-until assert-contact "Ingrid Solberg" ingrid@example.test
+assert-contact-column 360 1080
+# Into the pane and back with the keyboard is no move: the person stays.
+key F6
+assert-focus contact-address
+key <Shift>F6
+assert-focus reader-thread
+assert-contact "Ingrid Solberg" ingrid@example.test
+
+# The address copies, with a toast.
+click contact-address
+assert-clipboard ingrid@example.test
+assert-toast "Copied ingrid@example.test"
+
+# The keyboard reaches it after the conversation; hidden with the focus in it, the focus goes
+# back to the conversation's message.
+focus contact-address
+key Tab
+assert-focus contact-recent-0
+resize 1280 900
+wait-until assert-shown contact-pane false
+assert-contact-column 280 1000
+wait-until assert-conversation focus trip-5 body
+resize 1360 900
+wait-until assert-shown contact-pane true
+assert-contact-column 320 1040
+# The focus handed to the conversation was no move of the user's: the person shown stays.
+key p
+wait-until assert-contact "Sana Malik" sana@example.test
+focus contact-address
+resize 1280 900
+wait-until assert-shown contact-pane false
+wait-until assert-conversation focus trip-5 body
+resize 1360 900
+wait-until assert-shown contact-pane true
+wait-until assert-contact "Sana Malik" sana@example.test
+resize 1358 900
+wait-until assert-shown contact-pane false
+# Contact Details turned on without the room for it says why nothing shows.
+key i
+assert-action-state win.contact-details false
+key i
+assert-action-state win.contact-details true
+assert-toast "Contact details show in a wider window"
+resize 1440 900
+wait-until assert-shown contact-pane true
+
+# Contact Details: i hides it, the palette's command shows it again; layout.toml remembers.
+key i
+wait-until assert-shown contact-pane false
+assert-action-state win.contact-details false
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "contact = false\n"
+assert-contact-column 360 1080
+action win.contact-details
+wait-until assert-shown contact-pane true
+assert-action-state win.contact-details true
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "contact = true\n"
+
+# Right to left: the pane in the column's left margin, the column where it was.
+text-direction rtl
+wait-until assert-contact-side left
+assert-contact-column 360 1080
+text-direction ltr
+wait-until assert-contact-side right
+assert-contact-column 360 1080
+
+# A composer card open over the reader hides it; closed, it comes back.
+key c
+wait-until assert-composer count 1
+wait-until assert-shown contact-pane false
+composer-close
+wait-until assert-shown contact-pane true
+# Restoring the focus after closing the composer is no move of the user's: Sana stays.
+wait-until assert-contact "Sana Malik" sana@example.test
+
+# Choose Ingrid by a real press before opening one of her Recent conversations. The focus
+# restored to her message above must not silently select her for the contact pane.
+conversation-click-header trip-5
+wait-until assert-contact "Ingrid Solberg" ingrid@example.test
+# A Recent conversation opens in the list's place, at their message; the one left is listed.
+click contact-recent-0
+wait-until assert-conversation selected typical-9
+assert-pane reader
+wait-until assert-contact "Ingrid Solberg" ingrid@example.test
+wait-until assert-contact-recent 5 "Cabin trip in November?" "Notes from today" "Quick question" "Notes from today" "Quick question"
+
+# A wheel over the pane, which has nothing of its own to scroll, scrolls the conversation
+# beside it, a notch as far as over the conversation itself.
+assert-wheel-alike reader-margin contact-pane
+wheel-over contact-pane down 3
+wait-until assert-conversation at-top false
+wheel-over contact-pane up 8
+wait-until assert-conversation at-top true
+
+# Search all mail from them: the list shows the search's results, every folder's.
+click contact-search
+wait-until assert-pane list
+assert-search-shown true
+wait-until assert-list-count 6
+search-escape
+assert-search-shown false
+
+# A conversation all my own shows whom I wrote to, read from the store. That read's answer
+# comes off one of two reader threads, late or after a later one's: it is dropped once the
+# next conversation was asked for (here it is held until j has shown the next one).
+notify-mail mine1 sent "Dinner on Saturday?" read "from=Alex Berg" ago=1 "text=Are you free on Saturday?"
+contact-hold true
+folder sent
+assert-list-selected 0
+wait-until assert-contact-held 1
+focus list
+key Return
+assert-pane reader
+key j
+wait-until assert-contact "Tomas Berg" tomas@example.test
+contact-hold false
+assert-contact-held 0
+assert-contact "Tomas Berg" tomas@example.test
+# Back to it, unheld: its recipient.
+key k
+wait-until assert-contact Selftest selftest@example.test
+key Escape
+assert-pane list
+folder inbox
+
+# Split: the reader beside the list has the room only in a wide window.
+view-mode split
+folder inbox
+list-select 0
+assert-row-conversation 0 trip-1
+wait-until assert-reader-page message
+wait-until assert-reader-on-screen true
+assert-shown contact-pane false
+resize 1920 1080
+wait-until assert-shown contact-pane true
+wait-until assert-contact "Tomas Berg" tomas@example.test
+assert-contact-side right
+assert-aligned reader-next reader-page right
+
+# F6 in Split: the list, the conversation, the contact pane, round; Shift+F6 the other way.
+# With the sidebar beside them its folders come first, and the pane has no room then.
+focus list
+key F6
+assert-focus reader-thread
+key F6
+assert-focus contact-address
+key F6
+assert-focus list
+key <Shift>F6
+assert-focus contact-address
+key <Shift>F6
+assert-focus reader-thread
+key <Shift>F6
+assert-focus list
+action win.toggle-sidebar
+wait-until assert-shown contact-pane false
+key <Shift>F6
+assert-focus sidebar
+key F6
+assert-focus list
+key F6
+assert-focus reader-thread
+key F6
+assert-focus sidebar

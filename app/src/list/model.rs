@@ -1,19 +1,28 @@
 //! The message list's model: a lazy `gio::ListModel` + `gtk::SectionModel` over a store view or
-//! over search results (S3's model, on the M1 store).
+//! over search results (S3's model, on the M1 store), with one row per message or, since the
+//! Superhuman pass, one row per conversation (`ViewGrouping`, docs/superhuman/conversations.md).
 //!
+//! - **Rows** are the store's [`ListRow`]s, each known by its [`RowKey`]: the message, or the
+//!   conversation's thread. A conversation's row is placed and sectioned by its latest message.
 //! - **Paging.** A view's rows arrive in pages of 100 from the store's readers; until then a
 //!   position holds a placeholder item, filled in place. Nothing here runs SQL or blocks.
 //! - **Versions** (docs/m1/store.md): the model keeps the `store_version` it has applied. Change
 //!   events are applied strictly in order; a page applies only when its version matches; a newer
 //!   page waits until the events catch up, an older one is dropped (the list asks again for the
 //!   rows it still shows); a gap or a `Reload` opens the view again.
+//! - **Moves.** A conversation that a reply moves comes as a removal and an insertion of the same
+//!   thread. It keeps its item, and GTK is told the move as one `items-changed` over the rows
+//!   between ([`MOVE_SPAN`]): GtkMultiSelection then keeps it selected, and GtkListView keeps its
+//!   row widget and the keyboard focus on it (GTK 4.24 matches the items an `items-changed`
+//!   removes and adds by object). A longer move is told row by row and the list selects it again
+//!   by its key.
 //! - **Sections** come from the view's section counts and shift with every row that comes or
 //!   goes; they regroup when the day changes.
 //! - **First frame** (S6): after every reset GTK sees at most [`FIRST_ROWS`] rows, then the list
 //!   grows by [`GROW_STEP`] rows a frame ([`MessageModel::grow`]), so no single frame lays out the
 //!   ~205 rows GtkListView keeps realized.
-//! - **Search**: the store's newest matches, [`SEARCH_PAGE`] at a time, more as the list nears
-//!   the end; the filter chip applies to them here.
+//! - **Search**: the store's newest matches (or the conversations they are in), [`SEARCH_PAGE`]
+//!   at a time, more as the list nears the end; the filter applies to them here.
 
 use super::item::MessageItem;
 use super::sections::{Bounds, LABELS, Thresholds};
@@ -22,10 +31,10 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{gio, glib};
-use sealwax_domain::model::{FolderId, MessageId, MessageSummary, ThreadId};
+use sealwax_domain::model::{ConversationSummary, FolderId, MessageId, MessageSummary, ThreadId};
 use sealwax_infrastructure::store::{
-    ChangeEvent, OpenView, Page, Positioned, StoreError, StoreVersion, Versioned, ViewDiff,
-    ViewFilter, ViewHandle, ViewOpened, ViewSpec,
+    ChangeEvent, ListRow, OpenView, Page, Positioned, RowKey, Splice, StoreError, StoreVersion,
+    ViewDiff, ViewFilter, ViewGrouping, ViewHandle, ViewOpened, ViewSpec,
 };
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -35,10 +44,13 @@ use std::time::Duration;
 
 /// Rows per page request.
 pub const PAGE: u32 = 100;
-/// Rows the first frame after a reset shows: more than fit on any screen (14 at 1440 px, S6).
-pub const FIRST_ROWS: u32 = 40;
-/// Rows the list grows by each frame after that.
-pub const GROW_STEP: u32 = 40;
+/// Rows the first frame after a reset shows: more than fit on any screen (S6). Single-line rows
+/// (the Superhuman pass, 2026-10-28) are 38 px at the default text size, so 1600 px of list
+/// shows about 42 and 2160 px about 57 (85 px rows showed 14 at 1440 px with 40 here). No more
+/// than that: every row here is laid out in the first frame of every folder, chip and search.
+pub const FIRST_ROWS: u32 = 64;
+/// Rows the list grows by each frame after that: 64 → 128 → 192 → every row.
+pub const GROW_STEP: u32 = 64;
 /// GtkListView keeps about 205 rows realized whatever the window (S3); once the list is past
 /// this, the rest arrive in one step without creating row widgets.
 const GROW_UNTIL: u32 = 240;
@@ -50,6 +62,11 @@ pub const SEARCH_PAGE: u32 = 50;
 const SEARCH_MAX: u32 = 10_000;
 /// Change events that arrive while search results are shown run the search again after this.
 const SEARCH_REFRESH: Duration = Duration::from_millis(200);
+/// The most rows a move is told GTK over in one `items-changed`: GTK asks for every row of the
+/// span when a tracked row (the focus, the scroll anchor) is in it, so a conversation moving
+/// from far down is told as a removal and an insertion instead (a reply mostly moves a
+/// conversation near the top: a short span).
+pub const MOVE_SPAN: u32 = 256;
 
 /// What the model shows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -61,7 +78,19 @@ pub enum Content {
         text: String,
         folder: Option<FolderId>,
         filter: ViewFilter,
+        grouping: ViewGrouping,
     },
+}
+
+impl Content {
+    /// One row per message or per conversation.
+    pub fn grouping(&self) -> ViewGrouping {
+        match self {
+            Content::Nothing => ViewGrouping::Messages,
+            Content::View(spec) => spec.grouping,
+            Content::Search { grouping, .. } => *grouping,
+        }
+    }
 }
 
 /// What changed, for the list widget.
@@ -88,6 +117,9 @@ pub struct ModelStats {
     pub reopens: u64,
     pub evictions: u64,
     pub searches: u64,
+    /// Conversations moved in one `items-changed`, and those told row by row.
+    pub moves_at_once: u64,
+    pub moves_by_rows: u64,
 }
 
 enum Stashed {
@@ -126,10 +158,11 @@ struct SearchState {
     text: String,
     folder: Option<FolderId>,
     filter: ViewFilter,
-    /// Matches asked for.
+    grouping: ViewGrouping,
+    /// Matches (or conversations) asked for.
     limit: u32,
     /// Every match so far, newest first, before the filter.
-    rows: Vec<MessageSummary>,
+    rows: Vec<ListRow>,
     exhausted: bool,
     fetching: bool,
     /// A change event came in: run the search again.
@@ -162,6 +195,8 @@ struct State {
     thresholds: Thresholds,
     serial: u64,
     stats: ModelStats,
+    /// The longest move told GTK at once ([`MOVE_SPAN`]; the self-test shortens it).
+    move_limit: u32,
 }
 
 impl Default for State {
@@ -178,6 +213,7 @@ impl Default for State {
             thresholds: Thresholds::new(0, 0, 0, 0),
             serial: 0,
             stats: ModelStats::default(),
+            move_limit: MOVE_SPAN,
         }
     }
 }
@@ -194,14 +230,30 @@ impl State {
         }
     }
 
-    fn is_loaded(&self, position: u32) -> bool {
+    fn grouping(&self) -> ViewGrouping {
+        match &self.source {
+            Source::Nothing => ViewGrouping::Messages,
+            Source::View(view) => view.spec.grouping,
+            Source::Search(search) => search.grouping,
+        }
+    }
+
+    fn item(&self, position: u32) -> Option<&MessageItem> {
         self.slots
             .get(position as usize)
-            .is_some_and(|slot| slot.as_ref().is_some_and(MessageItem::is_loaded))
+            .and_then(|slot| slot.as_ref())
+    }
+
+    fn is_loaded(&self, position: u32) -> bool {
+        self.item(position).is_some_and(MessageItem::is_loaded)
+    }
+
+    fn key_at(&self, position: u32) -> Option<RowKey> {
+        self.item(position).and_then(MessageItem::key)
     }
 
     /// Fills the rows of a page whose version matches the model's.
-    fn fill(&mut self, offset: u32, rows: Vec<MessageSummary>) -> Fills {
+    fn fill(&mut self, offset: u32, rows: Vec<ListRow>) -> Fills {
         let mut fills = Fills::default();
         for (index, row) in rows.into_iter().enumerate() {
             let position = offset as usize + index;
@@ -214,7 +266,7 @@ impl State {
                     self.loaded += 1;
                     fills.rows.push((item.clone(), row));
                 }
-                Some(item) if item.id() == Some(row.id) => fills.rows.push((item.clone(), row)),
+                Some(item) if item.key() == Some(row.key()) => fills.rows.push((item.clone(), row)),
                 Some(_) => {
                     tracing::debug!(position, "list row replaced by a matching page");
                     self.slots[position] = Some(MessageItem::new(section, Some(row)));
@@ -263,12 +315,76 @@ impl State {
         let end = (start + PAGE).min(self.total) - 1;
         !self.is_loaded(start) || !self.is_loaded(end)
     }
+
+    /// Where a splice that moves a loaded row (a key both removed and inserted) changes the
+    /// rows, as one `items-changed`: `(position, removed, added)`, when that span is at most
+    /// [`MOVE_SPAN`] rows. `None` for a splice without a move, or with a longer span.
+    fn move_span(&self, splice: &Splice) -> Option<(u32, u32, u32)> {
+        if splice.removed.is_empty() || splice.inserted.is_empty() {
+            return None;
+        }
+        let removed: HashSet<RowKey> = splice
+            .removed
+            .iter()
+            .filter_map(|position| self.key_at(*position))
+            .collect();
+        if !splice
+            .inserted
+            .iter()
+            .any(|inserted| removed.contains(&inserted.row.key()))
+        {
+            return None;
+        }
+        let span = move_span(
+            &splice.removed,
+            splice.inserted.iter().map(|inserted| inserted.position),
+            self.total,
+        )?;
+        (span.1.max(span.2) <= self.move_limit).then_some(span)
+    }
+}
+
+/// The span `(position, removed, added)` that removing `removed` (positions before, any order)
+/// and inserting at `inserted` (positions after) changes in a list of `total` rows: every row
+/// before `position` and after the span stays where it was. `None` for positions outside the
+/// list.
+pub fn move_span(
+    removed: &[u32],
+    inserted: impl Iterator<Item = u32> + Clone,
+    total: u32,
+) -> Option<(u32, u32, u32)> {
+    let removals = removed.len() as u32;
+    let insertions = inserted.clone().count() as u32;
+    let lowest = removed
+        .iter()
+        .copied()
+        .chain(inserted.clone())
+        .min()
+        .unwrap_or(0);
+    let removed_end = removed
+        .iter()
+        .map(|position| position + 1)
+        .max()
+        .unwrap_or(0);
+    let inserted_end = inserted.map(|position| position + 1).max().unwrap_or(0);
+    // An old row past both ends keeps its place, moved by what was taken and added before it:
+    // an old position at or past `old_end` maps to one at or past `inserted_end`.
+    let old_end = removed_end
+        .max((inserted_end + removals).checked_sub(insertions)?)
+        .max(lowest);
+    if old_end > total || removals > total {
+        return None;
+    }
+    let new_end = (old_end + insertions).checked_sub(removals)?;
+    Some((lowest, old_end - lowest, new_end - lowest))
 }
 
 #[derive(Default)]
 struct Fills {
-    rows: Vec<(MessageItem, MessageSummary)>,
+    rows: Vec<(MessageItem, ListRow)>,
     replaced: Vec<u32>,
+    /// Rows whose section changed: a conversation's reply moved it to a newer one.
+    sections: Vec<(MessageItem, usize)>,
 }
 
 /// A change to apply to the view, decided while the state is borrowed.
@@ -295,8 +411,8 @@ fn removal_runs(removed: &[u32]) -> Vec<(u32, u32)> {
 }
 
 /// Runs of rows inserted one by one in ascending order.
-fn insertion_runs(inserted: Vec<Positioned>) -> Vec<(u32, Vec<MessageSummary>)> {
-    let mut runs: Vec<(u32, Vec<MessageSummary>)> = Vec::new();
+fn insertion_runs<R>(inserted: Vec<Positioned<R>>) -> Vec<(u32, Vec<R>)> {
+    let mut runs: Vec<(u32, Vec<R>)> = Vec::new();
     for Positioned { position, row } in inserted {
         match runs.last_mut() {
             Some((first, rows)) if *first + rows.len() as u32 == position => rows.push(row),
@@ -306,16 +422,40 @@ fn insertion_runs(inserted: Vec<Positioned>) -> Vec<(u32, Vec<MessageSummary>)> 
     runs
 }
 
+/// Whether `filter` lets a message through.
 pub fn passes(filter: ViewFilter, row: &MessageSummary) -> bool {
     match filter {
         ViewFilter::All => true,
         ViewFilter::Unread => !row.flags.is_seen(),
         ViewFilter::Starred => row.flags.is_flagged(),
         ViewFilter::Attachments => row.has_attachments,
+        // The Split Inbox's side isn't on the row: the store's views decide.
+        ViewFilter::Important | ViewFilter::Other => true,
+    }
+}
+
+/// Whether `filter` lets a conversation through: one of its members passes it.
+pub fn conversation_passes(filter: ViewFilter, row: &ConversationSummary) -> bool {
+    match filter {
+        ViewFilter::All => true,
+        ViewFilter::Unread => row.unread > 0,
+        ViewFilter::Starred => row.flagged > 0,
+        ViewFilter::Attachments => row.attachments > 0,
+        // The Split Inbox's side isn't on the row: the store's views decide.
+        ViewFilter::Important | ViewFilter::Other => true,
+    }
+}
+
+/// Whether `filter` lets a row of either grouping through.
+pub fn row_passes(filter: ViewFilter, row: &ListRow) -> bool {
+    match row {
+        ListRow::Message(row) => passes(filter, row),
+        ListRow::Conversation(row) => conversation_passes(filter, row),
     }
 }
 
 type ChangeListener = Rc<dyn Fn(Change)>;
+type SearchReply = Result<Vec<ListRow>, StoreError>;
 
 mod imp {
     use super::*;
@@ -329,7 +469,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for MessageModel {
-        const NAME: &'static str = "SealwaxMessageModel";
+        const NAME: &'static str = "ProntoMessageModel";
         type Type = super::MessageModel;
         type Interfaces = (gio::ListModel, gtk::SectionModel);
     }
@@ -401,8 +541,14 @@ impl MessageModel {
                 text: search.text.clone(),
                 folder: search.folder,
                 filter: search.filter,
+                grouping: search.grouping,
             },
         }
+    }
+
+    /// One row per message or per conversation, as the model shows now.
+    pub fn grouping(&self) -> ViewGrouping {
+        self.imp().state.borrow().grouping()
     }
 
     /// Rows in the view or the results, also those GTK doesn't see yet while the list grows.
@@ -453,6 +599,12 @@ impl MessageModel {
         self.imp().state.borrow().stats
     }
 
+    /// The longest move told GTK in one `items-changed` ([`MOVE_SPAN`]); the self-test makes
+    /// moves go row by row with 0.
+    pub fn set_move_span(&self, rows: u32) {
+        self.imp().state.borrow_mut().move_limit = rows;
+    }
+
     /// Rows in each section (Today, Yesterday, This week, This month, Older).
     pub fn section_counts(&self) -> [u32; 5] {
         self.imp().state.borrow().bounds.counts()
@@ -462,34 +614,100 @@ impl MessageModel {
         LABELS[self.imp().state.borrow().section_at(position)]
     }
 
-    /// The loaded row at `position`.
+    /// The loaded message row at `position` (`None` for a conversation's row).
     pub fn row_at(&self, position: u32) -> Option<MessageSummary> {
-        let state = self.imp().state.borrow();
-        state
-            .slots
-            .get(position as usize)
-            .and_then(|slot| slot.as_ref())
+        self.imp()
+            .state
+            .borrow()
+            .item(position)
+            .and_then(MessageItem::summary)
+    }
+
+    /// The loaded row at `position`, of either grouping.
+    pub fn list_row_at(&self, position: u32) -> Option<ListRow> {
+        self.imp()
+            .state
+            .borrow()
+            .item(position)
             .and_then(|item| item.row().clone())
     }
 
-    /// The position of a message whose row is loaded.
+    /// The loaded row's key at `position`.
+    pub fn key_at(&self, position: u32) -> Option<RowKey> {
+        self.imp().state.borrow().key_at(position)
+    }
+
+    /// The conversation of the loaded row at `position`, without copying the row.
+    pub fn thread_at(&self, position: u32) -> Option<ThreadId> {
+        let state = self.imp().state.borrow();
+        let row = state.item(position)?.row();
+        row.as_ref().map(|row| match row {
+            ListRow::Message(summary) => summary.thread,
+            ListRow::Conversation(summary) => summary.thread,
+        })
+    }
+
+    /// The message the reader shows for the loaded row at `position`: the message, or the
+    /// conversation's anchor.
+    pub fn message_at(&self, position: u32) -> Option<MessageId> {
+        self.imp()
+            .state
+            .borrow()
+            .item(position)
+            .and_then(MessageItem::message)
+    }
+
+    /// The loaded rows of `keys`, top to bottom, each with what `pick` takes from it: one pass
+    /// over the rows whatever the count (an action on every row of a large folder).
+    pub fn rows_of_keys<T>(
+        &self,
+        keys: &HashSet<RowKey>,
+        pick: impl Fn(&ListRow) -> T,
+    ) -> Vec<(u32, RowKey, T)> {
+        let state = self.imp().state.borrow();
+        state
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(position, slot)| {
+                let row = slot.as_ref()?.row();
+                let row = row.as_ref()?;
+                let key = row.key();
+                keys.contains(&key)
+                    .then(|| (position as u32, key, pick(row)))
+            })
+            .collect()
+    }
+
+    /// The position of a loaded row by its key.
+    pub fn position_of_key(&self, key: RowKey) -> Option<u32> {
+        let state = self.imp().state.borrow();
+        state
+            .slots
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|item| item.key() == Some(key)))
+            .map(|position| position as u32)
+    }
+
+    /// The position of a loaded row the reader shows `id` for: the message's own row, or a
+    /// conversation's whose anchor it is.
     pub fn position_of(&self, id: MessageId) -> Option<u32> {
         let state = self.imp().state.borrow();
         state
             .slots
             .iter()
-            .position(|slot| slot.as_ref().is_some_and(|item| item.id() == Some(id)))
+            .position(|slot| slot.as_ref().is_some_and(|item| item.message() == Some(id)))
             .map(|position| position as u32)
     }
 
-    /// How many of `ids` the model holds as loaded rows.
-    pub fn held(&self, ids: &HashSet<MessageId>) -> usize {
+    /// How many of `keys` the model holds as loaded rows.
+    pub fn held(&self, keys: &HashSet<RowKey>) -> usize {
         let state = self.imp().state.borrow();
         state
             .slots
             .iter()
             .flatten()
-            .filter(|item| item.id().is_some_and(|id| ids.contains(&id)))
+            .filter(|item| item.key().is_some_and(|key| keys.contains(&key)))
             .count()
     }
 
@@ -551,6 +769,11 @@ impl MessageModel {
         if wanted {
             self.request_page(position / PAGE);
         }
+    }
+
+    /// Whether the row at `position` is loaded.
+    pub fn is_loaded(&self, position: u32) -> bool {
+        self.imp().state.borrow().is_loaded(position)
     }
 
     fn request_page(&self, page: u32) {
@@ -629,7 +852,8 @@ impl MessageModel {
                 return;
             }
             state.stats.pages_applied += 1;
-            let fills = state.fill(page.offset, page.rows);
+            let offset = page.offset;
+            let fills = state.fill(offset, page.into_rows());
             state.evict();
             fills
         };
@@ -641,6 +865,9 @@ impl MessageModel {
         for (item, row) in fills.rows {
             item.set_row(row);
         }
+        for (item, section) in fills.sections {
+            item.set_section(section);
+        }
         for position in fills.replaced {
             self.items_changed(position, 1, 1);
         }
@@ -649,7 +876,22 @@ impl MessageModel {
     /// Shows `spec` from a view already opened with `thresholds` (the mailbox reads the first
     /// window's view ahead).
     pub fn adopt(&self, spec: ViewSpec, thresholds: Thresholds, opened: ViewOpened) {
+        self.adopt_with(spec, thresholds, opened, Vec::new());
+    }
+
+    /// [`MessageModel::adopt`], with the change events that came since it was opened, as for a
+    /// view still opening (the Split Inbox's other side, kept warm: `list/split.rs`).
+    pub fn adopt_with(
+        &self,
+        spec: ViewSpec,
+        thresholds: Thresholds,
+        opened: ViewOpened,
+        events: Vec<Arc<ChangeEvent>>,
+    ) {
         let generation = self.begin_view(spec);
+        if let Some(view) = self.imp().state.borrow_mut().view_mut() {
+            view.queued = events;
+        }
         self.opened(generation, thresholds, Ok(opened));
     }
 
@@ -695,7 +937,7 @@ impl MessageModel {
         thresholds: Thresholds,
         result: Result<ViewOpened, StoreError>,
     ) {
-        let opened = match result {
+        let mut opened = match result {
             Ok(opened) => opened,
             Err(error) => {
                 self.failed(generation, error.to_string());
@@ -708,6 +950,7 @@ impl MessageModel {
             if state.generation != generation {
                 return;
             }
+            let rows = opened.take_rows();
             let Source::View(view) = &mut state.source else {
                 return;
             };
@@ -720,7 +963,10 @@ impl MessageModel {
             state.slots = vec![None; opened.total as usize];
             state.loaded = 0;
             state.last_position = 0;
-            for (position, row) in opened.rows.into_iter().enumerate() {
+            for (position, row) in rows.into_iter().enumerate() {
+                if position >= state.slots.len() {
+                    break;
+                }
                 let section = state.section_at(position as u32);
                 state.slots[position] = Some(MessageItem::new(section, Some(row)));
                 state.loaded += 1;
@@ -884,16 +1130,19 @@ impl MessageModel {
                 false
             }
             Plan::Apply(diff) => {
-                let inserted = match diff {
-                    Some(ViewDiff::Splice {
-                        removed,
-                        inserted,
-                        changed,
-                        total,
-                    }) => self.splice(&removed, inserted, changed, total, emit),
-                    _ => false,
+                let inserted = match diff.map(ViewDiff::into_splice) {
+                    Some(Ok(splice)) => self.splice(splice, emit),
+                    Some(Err(_)) => {
+                        self.reopen();
+                        return false;
+                    }
+                    None => false,
                 };
-                self.apply_threads(event);
+                // A conversation view's rows are its threads: a merge comes as its own diff, and
+                // its sizes in each row's own count.
+                if self.grouping() == ViewGrouping::Messages {
+                    self.apply_threads(event);
+                }
                 self.apply_stash();
                 if emit {
                     self.notify(Change::Rows);
@@ -903,18 +1152,120 @@ impl MessageModel {
         }
     }
 
-    fn splice(
-        &self,
-        removed: &[u32],
-        inserted: Vec<Positioned>,
-        changed: Vec<Positioned>,
-        total: u32,
-        emit: bool,
-    ) -> bool {
+    /// Applies one view's splice (docs/superhuman/store.md, "Change events"): the removals,
+    /// positions before the commit in descending order; the insertions, positions after it in
+    /// ascending order; then the rows changed in place. A conversation moving within
+    /// [`MOVE_SPAN`] rows is told GTK at once ([`State::move_span`]).
+    fn splice(&self, splice: Splice, emit: bool) -> bool {
         if emit {
             self.complete_growth();
         }
-        let any_inserted = !inserted.is_empty();
+        let any_inserted = !splice.inserted.is_empty();
+        let span = if emit {
+            self.imp().state.borrow().move_span(&splice)
+        } else {
+            None
+        };
+        let Splice {
+            removed,
+            inserted,
+            changed,
+            total,
+        } = splice;
+        let mut fills = Fills::default();
+        match span {
+            Some(span) => {
+                if !self.splice_at_once(&removed, inserted, &mut fills) {
+                    self.reopen();
+                    return false;
+                }
+                self.imp().state.borrow_mut().stats.moves_at_once += 1;
+                self.items_changed(span.0, span.1, span.2);
+            }
+            None => {
+                if !self.splice_by_runs(&removed, inserted, emit) {
+                    return false;
+                }
+            }
+        }
+        let sections = {
+            let mut guard = self.imp().state.borrow_mut();
+            let state = &mut *guard;
+            if state.total != total {
+                tracing::debug!("the list's row count differs from the store's; opening again");
+                drop(guard);
+                self.reopen();
+                return false;
+            }
+            // A conversation that keeps its place can still change section (yesterday's top
+            // conversation answered today, or its newest message gone): each changed row's
+            // section before is read first, loaded or not, then they move.
+            let before: Vec<usize> = changed
+                .iter()
+                .map(|changed| state.section_at(changed.position))
+                .collect();
+            let mut sections = Vec::new();
+            for (Positioned { position, row }, before) in changed.into_iter().zip(before) {
+                let after = state.thresholds.section_of(row.date());
+                if matches!(row, ListRow::Conversation(_)) && after != before {
+                    state.bounds.remove(before);
+                    state.bounds.insert(after);
+                    sections.push(position);
+                    if let Some(Some(item)) = state.slots.get(position as usize) {
+                        fills.sections.push((item.clone(), after));
+                    }
+                }
+                let Some(Some(item)) = state.slots.get(position as usize) else {
+                    continue;
+                };
+                if item.key() == Some(row.key()) {
+                    fills.rows.push((item.clone(), row));
+                } else if !item.is_loaded() {
+                    state.loaded += 1;
+                    fills.rows.push((item.clone(), row));
+                } else {
+                    let section = state.section_at(position);
+                    state.slots[position as usize] = Some(MessageItem::new(section, Some(row)));
+                    if emit && position < state.shown {
+                        fills.replaced.push(position);
+                    }
+                }
+            }
+            sections
+        };
+        self.finish(fills);
+        if emit {
+            let shown = self.n_items();
+            for position in sections {
+                // The section that ended and the one that starts there.
+                let start = position.saturating_sub(1);
+                self.sections_changed(start, 3.min(shown.saturating_sub(start)));
+            }
+        }
+        any_inserted
+    }
+
+    /// The splice's removals and insertions, told GTK as runs; false after asking for the view
+    /// again, when they don't fit the rows held.
+    fn splice_by_runs(
+        &self,
+        removed: &[u32],
+        inserted: Vec<Positioned<ListRow>>,
+        emit: bool,
+    ) -> bool {
+        let removed_keys: HashSet<RowKey> = {
+            let state = self.imp().state.borrow();
+            removed
+                .iter()
+                .filter_map(|position| state.key_at(*position))
+                .collect()
+        };
+        if inserted
+            .iter()
+            .any(|inserted| removed_keys.contains(&inserted.row.key()))
+        {
+            self.imp().state.borrow_mut().stats.moves_by_rows += 1;
+        }
         for (first, count) in removal_runs(removed) {
             {
                 let mut guard = self.imp().state.borrow_mut();
@@ -953,7 +1304,7 @@ impl MessageModel {
                     return false;
                 }
                 for (offset, row) in rows.into_iter().enumerate() {
-                    let section = state.thresholds.section_of(row.date);
+                    let section = state.thresholds.section_of(row.date());
                     state.bounds.insert(section);
                     state.slots.insert(
                         first as usize + offset,
@@ -970,40 +1321,69 @@ impl MessageModel {
                 self.items_changed(first, 0, count);
             }
         }
-        let fills = {
-            let mut guard = self.imp().state.borrow_mut();
-            let state = &mut *guard;
-            if state.total != total {
-                tracing::debug!("the list's row count differs from the store's; opening again");
-                drop(guard);
-                self.reopen();
-                return false;
-            }
-            let mut fills = Fills::default();
-            for Positioned { position, row } in changed {
-                let Some(Some(item)) = state.slots.get(position as usize) else {
-                    continue;
-                };
-                if item.id() == Some(row.id) {
-                    fills.rows.push((item.clone(), row));
-                } else if !item.is_loaded() {
-                    state.loaded += 1;
-                    fills.rows.push((item.clone(), row));
-                } else {
-                    let section = state.section_at(position);
-                    state.slots[position as usize] = Some(MessageItem::new(section, Some(row)));
-                    if emit && position < state.shown {
-                        fills.replaced.push(position);
-                    }
-                }
-            }
-            fills
-        };
-        self.finish(fills);
-        any_inserted
+        true
     }
 
-    /// Conversations merged and their sizes, on the rows already loaded.
+    /// The splice's removals and insertions at once, before one `items-changed`: a row
+    /// inserted under the key of a loaded row removed keeps that row's item (its new row and
+    /// section arrive through `fills`). False when they don't fit the rows held.
+    fn splice_at_once(
+        &self,
+        removed: &[u32],
+        inserted: Vec<Positioned<ListRow>>,
+        fills: &mut Fills,
+    ) -> bool {
+        let mut guard = self.imp().state.borrow_mut();
+        let state = &mut *guard;
+        // Checked before anything changes, so a diff that doesn't fit leaves the rows as GTK
+        // knows them: removals descending inside the list, each insertion inside the list it
+        // grows.
+        let descending = removed.windows(2).all(|pair| pair[0] > pair[1]);
+        let inside = removed.first().is_none_or(|first| *first < state.total);
+        let left = state.total - removed.len().min(state.total as usize) as u32;
+        let fits = inserted
+            .iter()
+            .enumerate()
+            .all(|(index, inserted)| inserted.position <= left + index as u32);
+        if !descending || !inside || !fits {
+            return false;
+        }
+        let mut kept: HashMap<RowKey, MessageItem> = HashMap::new();
+        for &position in removed {
+            let section = state.section_at(position);
+            state.bounds.remove(section);
+            if let Some(item) = state.slots.remove(position as usize)
+                && item.is_loaded()
+            {
+                state.loaded -= 1;
+                if let Some(key) = item.key() {
+                    kept.insert(key, item);
+                }
+            }
+            state.total -= 1;
+        }
+        for Positioned { position, row } in inserted {
+            let section = state.thresholds.section_of(row.date());
+            state.bounds.insert(section);
+            let item = match kept.remove(&row.key()) {
+                Some(item) => {
+                    if item.section() != section {
+                        fills.sections.push((item.clone(), section));
+                    }
+                    fills.rows.push((item.clone(), row));
+                    item
+                }
+                None => MessageItem::new(section, Some(row)),
+            };
+            state.slots.insert(position as usize, Some(item));
+            state.loaded += 1;
+            state.total += 1;
+        }
+        state.shown = state.total;
+        true
+    }
+
+    /// Conversations merged and their sizes, on the message rows already loaded.
     fn apply_threads(&self, event: &ChangeEvent) {
         if event.merged_threads.is_empty() && event.threads.is_empty() {
             return;
@@ -1026,9 +1406,7 @@ impl MessageModel {
                 .iter()
                 .flatten()
                 .filter(|item| {
-                    item.row()
-                        .as_ref()
-                        .is_some_and(|row| touched.contains(&row.thread))
+                    matches!(&*item.row(), Some(ListRow::Message(row)) if touched.contains(&row.thread))
                 })
                 .cloned()
                 .collect()
@@ -1072,7 +1450,8 @@ impl MessageModel {
                     let fills = {
                         let mut state = self.imp().state.borrow_mut();
                         state.stats.pages_applied += 1;
-                        let fills = state.fill(page.offset, page.rows);
+                        let offset = page.offset;
+                        let fills = state.fill(offset, page.into_rows());
                         state.evict();
                         fills
                     };
@@ -1107,7 +1486,7 @@ impl MessageModel {
                         .slots
                         .iter()
                         .flatten()
-                        .filter_map(|item| item.row().as_ref().map(|row| row.date))
+                        .filter_map(|item| item.row().as_ref().map(ListRow::date))
                         .collect::<Vec<_>>();
                     Regroup::Search(Bounds::from_dates(dates, &thresholds))
                 }
@@ -1211,12 +1590,14 @@ impl MessageModel {
     }
 
     /// Shows the newest matches of `text` in `folder` (everywhere for `None`), filtered by
-    /// `filter`.
+    /// `filter`: one row per match, or per conversation with a match (opened at its newest
+    /// match).
     pub fn search(
         &self,
         text: String,
         folder: Option<FolderId>,
         filter: ViewFilter,
+        grouping: ViewGrouping,
         thresholds: Thresholds,
     ) {
         let generation = {
@@ -1227,6 +1608,7 @@ impl MessageModel {
                 text,
                 folder,
                 filter,
+                grouping,
                 limit: SEARCH_PAGE,
                 rows: Vec::new(),
                 exhausted: false,
@@ -1254,23 +1636,48 @@ impl MessageModel {
             search.stale = false;
             search.limit = limit;
             state.stats.searches += 1;
-            (search.text.clone(), search.folder)
+            (search.text.clone(), search.folder, search.grouping)
         };
-        let Some(reply) = self
-            .mailbox()
-            .store()
-            .map(|store| store.search(&query.0, query.1, limit))
-        else {
+        let Some(store) = self.mailbox().store() else {
             self.failed(generation, "the store is not open".to_owned());
             return;
         };
         let weak = self.downgrade();
-        glib::spawn_future_local(async move {
-            let result = reply.recv().await;
-            if let Some(model) = weak.upgrade() {
-                model.found(generation, result);
+        let (text, folder, grouping) = query;
+        match grouping {
+            ViewGrouping::Messages => {
+                let reply = store.search(&text, folder, limit);
+                glib::spawn_future_local(async move {
+                    let result: SearchReply = reply
+                        .recv()
+                        .await
+                        .map(|found| found.value.into_iter().map(ListRow::Message).collect());
+                    if let Some(model) = weak.upgrade() {
+                        model.found(generation, result);
+                    }
+                });
             }
-        });
+            ViewGrouping::Conversations => {
+                let reply = store.search_conversations(&text, folder, limit);
+                glib::spawn_future_local(async move {
+                    let result: SearchReply = reply.recv().await.map(|found| {
+                        found
+                            .value
+                            .into_iter()
+                            .map(|hit| {
+                                // Opened at the newest message the search matched.
+                                let mut conversation = hit.conversation;
+                                conversation.anchor = hit.matched;
+                                ListRow::Conversation(conversation)
+                            })
+                            .collect()
+                    });
+                    if let Some(model) = weak.upgrade() {
+                        model.found(generation, result);
+                    }
+                });
+            }
+        }
     }
 
     /// Fetches more search results, when there are more and none are on their way; the list
@@ -1333,11 +1740,11 @@ impl MessageModel {
         });
     }
 
-    fn found(&self, generation: u64, result: Result<Versioned<Vec<MessageSummary>>, StoreError>) {
+    fn found(&self, generation: u64, result: SearchReply) {
         enum Update {
             Reset,
             Append(u32),
-            InPlace(Vec<(MessageItem, MessageSummary)>),
+            InPlace(Vec<(MessageItem, ListRow)>),
         }
         let (update, more, again) = {
             let mut guard = self.imp().state.borrow_mut();
@@ -1350,7 +1757,7 @@ impl MessageModel {
             };
             search.fetching = false;
             let rows = match result {
-                Ok(found) => found.value,
+                Ok(rows) => rows,
                 Err(_) => {
                     // The error could quote the full-text expression, which holds what the user
                     // typed: it isn't logged.
@@ -1360,26 +1767,26 @@ impl MessageModel {
             };
             search.exhausted = (rows.len() as u32) < search.limit || search.limit >= SEARCH_MAX;
             search.rows = rows;
-            let visible: Vec<MessageSummary> = search
+            let visible: Vec<ListRow> = search
                 .rows
                 .iter()
-                .filter(|row| passes(search.filter, row))
+                .filter(|row| row_passes(search.filter, row))
                 .cloned()
                 .collect();
             let more = !search.exhausted && (visible.len() as u32) < SEARCH_PAGE;
             let again = search.stale;
             let first = !std::mem::replace(&mut search.applied, true);
-            let old: Vec<Option<MessageId>> = state
+            let old: Vec<Option<RowKey>> = state
                 .slots
                 .iter()
-                .map(|slot| slot.as_ref().and_then(MessageItem::id))
+                .map(|slot| slot.as_ref().and_then(MessageItem::key))
                 .collect();
             let prefix = !first
                 && old.len() <= visible.len()
                 && old
                     .iter()
                     .zip(&visible)
-                    .all(|(id, row)| *id == Some(row.id));
+                    .all(|(key, row)| *key == Some(row.key()));
             let update = if prefix && old.len() == visible.len() {
                 Update::InPlace(
                     state
@@ -1393,7 +1800,7 @@ impl MessageModel {
             } else if prefix && state.shown == state.total {
                 let start = state.total;
                 for row in &visible[start as usize..] {
-                    let section = state.thresholds.section_of(row.date);
+                    let section = state.thresholds.section_of(row.date());
                     state
                         .slots
                         .push(Some(MessageItem::new(section, Some(row.clone()))));
@@ -1403,7 +1810,7 @@ impl MessageModel {
                 state.slots = visible
                     .iter()
                     .map(|row| {
-                        let section = state.thresholds.section_of(row.date);
+                        let section = state.thresholds.section_of(row.date());
                         Some(MessageItem::new(section, Some(row.clone())))
                     })
                     .collect();
@@ -1411,8 +1818,7 @@ impl MessageModel {
             };
             state.total = visible.len() as u32;
             state.loaded = state.total;
-            state.bounds =
-                Bounds::from_dates(visible.iter().map(|row| row.date), &state.thresholds);
+            state.bounds = Bounds::from_dates(visible.iter().map(ListRow::date), &state.thresholds);
             (update, more, again)
         };
         match update {
@@ -1462,7 +1868,7 @@ impl MessageModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sealwax_domain::model::{Flags, FolderId, MessageId};
+    use sealwax_domain::model::{AccountId, Flags, FolderId, MessageId};
 
     fn row(id: i64) -> MessageSummary {
         MessageSummary {
@@ -1477,6 +1883,30 @@ mod tests {
             flags: Flags::NONE,
             has_attachments: false,
             thread_count: 1,
+        }
+    }
+
+    pub(super) fn conversation(thread: i64) -> ConversationSummary {
+        ConversationSummary {
+            thread: ThreadId(thread),
+            account: AccountId(1),
+            anchor: MessageId(thread * 10),
+            folder: FolderId(1),
+            last_member: MessageId(thread * 10),
+            latest: MessageId(thread * 10),
+            date: thread,
+            sender_name: String::new(),
+            sender_email: String::new(),
+            snippet: String::new(),
+            subject: String::new(),
+            participants: Vec::new(),
+            participant_count: 0,
+            messages: 1,
+            members: 1,
+            unread: 0,
+            flagged: 0,
+            attachments: 0,
+            has_draft: false,
         }
     }
 
@@ -1510,5 +1940,83 @@ mod tests {
         assert!(passes(ViewFilter::Attachments, &unread));
         assert!(!passes(ViewFilter::Attachments, &starred));
         assert!(passes(ViewFilter::All, &starred));
+    }
+
+    #[test]
+    fn filters_pass_a_conversation_when_a_member_does() {
+        let quiet = conversation(1);
+        let busy = ConversationSummary {
+            unread: 1,
+            flagged: 2,
+            attachments: 1,
+            ..conversation(2)
+        };
+        for filter in [
+            ViewFilter::Unread,
+            ViewFilter::Starred,
+            ViewFilter::Attachments,
+        ] {
+            assert!(!conversation_passes(filter, &quiet), "{filter:?}");
+            assert!(conversation_passes(filter, &busy), "{filter:?}");
+            assert!(row_passes(filter, &ListRow::Conversation(busy.clone())));
+        }
+        assert!(conversation_passes(ViewFilter::All, &quiet));
+    }
+
+    /// Applies `removed` (descending) then `inserted` (ascending) to `rows`, as GTK sees a
+    /// splice row by row.
+    fn spliced(rows: &[char], removed: &[u32], inserted: &[(u32, char)]) -> Vec<char> {
+        let mut rows = rows.to_vec();
+        for &position in removed {
+            rows.remove(position as usize);
+        }
+        for &(position, row) in inserted {
+            rows.insert(position as usize, row);
+        }
+        rows
+    }
+
+    #[test]
+    fn a_moves_span_holds_every_row_that_changed_place() {
+        let rows = ['a', 'b', 'c', 'd', 'e', 'f'];
+        /// Removals (descending) and insertions (ascending), as a splice gives them.
+        type Case = (&'static [u32], &'static [(u32, char)]);
+        let cases: [Case; 6] = [
+            // d's reply takes it to the top.
+            (&[3], &[(0, 'd')]),
+            // e moves to the top and a new conversation lands second.
+            (&[4], &[(0, 'e'), (1, 'x')]),
+            // Two moves at once, and a removal past them.
+            (&[5, 3, 2], &[(0, 'd'), (1, 'c')]),
+            // A move down (a date fixed by the server).
+            (&[0], &[(3, 'a')]),
+            // A move to the very end.
+            (&[1], &[(5, 'b')]),
+            // A removal and an insertion apart.
+            (&[0], &[(5, 'x')]),
+        ];
+        for (removed, inserted) in cases {
+            let after = spliced(&rows, removed, inserted);
+            let (position, gone, added) = move_span(
+                removed,
+                inserted.iter().map(|(position, _)| *position),
+                rows.len() as u32,
+            )
+            .expect("a span");
+            let (position, gone, added) = (position as usize, gone as usize, added as usize);
+            assert_eq!(rows.len() - gone + added, after.len());
+            assert_eq!(
+                rows[..position],
+                after[..position],
+                "{removed:?} {inserted:?}"
+            );
+            assert_eq!(
+                rows[position + gone..],
+                after[position + added..],
+                "{removed:?} {inserted:?}"
+            );
+        }
+        // Positions outside the list are no span.
+        assert_eq!(move_span(&[7], [0].into_iter(), 6), None);
     }
 }

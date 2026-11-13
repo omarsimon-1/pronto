@@ -7,16 +7,14 @@ use sealwax_domain::actions::{ActionId, MenuSection};
 use sealwax_domain::keymap::Keymap;
 
 /// The primary menu. GTK shows an action's first application accelerator by itself; an action
-/// with scoped keys only shows its first single key. Items of disabled actions are hidden, so
-/// commands that aren't built yet stay out of the menu.
+/// with scoped keys only shows its first single key, and one whose first key yields to the
+/// focused widget shows that one (the palette's Ctrl+K). Items of disabled actions are hidden,
+/// so commands that aren't built yet stay out of the menu.
 pub fn primary_menu(keymap: &Keymap) -> gio::Menu {
     let menu = gio::Menu::new();
     for section in MenuSection::ALL {
         let items = gio::Menu::new();
-        for id in ActionId::ALL
-            .into_iter()
-            .filter(|id| id.spec().menu == Some(section))
-        {
+        for id in section_order(section) {
             items.append_item(&item(id, keymap));
         }
         if items.n_items() > 0 {
@@ -26,17 +24,50 @@ pub fn primary_menu(keymap: &Keymap) -> gio::Menu {
     menu
 }
 
+/// Commands the menu shows right after another of their section rather than in registry order
+/// (a later block of the registry, kept together there for merges): the Split Inbox toggle
+/// with the other layout toggles (the fork's phase C).
+const PLACED_AFTER: [(ActionId, ActionId); 1] =
+    [(ActionId::SplitInbox, ActionId::GroupByConversation)];
+
+/// `section`'s commands in registry order, with [`PLACED_AFTER`]'s moved after their anchors.
+fn section_order(section: MenuSection) -> Vec<ActionId> {
+    let mut ids: Vec<ActionId> = ActionId::ALL
+        .into_iter()
+        .filter(|id| id.spec().menu == Some(section))
+        .collect();
+    for (placed, anchor) in PLACED_AFTER {
+        if let (Some(from), true) = (
+            ids.iter().position(|id| *id == placed),
+            ids.contains(&anchor),
+        ) {
+            ids.remove(from);
+            let to = ids
+                .iter()
+                .position(|id| *id == anchor)
+                .map_or(ids.len(), |at| at + 1);
+            ids.insert(to, placed);
+        }
+    }
+    ids
+}
+
 fn item(id: ActionId, keymap: &Keymap) -> gio::MenuItem {
     let item = gio::MenuItem::new(
         Some(&id.title().replace('_', "__")),
         Some(&id.detailed_name()),
     );
-    if keymap.accels(id).is_empty()
-        && let Some(key) = keymap
+    let yielding = keymap
+        .yielding(id)
+        .into_iter()
+        .find_map(|binding| binding.single().cloned());
+    let scoped = || {
+        keymap
             .scoped(id)
             .iter()
             .find_map(|binding| binding.single().cloned())
-    {
+    };
+    if let Some(key) = yielding.or_else(|| keymap.accels(id).is_empty().then(scoped).flatten()) {
         item.set_attribute_value("accel", Some(&key.canonical().to_variant()));
     }
     item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
@@ -68,7 +99,14 @@ mod tests {
         assert_eq!(
             actions,
             [
-                vec!["win.refresh", "win.toggle-sidebar", "win.command-palette"],
+                vec![
+                    "win.refresh",
+                    "win.toggle-sidebar",
+                    "win.toggle-reading-pane",
+                    "win.group-by-conversation",
+                    "win.split-inbox",
+                    "win.command-palette",
+                ],
                 vec![
                     "win.add-account",
                     "win.edit-account",
@@ -98,6 +136,10 @@ mod tests {
         );
         // Accelerators show by themselves; nothing here sets an accel attribute.
         assert_eq!(attribute(&settings, 1, "accel"), None);
+        // The palette's Ctrl+K yields: it is no accelerator, so the menu is told it.
+        let view = menu.item_link(0, "section").unwrap();
+        assert_eq!(attribute(&view, 5, "accel").as_deref(), Some("<Control>k"));
+        assert_eq!(attribute(&view, 0, "accel"), None);
     }
 
     #[test]

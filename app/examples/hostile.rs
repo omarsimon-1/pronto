@@ -7,9 +7,9 @@
 //! for script traces (title, DOM marker, dialogs, beacon). `tools/ci.sh --ui` runs it:
 //!
 //! ```sh
-//! SEALWAX_HEADLESS_TIMEOUT=900 tools/headless.sh 33 env \
+//! PRONTO_HEADLESS_TIMEOUT=900 tools/headless.sh 33 env \
 //!     LD_PRELOAD=$PWD/target/debug/libsealwax_dns_canary.so \
-//!     SEALWAX_DNS_CANARY_LOG=$PWD/.local/hostile-dns.log target/debug/examples/hostile
+//!     PRONTO_DNS_CANARY_LOG=$PWD/.local/hostile-dns.log target/debug/examples/hostile
 //! ```
 //!
 //! With the DNS canary preloaded (`devtools/dns-canary`), every name the app or WebKit looks
@@ -80,9 +80,9 @@ struct Outcome {
     pwned: String,
     dialogs: u32,
     refused: BTreeMap<String, u32>,
-    /// Every link the message handed to Sealwax.
+    /// Every link the message handed to Pronto.
     links: Vec<String>,
-    /// The links Sealwax would have opened (absolute http(s) or mailto).
+    /// The links Pronto would have opened (absolute http(s) or mailto).
     opened: Vec<String>,
     resources: Vec<String>,
     cid_ok: Option<bool>,
@@ -286,7 +286,7 @@ fn main() -> glib::ExitCode {
         }
     };
     let preloaded = std::env::var("LD_PRELOAD").is_ok_and(|value| value.contains("dns_canary"));
-    let dns = std::env::var_os("SEALWAX_DNS_CANARY_LOG")
+    let dns = std::env::var_os("PRONTO_DNS_CANARY_LOG")
         .filter(|_| preloaded)
         .map(|path| Dns {
             path: PathBuf::from(path),
@@ -323,7 +323,7 @@ fn main() -> glib::ExitCode {
     let filled = samples::fill_store(&scratch.store, &scratch.blobs, messages(&cases, now))
         .expect("the hostile messages go into the scratch store");
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.Hostile")
+        .application_id("io.github.omarsimon1.Pronto.Hostile")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let passed = Rc::new(Cell::new(false));
@@ -854,10 +854,10 @@ async fn run_case(
     outcome
 }
 
-/// With `SEALWAX_HOSTILE_SHOTS` set, the window (and the link warning, a surface of its own)
+/// With `PRONTO_HOSTILE_SHOTS` set, the window (and the link warning, a surface of its own)
 /// as PNGs in `.local/reader/`, to look at the strip, the warning and the dialog.
 async fn shots(context: &Context, case: &Case, moment: &str) {
-    if std::env::var_os("SEALWAX_HOSTILE_SHOTS").is_none() {
+    if std::env::var_os("PRONTO_HOSTILE_SHOTS").is_none() {
         return;
     }
     let _ = support::frames(context.window.window(), 2).await;

@@ -180,7 +180,7 @@ fn changeable(folders: &[Known], id: FolderId) -> Result<&Known, FolderError> {
 }
 
 /// Checks `change` against the account's `folders` and works out what it does. `hidden` says
-/// whether Sealwax would leave a folder of a whole display name (with its delimiter) out of
+/// whether Pronto would leave a folder of a whole display name (with its delimiter) out of
 /// the list.
 pub(crate) fn plan(
     change: &FolderChange,

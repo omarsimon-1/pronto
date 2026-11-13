@@ -28,7 +28,7 @@ fn start(dirs: &SealwaxDirs) -> (Engine, Arc<Store>) {
     };
     let store = Arc::new(Store::open(&dirs.store_file(), options).unwrap());
     let engine = Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: store.clone(),
         blobs,
         paths: AccountPaths::new(dirs),
@@ -36,6 +36,7 @@ fn start(dirs: &SealwaxDirs) -> (Engine, Arc<Store>) {
         secrets: SecretBackend::Memory,
         detect: DetectOptions::default(),
         microsoft_client_id: None,
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig::default(),
     })
@@ -139,6 +140,7 @@ fn an_edited_label_and_color_reach_the_file_and_the_store() {
             key: key.clone(),
             label: Some("Work".into()),
             color: Some(AccountColor::Slate),
+            signature: Some("Ada\n<Research> & Co.".into()),
         })
         .unwrap();
     let edited = next(&engine, |event| match event {
@@ -151,6 +153,10 @@ fn an_edited_label_and_color_reach_the_file_and_the_store() {
         (listed[0].title(), listed[0].color, listed[0].name.as_str()),
         ("Work", Some(AccountColor::Slate), "Ada Lovelace")
     );
+    assert_eq!(
+        listed[0].signature.as_deref(),
+        Some("Ada\n<Research> & Co.")
+    );
     send_file();
     wait_for_name(&store, &key, "Work");
 
@@ -160,6 +166,7 @@ fn an_edited_label_and_color_reach_the_file_and_the_store() {
             key: key.clone(),
             label: None,
             color: None,
+            signature: None,
         })
         .unwrap();
     let cleared = next(&engine, |event| match event {
@@ -167,6 +174,7 @@ fn an_edited_label_and_color_reach_the_file_and_the_store() {
         _ => None,
     });
     assert_eq!(cleared, Ok(()));
+    assert_eq!(files::read(&paths.settings).unwrap()[0].signature, None);
     send_file();
     wait_for_name(&store, &key, "ada@example.test");
 
@@ -176,6 +184,7 @@ fn an_edited_label_and_color_reach_the_file_and_the_store() {
             key: AccountKey("nobody".into()),
             label: Some("X".into()),
             color: None,
+            signature: None,
         })
         .unwrap();
     let missing = next(&engine, |event| match event {

@@ -4,7 +4,7 @@
 //! mail, or after a restart for mail stored before it. They need the Docker testbed running and
 //! seeded and are skipped otherwise. They reset and change the user newmail:
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test newmail_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;

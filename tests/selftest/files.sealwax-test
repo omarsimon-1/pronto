@@ -5,16 +5,20 @@
 # it; Print to a PDF; Show Original; Save as .eml. Opened files and the choosers go to the
 # reader's hooks under $TMP: nothing reaches the desktop. Buttons take real clicks through
 # Broadway. Every name, address and message is fictional.
-# Run: tools/headless.sh 35 target/debug/sealwax --self-test tests/selftest/files.sealwax-test
+# Run: tools/headless.sh 35 target/debug/pronto --self-test tests/selftest/files.sealwax-test
 
 desktop tiling
 resize 1440 900
 engine-attach
 triage-mark-read-on-open false
 mail-account Files
+# The window opens the account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 files-add attachments files-danger files-sniffed remote files-remote-again newsletter
 files-hooks
 assert-list-count 6
+# Its first rows in, the list has the Inbox's end in view and asks for older mail.
+engine-expect load-older
 
 # Attachment cards: type, name and size, Open and Save, and Download all.
 list-select 0

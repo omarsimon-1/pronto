@@ -1,6 +1,9 @@
-//! The message list (ML-026, DESIGN.md "Message list"): a search field and the filter chips
-//! (All, Unread, Starred, Attachments) over a `gtk::ListView` of the store's view of a folder or
-//! the unified inbox, in date sections, or of search results.
+//! The message list (ML-026, DESIGN.md "Message list"): a `gtk::ListView` of the store's view of
+//! a folder or the unified inbox, in date sections, or of search results, filtered (All,
+//! Unread, Starred, Attachments: keys and the palette set the filter, the window's bar shows it).
+//! Since the Superhuman pass (2026-10-28) the search field shows only while a search is typed
+//! or runs (Search: `/`, Ctrl+F, the bar's button), the filter chips are gone, and an empty
+//! Inbox or All Inboxes shows Inbox Zero.
 //!
 //! - The model ([`model`]) pages lazily and applies the store's change events in version order.
 //! - New mail keeps the list at its top while the first row is in view (S3).
@@ -17,14 +20,22 @@
 //!   field suggests operators, values, days and people ([`suggestions`]). In a folder a search
 //!   covers that folder, with a scope row to search every folder instead; in the unified inbox
 //!   it covers every folder.
+//! - Rows are messages or, since the Superhuman pass, conversations ([`MessageList::set_grouping`],
+//!   docs/superhuman/conversations.md). The selection, the cursor and what an action leaves
+//!   behind are kept by row key, so a conversation a reply moves stays selected and the reader
+//!   showing it isn't asked again.
+//! - The Inbox views show one side of the Split Inbox at a time (phase C, [`split`]).
 
 pub mod item;
 pub mod model;
 pub mod row;
 pub mod sections;
+mod split;
 pub mod suggestions;
 
-pub use model::{Change, Content, FIRST_ROWS, GROW_STEP, MessageModel, ModelStats, SEARCH_PAGE};
+pub use model::{
+    Change, Content, FIRST_ROWS, GROW_STEP, MOVE_SPAN, MessageModel, ModelStats, SEARCH_PAGE,
+};
 
 use crate::actions::{self, ScopedShortcuts};
 use crate::mailbox::{Latch, Mailbox};
@@ -35,15 +46,17 @@ use gtk4::prelude::*;
 use gtk4::{gdk, glib};
 use item::MessageItem;
 pub use row::Quick;
-use row::{MessageRow, RowContext, SectionHeader};
+use row::{MessageRow, RowContext, RowReminders, SectionHeader};
 use sealwax_domain::actions::{ActionId, Scope};
 use sealwax_domain::keymap::Keymap;
 use sealwax_domain::model::{AccountId, FolderId, MessageId};
 use sealwax_domain::search::Date;
-use sealwax_infrastructure::store::{ChangeEvent, ViewFilter, ViewScope, ViewSpec};
+use sealwax_infrastructure::store::{
+    ChangeEvent, ListRow, RowKey, ViewFilter, ViewGrouping, ViewScope, ViewSpec,
+};
 use sections::{Thresholds, until_next_day};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -65,6 +78,9 @@ const DAY_CHECK: Duration = Duration::from_secs(600);
 const LEAVING_WAIT: Duration = Duration::from_secs(10);
 /// How long an action waits for selected rows that aren't loaded yet.
 const TARGETS_WAIT: Duration = Duration::from_secs(3);
+/// The most selected rows a change keeps selected when they move, or carries to a filter or a
+/// grouping.
+const KEPT_SELECTED: usize = 64;
 /// How long after the last key in the search field the search runs (GtkSearchEntry's
 /// `search-delay`; GTK's default and M1's was 150 ms). None: at 100,000 messages a key's
 /// results were painted within 63 ms p95 from a folder and 88 ms from All Inboxes (M7,
@@ -72,6 +88,13 @@ const TARGETS_WAIT: Duration = Duration::from_secs(3);
 pub const SEARCH_DELAY: Duration = Duration::ZERO;
 /// The search field's placeholder, the mock's.
 pub const SEARCH_PLACEHOLDER: &str = "Search — from: has:attachment is:unread";
+/// The search field's width in the header row, in characters: at least, and at most (about
+/// 520 px at the default text size). At least 4, so Split's 380 px header holds the field,
+/// the scope and a filter's pill without the pane growing (phase C).
+pub const SEARCH_CHARS: (i32, i32) = (4, 52);
+/// The search scope that widens it to every folder ([`MessageList::set_everywhere`]); "All"
+/// while a filter's pill shows beside it.
+const SCOPE_ALL: &str = "All folders";
 
 pub const FILTERS: [(ViewFilter, &str); 4] = [
     (ViewFilter::All, "All"),
@@ -81,6 +104,10 @@ pub const FILTERS: [(ViewFilter, &str); 4] = [
 ];
 
 pub fn filter_name(filter: ViewFilter) -> &'static str {
+    // A side of the Split Inbox as a filter (the backend's) is named as its tab is, never "All".
+    if let Some(side) = filter.split() {
+        return crate::window::split_tabs::side_name(side);
+    }
     FILTERS
         .iter()
         .find(|(candidate, _)| *candidate == filter)
@@ -121,7 +148,9 @@ impl SearchHeading {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundRow {
     pub position: Option<u32>,
+    /// The message the reader shows for the row (a conversation's anchor).
     pub id: Option<MessageId>,
+    pub key: Option<RowKey>,
     pub placeholder: bool,
 }
 
@@ -129,8 +158,10 @@ type IdHandler = Rc<dyn Fn(MessageId)>;
 type Handler = Rc<dyn Fn()>;
 type SearchHandler = Rc<dyn Fn(Option<&SearchHeading>)>;
 type CountHandler = Rc<dyn Fn(u32)>;
-type QuickHandler = Rc<dyn Fn(ActionId, Target)>;
+type QuickHandler = Rc<dyn Fn(ActionId, ListRow)>;
 type MenuHandler = Rc<dyn Fn(gdk::Rectangle)>;
+type FilterHandler = Rc<dyn Fn(ViewFilter)>;
+type FlagHandler = Rc<dyn Fn(bool)>;
 
 #[derive(Default)]
 struct Handlers {
@@ -142,6 +173,11 @@ struct Handlers {
     older: RefCell<Vec<FolderHandler>>,
     quick: RefCell<Vec<QuickHandler>>,
     menu: RefCell<Vec<MenuHandler>>,
+    filter: RefCell<Vec<FilterHandler>>,
+    empty: RefCell<Vec<FlagHandler>>,
+    zero: RefCell<Vec<FlagHandler>>,
+    searching: RefCell<Vec<FlagHandler>>,
+    reset: RefCell<Vec<Handler>>,
 }
 
 type FolderHandler = Rc<dyn Fn(FolderId)>;
@@ -150,18 +186,34 @@ type FolderHandler = Rc<dyn Fn(FolderId)>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Selected {
     Nothing,
-    /// One message, outside the select mode: the reader shows it.
+    /// One row, outside the select mode: the reader shows this message, the row's own or its
+    /// conversation's anchor (the first unread, else the latest; the match, in search results).
+    /// The row is reported again only when another row is selected: a conversation that gains
+    /// a message keeps the reader on what it shows.
     One(MessageId),
-    /// The select mode, with this many messages selected.
+    /// The select mode, with this many rows selected.
     Batch(u32),
 }
 
-/// Messages an action is taking out of the list. Once one is gone and nothing is selected, the
-/// row that took the first one's place is selected: the next message, as Gmail does.
+/// Rows an action is taking out of the list. Once one is gone and nothing is selected, the row
+/// that took the first one's place is selected: the next message or conversation, as Gmail
+/// does.
 struct Leaving {
-    ids: HashSet<MessageId>,
+    keys: HashSet<RowKey>,
+    /// The newest member in the view ([`newest_member`]) of each of those rows that was loaded.
+    newest: HashMap<RowKey, MessageId>,
     position: u32,
     since: Instant,
+}
+
+/// What a row held of the view when an action took it out, which an Undo puts back as it was:
+/// a message row's message, a conversation's newest member in the view's folders. A reply to a
+/// conversation archived brings the row back with another newest member.
+fn newest_member(row: &ListRow) -> MessageId {
+    match row {
+        ListRow::Message(message) => message.id,
+        ListRow::Conversation(conversation) => conversation.last_member,
+    }
 }
 
 /// Older mail of a folder whose first sync kept only its newest messages (ML-043).
@@ -187,24 +239,41 @@ struct Inner {
     suggestions: Suggestions,
     /// The Search command's key at the field's end while it is empty (the mock's `/`).
     search_key: gtk::Label,
-    /// Under the chips while a search runs from a folder: that folder, or every folder.
+    /// The search field while a search is typed or runs, and the scope after it: the window
+    /// puts it in the list's header row, in the view name's place (phase B, the visual QA).
+    head: gtk::Box,
+    search_row: gtk::Widget,
+    /// Search was asked for (`/`): the field shows until it is left empty.
+    search_open: Cell<bool>,
+    /// Under the field while a search runs from a folder: that folder, or every folder.
     scope_row: gtk::Box,
     scope_folder: gtk::ToggleButton,
     scope_all: gtk::ToggleButton,
     /// The search covers every folder although the list shows one.
     everywhere: Cell<bool>,
+    /// What the search field last said of the results, as its accessible description.
+    search_described: RefCell<Option<String>>,
     /// Enter in the search field before its results came: the first is selected once they do.
     select_first: Cell<bool>,
-    chips: Vec<(ViewFilter, gtk::ToggleButton)>,
+    /// `list`, `empty` or `zero` (Inbox Zero).
     stack: gtk::Stack,
     empty: empty::EmptyState,
+    zero: empty::InboxZero,
+    /// What the list last told about being empty, showing Inbox Zero and searching.
+    told_empty: Cell<Option<bool>>,
+    told_zero: Cell<Option<bool>>,
+    told_searching: Cell<Option<bool>>,
     scroller: gtk::ScrolledWindow,
     view: gtk::ListView,
+    /// The date sections' headers, shown in Split only ([`MessageList::set_focused`]).
+    headers: gtk::SignalListItemFactory,
     model: MessageModel,
     selection: gtk::MultiSelection,
     context: Rc<RowContext>,
     scope: Cell<Option<ViewScope>>,
     filter: Cell<ViewFilter>,
+    /// One row per message or per conversation (Group by Conversation).
+    grouping: Cell<ViewGrouping>,
     query: RefCell<String>,
     /// Typing into the search field while the list changes it itself.
     quiet: Cell<bool>,
@@ -214,22 +283,55 @@ struct Inner {
     growth: RefCell<Option<gtk::TickCallbackId>>,
     growth_frames: RefCell<Vec<u32>>,
     speed: RefCell<Option<gtk::TickCallbackId>>,
-    /// What the list last reported as selected.
+    /// What the list last reported as selected, and that row's key.
     reported: Cell<Selected>,
-    /// Messages to select again once their rows load, after a reload, until `wanted_until`.
-    wanted: RefCell<Vec<MessageId>>,
+    reported_key: Cell<Option<RowKey>>,
+    /// That row's own message as it was reported (a conversation's anchor): one that moves
+    /// later is new mail in it ([`MessageList::report_new_unread`]).
+    reported_anchor: Cell<Option<MessageId>>,
+    /// The message a row opens at instead of its own (a notification's new message), while
+    /// that row is being selected.
+    open_at: Cell<Option<(RowKey, MessageId)>>,
+    /// Rows to select again once they load, after a reload, until `wanted_until`.
+    wanted: RefCell<Vec<RowKey>>,
     wanted_until: Cell<Option<Instant>>,
-    /// The selected messages and the select mode just before a reset.
-    restoring: RefCell<(Vec<MessageId>, bool)>,
-    /// The selected messages when the selection last settled.
-    settled: RefCell<Vec<MessageId>>,
+    /// The selected rows and the select mode just before a reset.
+    restoring: RefCell<(Vec<RowKey>, bool)>,
+    /// Rows to select once the next content's rows are in: the selection a filter or the
+    /// grouping took over (by key, in the new grouping).
+    carried: RefCell<Vec<RowKey>>,
+    /// The selected rows when the selection last settled.
+    settled: RefCell<Vec<RowKey>>,
     /// Rows show checkboxes, and `j`/`k` and the arrows move the cursor, not the selection.
     select_mode: Cell<bool>,
+    /// A row is always under the cursor (selected) once the list has rows: Focused mode, where
+    /// selecting only lays the conversation out behind the list (the Superhuman pass).
+    keeps_cursor: Cell<bool>,
+    /// Focused mode: a click opens the row, and no date headers show.
+    focused: Cell<bool>,
+    /// Where the one selected row last settled, for the row that takes its place.
+    settled_at: Cell<Option<u32>>,
     /// The row the select mode's cursor is on, when the list hasn't got the keyboard focus.
-    cursor: Cell<Option<MessageId>>,
+    cursor: Cell<Option<RowKey>>,
     /// A click without Ctrl or Shift selects one row and leaves the select mode.
     plain_click: Cell<bool>,
+    /// The row a plain click pressed, which its release opens in Focused mode.
+    pressed: Cell<Option<u32>>,
+    /// The primary button is down on the list, between its press and its release: the
+    /// keyboard focus the press gave its row stays there until the release selects that row
+    /// (phase B's review: following the selection then scrolled the list under a person's
+    /// click, and the release landed on another row).
+    pointer_down: Cell<bool>,
+    /// A Ctrl+arrow (or Page Up, Page Down, Home, End) is being handled: GtkListView moves its
+    /// own focus row apart from the selection on purpose, and the focus stays there.
+    cursor_keys: Cell<bool>,
+    /// The clicks that opened a row in Focused mode, whose double click's second press would
+    /// land on the reader now in the list's place ([`MessageList::swallow_double_clicks`]).
+    double_clicks: RefCell<DoubleClicks>,
     leaving: RefCell<Option<Leaving>>,
+    /// The last rows an action took out, when they left the list empty, with their newest
+    /// members: back as they left (an Undo from Inbox Zero), they are selected again.
+    returning: RefCell<HashMap<RowKey, MessageId>>,
     /// Next and Previous Message's one-key keys, which extend the selection with Shift.
     extend_keys: RefCell<Vec<(gdk::Key, i64)>>,
     /// Where the list was just before its last reset, and whether it had the keyboard focus.
@@ -244,7 +346,9 @@ struct Inner {
     day_check: RefCell<Option<glib::SourceId>>,
     /// The quiet row under the list while older mail loads.
     older_row: gtk::Label,
-    older: RefCell<std::collections::HashMap<FolderId, Older>>,
+    older: RefCell<HashMap<FolderId, Older>>,
+    /// The Split Inbox: the side shown, each side's place, the tabs' totals ([`split`]).
+    splits: split::Splits,
 }
 
 impl Drop for Inner {
@@ -257,10 +361,13 @@ impl Drop for Inner {
 
 impl MessageList {
     pub fn new(mailbox: Rc<Mailbox>) -> Self {
+        // In the header row: as wide as about 52 characters (the visual QA's 480–560 px), and
+        // never narrower than 8, so a narrow pane's header holds it without growing.
         let search = gtk::SearchEntry::builder()
             .placeholder_text(SEARCH_PLACEHOLDER)
             .search_delay(SEARCH_DELAY.as_millis() as u32)
-            .hexpand(true)
+            .width_chars(SEARCH_CHARS.0)
+            .max_width_chars(SEARCH_CHARS.1)
             .build();
         search.add_css_class("sw-search");
         search.set_widget_name("list-search");
@@ -273,32 +380,21 @@ impl MessageList {
             .build();
         search_key.add_css_class("sw-search-key");
         search_key.set_widget_name("list-search-key");
-        let field = gtk::Overlay::builder().child(&search).build();
+        let field = gtk::Overlay::builder()
+            .child(&search)
+            .visible(false)
+            .build();
         field.add_overlay(&search_key);
+        field.set_widget_name("list-search-row");
         let suggestions = Suggestions::new(&search, mailbox.clone());
-        let chip_row = gtk::Box::builder().spacing(6).build();
-        chip_row.add_css_class("sw-chips");
-        let mut chips: Vec<(ViewFilter, gtk::ToggleButton)> = Vec::new();
-        for (filter, name) in FILTERS {
-            let chip = gtk::ToggleButton::builder()
-                .label(name)
-                .active(filter == ViewFilter::All)
-                .build();
-            chip.add_css_class("sw-chip");
-            chip.set_widget_name(&format!("chip-{}", name.to_lowercase()));
-            if let Some((_, first)) = chips.first() {
-                chip.set_group(Some(first));
-            }
-            chip_row.append(&chip);
-            chips.push((filter, chip));
-        }
+        // Spacing from style.css alone: GTK adds a box's border-spacing to its own spacing.
         let head = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(8)
+            .valign(gtk::Align::Center)
+            .visible(false)
             .build();
         head.add_css_class("sw-list-head");
+        head.set_widget_name("list-search-bar");
         head.append(&field);
-        head.append(&chip_row);
         let (scope_row, scope_folder, scope_all) = scope_row();
         head.append(&scope_row);
 
@@ -352,14 +448,17 @@ impl MessageList {
             }
         });
         let header_context = context.clone();
-        headers.connect_unbind(move |_, object| {
+        let unbind_header = move |_: &gtk::SignalListItemFactory, object: &glib::Object| {
             if let Some(widget) = object
                 .downcast_ref::<gtk::ListHeader>()
                 .and_then(|header| header.child().and_downcast::<SectionHeader>())
             {
                 widget.unbind(&header_context);
             }
-        });
+        };
+        headers.connect_unbind(unbind_header.clone());
+        // Taking the factory away (Focused) tears the headers down without unbinding them.
+        headers.connect_teardown(unbind_header);
         let view = gtk::ListView::builder()
             .model(&selection)
             .factory(&factory)
@@ -378,15 +477,18 @@ impl MessageList {
             .build();
         let empty = empty::folder("No messages", "Messages in this folder appear here.");
         empty.widget().set_widget_name("list-empty");
+        empty.set_name("list-empty-state");
+        let zero = empty::inbox_zero();
+        zero.widget().set_widget_name("inbox-zero");
         let stack = gtk::Stack::builder().vexpand(true).build();
         stack.add_named(&scroller, Some("list"));
         stack.add_named(empty.widget(), Some("empty"));
+        stack.add_named(zero.widget(), Some("zero"));
         stack.set_visible_child_name("list");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("sw-message-list");
         root.add_css_class("sw-message-list-pane");
         root.set_widget_name("message-list-pane");
-        root.append(&head);
         root.append(&stack);
         let older_row = gtk::Label::builder()
             .label("Loading older messages…")
@@ -399,6 +501,14 @@ impl MessageList {
         older_row.add_css_class("sw-list-older");
         older_row.set_widget_name("list-older");
         root.append(&older_row);
+        // The sender column's widest width, measured from CSS for every row (RowContext).
+        let ruler = gtk::Box::builder()
+            .can_target(false)
+            .accessible_role(gtk::AccessibleRole::Presentation)
+            .build();
+        ruler.add_css_class("sw-row-ruler");
+        root.append(&ruler);
+        context.set_ruler(&ruler);
 
         let list = Self {
             inner: Rc::new(Inner {
@@ -407,21 +517,30 @@ impl MessageList {
                 search,
                 suggestions,
                 search_key,
+                head,
+                search_row: field.upcast(),
+                search_open: Cell::new(false),
                 scope_row,
                 scope_folder,
                 scope_all,
                 everywhere: Cell::new(false),
+                search_described: RefCell::new(None),
                 select_first: Cell::new(false),
-                chips,
                 stack,
                 empty,
+                zero,
+                told_empty: Cell::new(None),
+                told_zero: Cell::new(None),
+                told_searching: Cell::new(None),
                 scroller,
                 view,
+                headers,
                 model,
                 selection,
                 context,
                 scope: Cell::new(None),
                 filter: Cell::new(ViewFilter::All),
+                grouping: Cell::new(ViewGrouping::Messages),
                 query: RefCell::new(String::new()),
                 quiet: Cell::new(false),
                 clock: Cell::new(None),
@@ -430,14 +549,26 @@ impl MessageList {
                 growth_frames: RefCell::new(Vec::new()),
                 speed: RefCell::new(None),
                 reported: Cell::new(Selected::Nothing),
+                reported_key: Cell::new(None),
+                open_at: Cell::new(None),
+                reported_anchor: Cell::new(None),
                 wanted: RefCell::new(Vec::new()),
                 wanted_until: Cell::new(None),
                 restoring: RefCell::new((Vec::new(), false)),
+                carried: RefCell::new(Vec::new()),
                 settled: RefCell::new(Vec::new()),
                 select_mode: Cell::new(false),
+                keeps_cursor: Cell::new(false),
+                focused: Cell::new(false),
+                settled_at: Cell::new(None),
                 cursor: Cell::new(None),
                 plain_click: Cell::new(false),
+                pressed: Cell::new(None),
+                pointer_down: Cell::new(false),
+                cursor_keys: Cell::new(false),
+                double_clicks: RefCell::new(DoubleClicks::default()),
                 leaving: RefCell::new(None),
+                returning: RefCell::new(HashMap::new()),
                 extend_keys: RefCell::new(Vec::new()),
                 place: Cell::new(0.0),
                 refocus: Cell::new(false),
@@ -450,6 +581,7 @@ impl MessageList {
                 day_check: RefCell::new(None),
                 older_row,
                 older: RefCell::default(),
+                splits: split::Splits::default(),
             }),
         };
         list.connect();
@@ -497,11 +629,11 @@ impl MessageList {
         });
         self.connect_selection_input();
         let weak = self.downgrade();
-        inner.context.set_quick(move |action, target| {
+        inner.context.set_quick(move |action, row| {
             Self::with(&weak, |list| {
                 let handlers = list.inner.handlers.quick.borrow().clone();
                 for handler in handlers {
-                    handler(action, target);
+                    handler(action, row.clone());
                 }
             });
         });
@@ -542,23 +674,42 @@ impl MessageList {
         inner.search.connect_stop_search(move |_| {
             Self::with(&weak, |list| {
                 list.clear_search();
-                list.inner.view.grab_focus();
+                list.inner.search_open.set(false);
+                list.update_head();
+                list.focus_selected();
             });
         });
+        // Left empty, the field goes (a click into the list after `/`). The command palette
+        // over the window only borrows the focus: it gives it back here when it closes.
+        let leave = gtk::EventControllerFocus::new();
+        let weak = self.downgrade();
+        leave.connect_leave(move |_| {
+            let weak = weak.clone();
+            glib::idle_add_local_once(move || {
+                Self::with(&weak, |list| {
+                    let focused = list
+                        .inner
+                        .search
+                        .root()
+                        .and_then(|root| root.focus())
+                        .is_some_and(|focus| {
+                            focus == *list.inner.search.upcast_ref::<gtk::Widget>()
+                                || focus.is_ancestor(&list.inner.search)
+                                || crate::palette::holds(&focus)
+                        });
+                    if !focused && list.inner.search.text().is_empty() {
+                        list.inner.search_open.set(false);
+                        list.update_head();
+                    }
+                });
+            });
+        });
+        inner.search.add_controller(leave);
         let weak = self.downgrade();
         inner.search.connect_activate(move |entry| {
             let text = entry.text().trim().to_owned();
             Self::with(&weak, |list| list.search_activated(text));
         });
-        for (filter, chip) in &inner.chips {
-            let filter = *filter;
-            let weak = self.downgrade();
-            chip.connect_toggled(move |chip| {
-                if chip.is_active() {
-                    Self::with(&weak, |list| list.set_filter(filter));
-                }
-            });
-        }
         let weak = self.downgrade();
         inner
             .scroller
@@ -583,7 +734,7 @@ impl MessageList {
         });
     }
 
-    /// The list pane's content: the search field, the chips and the list.
+    /// The list pane's content: the search field (while searching) and the list.
     pub fn widget(&self) -> &gtk::Box {
         &self.inner.root
     }
@@ -594,11 +745,13 @@ impl MessageList {
 
     /// When `window`'s focus goes nowhere while the list is shown, as when a toast that held it
     /// hides after the last row left, it comes back to the list once the frame is done, so the
-    /// list's keys (`z` among them) keep working.
+    /// list's keys (`z` among them) keep working. A focus that comes into the list on a row
+    /// other than the selected one moves to it ([`MessageList::focus_follows_selection`]).
     pub fn keep_focus(&self, window: &impl IsA<gtk::Window>) {
         let weak = self.downgrade();
         window.connect_focus_widget_notify(move |window| {
-            if gtk::prelude::GtkWindowExt::focus(window).is_some() {
+            if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) {
+                Self::with(&weak, |list| list.focus_moved(&focus));
                 return;
             }
             let weak = weak.clone();
@@ -612,7 +765,7 @@ impl MessageList {
                 }
                 Self::with(&weak, |list| {
                     if list.inner.root.is_mapped() {
-                        list.inner.view.grab_focus();
+                        list.take_focus();
                     }
                 });
             });
@@ -635,25 +788,44 @@ impl MessageList {
         &self.inner.selection
     }
 
-    pub fn chip(&self, filter: ViewFilter) -> Option<&gtk::ToggleButton> {
-        self.inner
-            .chips
-            .iter()
-            .find(|(candidate, _)| *candidate == filter)
-            .map(|(_, chip)| chip)
-    }
-
+    /// The empty state shown, as its title and its line: a folder's ("No messages", …), or
+    /// Inbox Zero and the day.
     pub fn empty_state(&self) -> Option<(String, String)> {
-        (self.inner.stack.visible_child_name().as_deref() == Some("empty")).then(|| {
-            (
+        match self.inner.stack.visible_child_name().as_deref() {
+            Some("empty") => Some((
                 self.inner.empty.title().to_string(),
                 self.inner
                     .empty
                     .description()
                     .map(|text| text.to_string())
                     .unwrap_or_default(),
-            )
-        })
+            )),
+            Some("zero") => Some((
+                self.inner.zero.title().to_string(),
+                self.inner.zero.date().to_string(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The first name of the empty state's icon (a folder's, the Reminders view's clock), for
+    /// checks.
+    pub fn empty_icon(&self) -> Option<String> {
+        self.inner.empty.icon_name()
+    }
+
+    /// The empty state's title and description (for the self-test).
+    pub fn empty_text(&self) -> (String, String) {
+        let empty = &self.inner.empty;
+        (
+            empty.title().to_string(),
+            empty.description().map(String::from).unwrap_or_default(),
+        )
+    }
+
+    /// Whether the search field shows.
+    pub fn shows_search(&self) -> bool {
+        self.inner.search_row.get_visible()
     }
 
     /// Opens `latch` once the list has the first rows of what it shows (the first window waits
@@ -662,9 +834,21 @@ impl MessageList {
         self.inner.first_rows.replace(Some(latch));
     }
 
-    /// Shows a folder or the unified inbox (`None`: nothing). A search in progress ends.
+    /// Shows a folder or the unified inbox (`None`: nothing). A search in progress ends. An
+    /// Inbox shows the side of the Split Inbox it showed last, as it was left.
     pub fn show(&self, scope: Option<ViewScope>) {
+        self.leave_split();
+        self.take_wanted_split(scope);
+        let moved = self.inner.scope.get() != scope;
+        self.inner.splits.shown.set(self.split_for(scope));
+        self.inner.splits.arriving.set(self.arrival_for(scope));
         self.inner.scope.set(scope);
+        if moved {
+            // Another Inbox's totals: the last one's don't show until they are counted.
+            self.forget_split_counts();
+        }
+        // Another folder's rows: a selection carried to a filter doesn't follow.
+        self.inner.carried.borrow_mut().clear();
         if let Some(ViewScope::Folder(folder)) = scope {
             let mut older = self.inner.older.borrow_mut();
             if older.get(&folder) == Some(&Older::Paused) {
@@ -678,7 +862,13 @@ impl MessageList {
             self.inner.quiet.set(false);
             self.emit_search();
         }
+        self.inner.search_open.set(false);
         self.reload();
+        if moved {
+            // The header's tabs (or the title) at once, the totals counted with the rows.
+            self.count_splits();
+            self.tell_split();
+        }
     }
 
     pub fn scope(&self) -> Option<ViewScope> {
@@ -689,17 +879,95 @@ impl MessageList {
         self.inner.filter.get()
     }
 
-    /// Filters by a chip, as clicking it does.
-    pub fn set_filter(&self, filter: ViewFilter) {
-        if let Some(chip) = self.chip(filter)
-            && !chip.is_active()
-        {
-            chip.set_active(true);
+    /// One row per message or per conversation.
+    pub fn grouping(&self) -> ViewGrouping {
+        self.inner.grouping.get()
+    }
+
+    /// Whether the rows are conversations (the content shown, or asked for).
+    pub fn shows_conversations(&self) -> bool {
+        self.inner.grouping.get() == ViewGrouping::Conversations
+    }
+
+    /// Lists one row per conversation or per message (Group by Conversation), showing what it
+    /// shows again; a selected row stays selected as its conversation or as the message the
+    /// reader shows for it.
+    pub fn set_grouping(&self, grouping: ViewGrouping) {
+        if self.inner.grouping.get() == grouping {
             return;
         }
-        if self.inner.filter.replace(filter) != filter {
+        self.carry(grouping);
+        self.inner.grouping.set(grouping);
+        // The sides' totals count rows of the grouping: counted again with them.
+        self.forget_split_counts();
+        if self.inner.scope.get().is_some() {
             self.reload();
         }
+    }
+
+    /// Notes the selected rows to select again in the next content, by key in `grouping`: a
+    /// message row stands for its conversation, a conversation row for the message the reader
+    /// shows for it.
+    fn carry(&self, grouping: ViewGrouping) {
+        let model = &self.inner.model;
+        let keys: Vec<RowKey> = self
+            .selected_positions_if_few()
+            .into_iter()
+            .filter_map(|position| model.list_row_at(position))
+            .map(|row| match (row, grouping) {
+                (ListRow::Message(row), ViewGrouping::Conversations) => {
+                    RowKey::Conversation(row.thread)
+                }
+                (ListRow::Conversation(row), ViewGrouping::Messages) => RowKey::Message(
+                    self.reported_message(RowKey::Conversation(row.thread))
+                        .unwrap_or(row.anchor),
+                ),
+                (row, _) => row.key(),
+            })
+            .collect();
+        self.inner.carried.replace(keys);
+    }
+
+    /// Shows only the messages `filter` lets through (All for every one); the window's bar
+    /// shows it ([`MessageList::connect_filter_changed`]). The selected rows stay selected
+    /// where the filter keeps them.
+    pub fn set_filter(&self, filter: ViewFilter) {
+        if self.inner.filter.replace(filter) != filter {
+            // The filter's pill shows after the search's scope: a compact scope ("Inbox · All ·
+            // Unread ×") leaves the field its room in Split's 380 px header, where "workshop"
+            // showed cut (phase C's review). It still says "All folders" to a screen reader.
+            let scope = &self.inner.scope_all;
+            scope.set_label(if filter == ViewFilter::All {
+                SCOPE_ALL
+            } else {
+                "All"
+            });
+            crate::accessibility::name_button(scope, SCOPE_ALL);
+            self.carry(self.inner.grouping.get());
+            self.reload();
+            let handlers = self.inner.handlers.filter.borrow().clone();
+            for handler in handlers {
+                handler(filter);
+            }
+        }
+    }
+
+    /// Runs `handler` with every filter the list starts showing.
+    pub fn connect_filter_changed(&self, handler: impl Fn(ViewFilter) + 'static) {
+        self.inner
+            .handlers
+            .filter
+            .borrow_mut()
+            .push(Rc::new(handler));
+    }
+
+    /// Runs `handler` with whether the list shows an empty state, whenever that changes.
+    pub fn connect_empty_changed(&self, handler: impl Fn(bool) + 'static) {
+        self.inner
+            .handlers
+            .empty
+            .borrow_mut()
+            .push(Rc::new(handler));
     }
 
     pub fn query(&self) -> String {
@@ -732,9 +1000,189 @@ impl MessageList {
         self.set_query(String::new());
     }
 
-    /// Puts the keyboard focus in the search field (Search: `/`, Ctrl+F).
+    /// Shows the search field and puts the keyboard focus in it (Search: `/`, Ctrl+F, the
+    /// bar's button).
     pub fn focus_search(&self) {
+        self.inner.search_open.set(true);
+        self.update_head();
         self.inner.search.grab_focus();
+    }
+
+    /// The field shows while a search is asked for or runs, the scope after it while one runs
+    /// from a folder; with neither, the header shows the view's name instead (the window,
+    /// [`MessageList::connect_searching`]).
+    fn update_head(&self) {
+        let inner = &self.inner;
+        let searching = inner.search_open.get()
+            || !inner.query.borrow().is_empty()
+            || !inner.search.text().is_empty();
+        if inner.search_row.get_visible() != searching {
+            inner.search_row.set_visible(searching);
+        }
+        let head = searching || inner.scope_row.get_visible();
+        if inner.head.get_visible() != head {
+            inner.head.set_visible(head);
+        }
+        if inner.told_searching.replace(Some(head)) != Some(head) {
+            let handlers = inner.handlers.searching.borrow().clone();
+            for handler in handlers {
+                handler(head);
+            }
+        }
+    }
+
+    /// The search field and its scope, for the list's header row (`Window::set_list_search`).
+    pub fn search_bar(&self) -> &gtk::Box {
+        &self.inner.head
+    }
+
+    /// Runs `handler` with whether the search shows (the field, a search running), whenever
+    /// that changes: the header shows it in the view name's place, and a Split window keeps
+    /// its panes while it shows, whatever the results (phase B: typing jumped the list between
+    /// 380 px and the whole window as results came and went).
+    pub fn connect_searching(&self, handler: impl Fn(bool) + 'static) {
+        self.inner
+            .handlers
+            .searching
+            .borrow_mut()
+            .push(Rc::new(handler));
+    }
+
+    /// Puts the keyboard focus on the row under the cursor (the selected one outside the select
+    /// mode), scrolled into view, else on the list: back from the reader, the list as it was
+    /// left (the Superhuman pass).
+    pub fn focus_selected(&self) {
+        let view = &self.inner.view;
+        if view.is_mapped()
+            && let Some(position) = self.cursor_position()
+        {
+            if position >= self.inner.model.n_items() {
+                self.inner.model.complete_growth();
+            }
+            view.scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+        }
+        self.take_focus();
+    }
+
+    /// The window's keyboard focus moved to `focus`. In the list it lands where GtkListView's
+    /// own focus row was left (Tab, the palette closing, the reader's Back, a reset under it),
+    /// which needn't be the selected row: it moves to the selected row once the frame is done,
+    /// and again once a list a pane just showed is laid out. Not the focus a press gives its
+    /// row, which its release selects, nor the one Ctrl with the arrows moves on its own.
+    fn focus_moved(&self, focus: &gtk::Widget) {
+        let inner = &self.inner;
+        let view = &inner.view;
+        let inside = focus == view.upcast_ref::<gtk::Widget>() || focus.is_ancestor(view);
+        if !inside || inner.pointer_down.get() || inner.cursor_keys.get() {
+            return;
+        }
+        let weak = self.downgrade();
+        glib::idle_add_local_once(move || {
+            Self::with(&weak, |list| list.focus_follows_selection());
+        });
+        self.after_paint(|list| list.focus_follows_selection());
+    }
+
+    /// Moves the keyboard focus from another row of the list to the selected one, outside the
+    /// select mode, so no ring stands apart from the selection. Never while the primary button
+    /// is down on the list (its release selects the row it pressed, whose row has the focus),
+    /// and never by scrolling: only a selected row wholly in view takes it (phase B's review:
+    /// scrolling to it between a person's press and release lost the click). With nothing
+    /// selected (Split before a pick), the focus goes to the first row in view, not where
+    /// GtkListView's own focus row drifted as mail came in above it (phase C; the review: row 2
+    /// showed the bar after two newer conversations).
+    fn focus_follows_selection(&self) {
+        let inner = &self.inner;
+        if inner.select_mode.get() || inner.pointer_down.get() || !self.has_focus_within() {
+            return;
+        }
+        let wanted = match self.selected_in_view() {
+            Some(selected) => Some(selected),
+            None if inner.selection.selection().size() == 0 => self.first_row_in_view(),
+            None => None,
+        };
+        if let Some(wanted) = wanted
+            && self.focused_row().is_some_and(|focused| focused != wanted)
+        {
+            // In view, GtkListView doesn't move.
+            inner
+                .view
+                .scroll_to(wanted, gtk::ListScrollFlags::FOCUS, None);
+        }
+    }
+
+    /// The keyboard focus for the list: its empty state while one shows (Inbox Zero, "No
+    /// messages"), where the list's keys still work, else the list view, on the selected row
+    /// when it is in view (GtkListView's own focus row may be another: where a grab left it
+    /// before `j` and `k` moved the selection from the reader).
+    fn take_focus(&self) {
+        let taken = match self.inner.stack.visible_child_name().as_deref() {
+            Some("zero") => self.inner.zero.focus(),
+            Some("empty") => self.inner.empty.focus(),
+            _ => false,
+        };
+        if taken {
+            return;
+        }
+        let view = &self.inner.view;
+        if !self.inner.select_mode.get()
+            && let Some(selected) = self.selected_in_view()
+        {
+            // GtkListView's focus row, without moving the list: the grab below lands there.
+            view.scroll_to(selected, gtk::ListScrollFlags::FOCUS, None);
+        }
+        view.grab_focus();
+    }
+
+    /// The one selected row, while it is wholly in view: the keyboard focus goes to it without
+    /// the list moving.
+    fn selected_in_view(&self) -> Option<u32> {
+        let position = self.selected_position()?;
+        self.row_widget(position)
+            .is_some_and(|row| self.in_view(&row))
+            .then_some(position)
+    }
+
+    /// Whether `row` is on screen whole, between the list's top and bottom edges.
+    fn in_view(&self, row: &MessageRow) -> bool {
+        let scroller = self.scroller();
+        let height = scroller.height() as f32;
+        row.is_mapped()
+            && row
+                .compute_bounds(scroller)
+                .is_some_and(|bounds| bounds.y() >= 0.0 && bounds.y() + bounds.height() <= height)
+    }
+
+    /// Runs `work` once the next frame is painted: the list laid out as it shows now.
+    fn after_paint(&self, work: impl FnOnce(MessageList) + 'static) {
+        let Some(clock) = self.inner.view.frame_clock() else {
+            return;
+        };
+        let weak = self.downgrade();
+        let handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::default();
+        let once = handler.clone();
+        let work = RefCell::new(Some(work));
+        let id = clock.connect_after_paint(move |clock| {
+            if let Some(id) = once.take() {
+                clock.disconnect(id);
+            }
+            if let Some(work) = work.take() {
+                Self::with(&weak, work);
+            }
+        });
+        handler.replace(Some(id));
+        self.inner.view.queue_draw();
+    }
+
+    /// The keyboard focus is on the list's rows or its empty state, or on a row a reset just
+    /// took out of the window.
+    fn holds_focus(&self) -> bool {
+        let Some(focus) = self.inner.view.root().and_then(|root| root.focus()) else {
+            return false;
+        };
+        focus.root().is_none()
+            || focus == *self.inner.stack.upcast_ref::<gtk::Widget>()
+            || focus.is_ancestor(&self.inner.stack)
     }
 
     /// The search field's suggestions.
@@ -785,6 +1233,15 @@ impl MessageList {
     /// Runs the search shown again, as after the search index was rebuilt.
     pub fn search_again(&self) {
         self.inner.model.search_again();
+    }
+
+    /// Searches every folder for `text` as if it was typed into the field and Enter pressed:
+    /// the field shows it, the first result is selected once it comes, and the list takes the
+    /// keyboard focus (the contact pane's "Search all mail from …", phase C).
+    pub fn search_for(&self, text: &str) {
+        self.inner.search_open.set(true);
+        self.set_everywhere(true);
+        self.search_activated(text.to_owned());
     }
 
     /// Enter in the search field: the search runs now, the first result is selected (now, or
@@ -854,6 +1311,7 @@ impl MessageList {
             }
         }
         inner.scope_row.set_visible(folder.is_some());
+        self.update_head();
     }
 
     fn reload(&self) {
@@ -861,16 +1319,23 @@ impl MessageList {
         let thresholds = self.thresholds_now();
         let query = inner.query.borrow().clone();
         self.update_scope();
+        self.update_reminders();
         match inner.scope.get() {
             None => inner.model.clear(),
             Some(scope) if query.is_empty() => {
                 let spec = ViewSpec {
                     scope,
                     filter: inner.filter.get(),
+                    grouping: inner.grouping.get(),
+                    split: inner.splits.shown.get(),
                 };
-                match inner.mailbox.take_first_view(spec, thresholds) {
-                    Some(opened) => inner.model.adopt(spec, thresholds, opened),
-                    None => inner.model.open(spec, thresholds),
+                if let Some((opened, events)) = self.take_warm(spec, thresholds) {
+                    inner.model.adopt_with(spec, thresholds, opened, events);
+                } else {
+                    match inner.mailbox.take_first_view(spec, thresholds) {
+                        Some(opened) => inner.model.adopt(spec, thresholds, opened),
+                        None => inner.model.open(spec, thresholds),
+                    }
                 }
             }
             Some(scope) => {
@@ -878,9 +1343,13 @@ impl MessageList {
                     ViewScope::Folder(folder) if !inner.everywhere.get() => Some(folder),
                     _ => None,
                 };
-                inner
-                    .model
-                    .search(query, folder, inner.filter.get(), thresholds);
+                inner.model.search(
+                    query,
+                    folder,
+                    inner.filter.get(),
+                    inner.grouping.get(),
+                    thresholds,
+                );
             }
         }
         self.emit_search();
@@ -922,14 +1391,26 @@ impl MessageList {
                     if self.inner.refocus.get() {
                         self.focus_after_layout();
                     }
+                    self.inner.carried.borrow_mut().clear();
                     self.restore_selection();
                 } else {
                     self.inner.wanted.borrow_mut().clear();
                     self.inner.leaving.take();
+                    self.inner.returning.borrow_mut().clear();
                     self.inner.cursor.set(None);
                     self.set_select_mode(false);
-                    self.scroll_after_layout(0.0);
+                    if !self.arrive_split() && !self.select_carried() {
+                        self.scroll_after_layout(0.0);
+                        // Focused: the cursor on the first row, as Superhuman shows it.
+                        if self.inner.keeps_cursor.get() && self.inner.model.total() > 0 {
+                            self.select_position(0);
+                        }
+                    }
                 }
+                // The Split Inbox: the other side opened ahead, the tabs counted.
+                self.warm_other();
+                self.count_splits();
+                self.tell_split();
                 if let Some(latch) = self.inner.first_rows.borrow().as_ref() {
                     latch.open();
                 }
@@ -939,10 +1420,16 @@ impl MessageList {
                 {
                     self.select_position(0);
                 }
+                let handlers = self.inner.handlers.reset.borrow().clone();
+                for handler in handlers {
+                    handler();
+                }
             }
             Change::Rows => {
                 self.select_wanted();
                 self.check_leaving();
+                self.select_returning();
+                self.keep_cursor();
             }
             Change::Failed => {
                 self.inner.select_first.set(false);
@@ -963,10 +1450,57 @@ impl MessageList {
             return;
         }
         let empty = model.total() == 0;
-        if empty {
+        let zero = empty && self.is_inbox_view(&model.content());
+        if zero {
+            inner.zero.set_date(&self.now());
+            // An empty side of the Split Inbox says what the other one holds.
+            inner.zero.set_other(self.zero_other_line().as_deref());
+        } else if empty {
+            // The Reminders view's (phase C) has its clock, and one line that fits. Under a
+            // filter, the filter's own state says why nothing shows (the second review: "No
+            // reminders" beside the Unread pill).
+            let reminders = self.inner.context.reminders().wakes
+                && matches!(
+                    model.content(),
+                    Content::View(spec) if spec.filter == ViewFilter::All
+                );
+            inner.empty.set_icons(if reminders {
+                &row::REMIND_ICONS
+            } else {
+                &empty::FOLDER_ICONS
+            });
+            // Reminders waiting there that it doesn't list yet are on their way: a server
+            // account's moves wait for the undo window and the server (the third review: "No
+            // reminders … press h" right after h).
+            let arriving = self.inner.context.reminders().arriving;
+            let on_the_way =
+                format!("Your {arriving} reminders show here once the mail server has moved them.");
+            let found_nothing;
             let (title, description) = match model.content() {
                 Content::Nothing => ("No folder", "Pick a folder to see its messages."),
-                Content::Search { .. } => ("No results", "No messages match the search."),
+                Content::Search {
+                    text,
+                    folder,
+                    filter,
+                    grouping,
+                } => {
+                    let folder = folder
+                        .and_then(|folder| inner.mailbox.folder(folder))
+                        .map(|folder| crate::triage::folder_title(&folder));
+                    found_nothing = no_results(&text, folder.as_deref(), filter, grouping);
+                    ("No results", found_nothing.as_str())
+                }
+                Content::View(_) if reminders && arriving == 1 => (
+                    "On the way",
+                    "Your reminder shows here once the mail server has moved it.",
+                ),
+                Content::View(_) if reminders && arriving > 1 => {
+                    ("On the way", on_the_way.as_str())
+                }
+                Content::View(_) if reminders => (
+                    "No reminders",
+                    "Press h on a conversation to set a reminder.",
+                ),
                 Content::View(spec) => match spec.filter {
                     ViewFilter::All => ("No messages", "Messages in this folder appear here."),
                     ViewFilter::Unread => ("No unread messages", "Everything here is read."),
@@ -974,14 +1508,61 @@ impl MessageList {
                     ViewFilter::Attachments => {
                         ("No attachments", "Messages with attachments appear here.")
                     }
+                    ViewFilter::Important => {
+                        ("No important messages", "Mail from people appears here.")
+                    }
+                    ViewFilter::Other => ("No other messages", "Everything else appears here."),
                 },
             };
             inner.empty.set_title(title);
             inner.empty.set_description(Some(description));
         }
-        inner
-            .stack
-            .set_visible_child_name(if empty { "empty" } else { "list" });
+        // The rows the focus was on may go with the reset: the focus stays with the list, or GTK
+        // would move it on to the window's first control and the list's keys would stop.
+        let focused = self.holds_focus();
+        inner.stack.set_visible_child_name(match (zero, empty) {
+            (true, _) => "zero",
+            (_, true) => "empty",
+            _ => "list",
+        });
+        if empty && focused {
+            self.take_focus();
+        }
+        if inner.told_empty.replace(Some(empty)) != Some(empty) {
+            let handlers = inner.handlers.empty.borrow().clone();
+            for handler in handlers {
+                handler(empty);
+            }
+        }
+        if inner.told_zero.replace(Some(zero)) != Some(zero) {
+            let handlers = inner.handlers.zero.borrow().clone();
+            for handler in handlers {
+                handler(zero);
+            }
+        }
+    }
+
+    /// Runs `handler` with whether the list shows Inbox Zero, whenever that changes (the window
+    /// tints its whole pane, the header row too).
+    pub fn connect_inbox_zero(&self, handler: impl Fn(bool) + 'static) {
+        self.inner.handlers.zero.borrow_mut().push(Rc::new(handler));
+    }
+
+    /// An Inbox or All Inboxes with every message (no filter, no search), or one side of it:
+    /// its empty state is Inbox Zero.
+    fn is_inbox_view(&self, content: &Content) -> bool {
+        let Content::View(spec) = content else {
+            return false;
+        };
+        spec.filter == ViewFilter::All
+            && match spec.scope {
+                ViewScope::UnifiedInbox => true,
+                ViewScope::Folder(folder) => {
+                    self.inner.mailbox.folder(folder).is_some_and(|folder| {
+                        folder.role == sealwax_domain::model::FolderRole::Inbox
+                    })
+                }
+            }
     }
 
     /// Tells the search listeners again what the list shows (the window resets the list's title
@@ -998,6 +1579,21 @@ impl MessageList {
                 searching: self.inner.model.is_searching(),
                 everywhere: self.is_everywhere(),
             });
+        // The header shows the field in the heading's place: the field says the count.
+        let described = heading.as_ref().map(SearchHeading::subtitle);
+        if *self.inner.search_described.borrow() != described {
+            match &described {
+                Some(text) => self
+                    .inner
+                    .search
+                    .update_property(&[gtk::accessible::Property::Description(text)]),
+                None => self
+                    .inner
+                    .search
+                    .reset_property(gtk::AccessibleProperty::Description),
+            }
+            self.inner.search_described.replace(described);
+        }
         let handlers = self.inner.handlers.search.borrow().clone();
         for handler in handlers {
             handler(heading.as_ref());
@@ -1052,9 +1648,68 @@ impl MessageList {
 
     fn on_event(&self, event: &Arc<ChangeEvent>) {
         let at_top = self.inner.scroller.vadjustment().value() < PIN_SLACK;
+        // What is selected and focused now, by key: a conversation that moves keeps both.
+        let selected = self.selected_keys_if_few();
+        let focused = self
+            .has_focus_within()
+            .then(|| self.focused_row())
+            .flatten()
+            .and_then(|position| self.inner.model.key_at(position));
         let inserted = self.inner.model.apply_event(event);
         if inserted && at_top {
             self.scroll_after_layout(0.0);
+        }
+        self.keep_selected(&selected, focused, event);
+        self.split_event(event);
+    }
+
+    /// Selects again the rows of `keys` that a change kept in the list but took out of the
+    /// selection, and puts the keyboard focus back on `focused`: a conversation that moved too
+    /// far to be told GTK at once, or one merged into another, which it is now. The selection
+    /// is then the row reported, so the reader isn't asked again.
+    fn keep_selected(&self, keys: &[RowKey], focused: Option<RowKey>, event: &ChangeEvent) {
+        if keys.is_empty() {
+            return;
+        }
+        let merged: HashMap<_, _> = event
+            .merged_threads
+            .iter()
+            .map(|merge| (merge.from, merge.into))
+            .collect();
+        let follow = |key: RowKey| match key {
+            RowKey::Conversation(thread) => {
+                RowKey::Conversation(merged.get(&thread).copied().unwrap_or(thread))
+            }
+            key => key,
+        };
+        let inner = &self.inner;
+        if let Some(reported) = inner.reported_key.get()
+            && follow(reported) != reported
+            && matches!(inner.reported.get(), Selected::One(_))
+        {
+            // The conversation shown is the one it merged into: the reader already follows it.
+            inner.reported_key.set(Some(follow(reported)));
+        }
+        if let Some(cursor) = inner.cursor.get() {
+            inner.cursor.set(Some(follow(cursor)));
+        }
+        let model = &inner.model;
+        let several = keys.len() > 1;
+        for key in keys.iter().copied().map(follow) {
+            let Some(position) = model.position_of_key(key) else {
+                continue;
+            };
+            if !inner.selection.is_selected(position) {
+                self.select_item(position, several, false);
+            }
+        }
+        if let Some(focused) = focused.map(follow)
+            && let Some(position) = model.position_of_key(focused)
+            && self.focused_row() != Some(position)
+        {
+            inner
+                .view
+                .scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
         }
     }
 
@@ -1126,32 +1781,24 @@ impl MessageList {
     }
 
     fn focus_row_in_view(&self) {
-        let scroller = self.scroller();
-        let height = scroller.height() as f32;
-        let in_view = |row: &MessageRow| {
-            row.is_mapped()
-                && row.compute_bounds(scroller).is_some_and(|bounds| {
-                    bounds.y() >= 0.0 && bounds.y() + bounds.height() <= height
-                })
-        };
-        let position = self
-            .selected_position()
-            .filter(|position| self.row_widget(*position).is_some_and(|row| in_view(&row)))
-            .or_else(|| {
-                self.inner
-                    .context
-                    .bound
-                    .borrow()
-                    .iter()
-                    .filter(|row| in_view(row))
-                    .filter_map(MessageRow::position)
-                    .min()
-            });
+        let position = self.selected_in_view().or_else(|| self.first_row_in_view());
         if let Some(position) = position {
             let view = &self.inner.view;
             view.scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
             view.grab_focus();
         }
+    }
+
+    /// The first row wholly in view.
+    fn first_row_in_view(&self) -> Option<u32> {
+        self.inner
+            .context
+            .bound
+            .borrow()
+            .iter()
+            .filter(|row| self.in_view(row))
+            .filter_map(MessageRow::position)
+            .min()
     }
 
     /// After rows moved under a page on its way, asks again for the rows still shown as
@@ -1262,7 +1909,22 @@ impl MessageList {
             return;
         }
         inner.older.borrow_mut().insert(folder, Older::Asked);
-        inner.older_row.set_visible(true);
+        // Shown once the layout under way is done: this runs while the scroller is laid out
+        // (its adjustment's `changed`), and the pane's box, laying out its children by the
+        // count it took before, gave a row that showed meanwhile no height ("attempt to
+        // allocate GtkLabel … height -12", phase C).
+        let weak = self.downgrade();
+        glib::idle_add_local_once(move || {
+            Self::with(&weak, |list| {
+                let asking = list
+                    .inner
+                    .older
+                    .borrow()
+                    .values()
+                    .any(|state| *state == Older::Asked);
+                list.inner.older_row.set_visible(asking);
+            });
+        });
         let handlers = inner.handlers.older.borrow().clone();
         for handler in handlers {
             handler(folder);
@@ -1335,8 +1997,11 @@ impl MessageList {
             return;
         }
         let weak = self.downgrade();
-        glib::idle_add_local_once(move || {
+        // Before GTK's redraw (HIGH_IDLE runs ahead of it): the reader swaps in a conversation it
+        // laid out ahead within the same frame as the list's new selection, not a frame later.
+        glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
             Self::with(&weak, |list| list.settle());
+            glib::ControlFlow::Break
         });
     }
 
@@ -1357,25 +2022,36 @@ impl MessageList {
             // A reload is bringing the selection back as its rows load.
             return;
         }
-        inner.settled.replace(self.selected_ids());
+        inner.settled.replace(self.selected_keys());
         let plain_click = inner.plain_click.replace(false);
         if positions.is_empty() || (plain_click && positions.len() == 1) {
             self.set_select_mode(false);
         } else if positions.len() > 1 {
             self.set_select_mode(true);
         }
-        let selected = match positions.as_slice() {
-            [] => Selected::Nothing,
+        inner.settled_at.set(match positions.as_slice() {
+            [position] => Some(*position),
+            [] => inner.settled_at.get(),
+            _ => None,
+        });
+        let mut own = None;
+        let (selected, key) = match positions.as_slice() {
+            [] => (Selected::Nothing, None),
             [position] if !inner.select_mode.get() => {
                 let Some(item) = inner.model.item(*position).and_downcast::<MessageItem>() else {
                     return;
                 };
-                match item.id() {
-                    Some(id) => {
-                        inner.cursor.set(Some(id));
-                        Selected::One(id)
+                match (item.key(), item.message()) {
+                    (Some(key), Some(message)) => {
+                        inner.cursor.set(Some(key));
+                        own = Some(message);
+                        let message = match inner.open_at.get() {
+                            Some((wanted, at)) if wanted == key => at,
+                            _ => message,
+                        };
+                        (Selected::One(message), Some(key))
                     }
-                    None => {
+                    _ => {
                         let weak = self.downgrade();
                         let handler = item.connect_changed(move |_| {
                             Self::with(&weak, |list| list.queue_settle());
@@ -1385,15 +2061,33 @@ impl MessageList {
                     }
                 }
             }
-            positions => Selected::Batch(positions.len() as u32),
+            positions => (Selected::Batch(positions.len() as u32), None),
         };
-        self.report(selected);
+        if inner
+            .open_at
+            .get()
+            .is_some_and(|(wanted, _)| Some(wanted) != key)
+        {
+            inner.open_at.set(None);
+        }
+        self.report(selected, key, own);
     }
 
-    fn report(&self, selected: Selected) {
-        if self.inner.reported.replace(selected) == selected {
+    /// Tells the handlers what is selected now: one row only when it is another row than the
+    /// one reported (a conversation that moved or gained a message is the same row). `own`:
+    /// that row's own message, a conversation's anchor.
+    fn report(&self, selected: Selected, key: Option<RowKey>, own: Option<MessageId>) {
+        let inner = &self.inner;
+        let same = match (inner.reported.get(), selected) {
+            (Selected::One(_), Selected::One(_)) => inner.reported_key.get() == key,
+            (before, now) => before == now,
+        };
+        if same {
             return;
         }
+        inner.reported.set(selected);
+        inner.reported_key.set(key);
+        inner.reported_anchor.set(own);
         let handlers = &self.inner.handlers;
         match selected {
             Selected::Nothing => {
@@ -1422,9 +2116,120 @@ impl MessageList {
         self.inner.reported.get()
     }
 
+    /// The message reported for the row `key`, while it is the row reported.
+    fn reported_message(&self, key: RowKey) -> Option<MessageId> {
+        match self.inner.reported.get() {
+            Selected::One(message) if self.inner.reported_key.get() == Some(key) => Some(message),
+            _ => None,
+        }
+    }
+
     /// Whether the rows show checkboxes and `j`/`k` move a cursor.
     pub fn is_select_mode(&self) -> bool {
         self.inner.select_mode.get()
+    }
+
+    /// Focused: rows came into a list with nothing selected (an Undo from Inbox Zero, new mail
+    /// there), and no reload or action is bringing a selection: the cursor goes to the first.
+    fn keep_cursor(&self) {
+        let inner = &self.inner;
+        let total = inner.model.total();
+        if inner.keeps_cursor.get()
+            && !inner.select_mode.get()
+            && total > 0
+            && !inner.model.is_pending()
+            && inner.wanted.borrow().is_empty()
+            && inner.leaving.borrow().is_none()
+            && inner.selection.selection().size() == 0
+        {
+            // The row that took the last one's place (one gone by another device's action).
+            let position = inner.settled_at.get().unwrap_or(0).min(total - 1);
+            self.select_position(position);
+        }
+    }
+
+    /// Focused mode (the window's, the Superhuman pass): a row is always under the cursor, a
+    /// plain click opens its row, and the list shows no date headers, its dates being on the
+    /// rows (BRIEF.md "No date section headers in Focused mode"); Split keeps them, and a click
+    /// that selects and shows.
+    pub fn set_focused(&self, focused: bool) {
+        self.inner.focused.set(focused);
+        self.update_headers();
+        self.set_keeps_cursor(focused);
+    }
+
+    /// The date headers: in Split, except in the Reminders view, whose rows are in the order
+    /// they come back rather than of their dates (phase C).
+    fn update_headers(&self) {
+        let view = &self.inner.view;
+        let shown = !self.inner.focused.get() && !self.inner.context.reminders().wakes;
+        let headers: Option<gtk::ListItemFactory> =
+            shown.then(|| self.inner.headers.clone().upcast());
+        if view.header_factory() != headers {
+            // A list at its top stays at its top: GTK keeps the first row where it was, and the
+            // date header that comes above it would sit out of view (phase C, the visual QA:
+            // Split's "TODAY" 26 px above the list right after leaving Focused).
+            let at_top = self.inner.scroller.vadjustment().value() < 1.0;
+            view.set_header_factory(headers.as_ref());
+            if at_top {
+                self.scroll_after_layout(0.0);
+            }
+        }
+    }
+
+    /// What the rows show of Remind Me (phase C, `remind::row_reminders`): the clock on
+    /// conversations back from Reminders in an Inbox, the wake times in the Reminders view.
+    pub fn set_reminders(&self, reminders: RowReminders) {
+        let wakes = reminders.wakes;
+        let marks = reminders.marks;
+        let arriving = reminders.arriving;
+        let before = self.inner.context.reminders();
+        if self.inner.context.set_reminders(reminders) {
+            if before.wakes != wakes {
+                self.update_headers();
+            }
+            if before.wakes != wakes || before.marks != marks {
+                self.inner.view.queue_resize();
+            }
+            // The empty Reminders view says what is on its way there.
+            if before.arriving != arriving && self.inner.model.total() == 0 {
+                self.update_empty();
+            }
+        }
+    }
+
+    /// What the rows show of Remind Me now.
+    pub fn reminders(&self) -> RowReminders {
+        self.inner.context.reminders()
+    }
+
+    /// Remind Me's marks for what the list shows now: none for search results.
+    fn update_reminders(&self) {
+        let scope = self
+            .inner
+            .query
+            .borrow()
+            .is_empty()
+            .then(|| self.inner.scope.get())
+            .flatten();
+        self.set_reminders(crate::remind::row_reminders(
+            scope,
+            self.inner.grouping.get(),
+            &self.inner.mailbox.folders(),
+        ));
+    }
+
+    /// Keeps a row under the cursor (selected) whenever the list fills with new content
+    /// (Focused mode: selecting there lays the conversation out unseen, unread); with no row
+    /// selected now, the first one is at once.
+    pub fn set_keeps_cursor(&self, keeps: bool) {
+        if self.inner.keeps_cursor.replace(keeps) == keeps || !keeps {
+            return;
+        }
+        let model = &self.inner.model;
+        if !model.is_pending() && model.total() > 0 && self.selected_positions().is_empty() {
+            self.select_position(0);
+        }
     }
 
     fn set_select_mode(&self, on: bool) {
@@ -1443,15 +2248,15 @@ impl MessageList {
         }
     }
 
-    /// After the same content was read again (a reload), selects the messages that were
-    /// selected, now or once their rows load, in the select mode if it was on.
+    /// After the same content was read again (a reload), selects the rows that were selected,
+    /// now or once they load, in the select mode if it was on.
     fn restore_selection(&self) {
-        let (ids, select_mode) = self.inner.restoring.take();
+        let (keys, select_mode) = self.inner.restoring.take();
         if select_mode {
             self.set_select_mode(true);
         }
-        if self.selected_positions().is_empty() && !ids.is_empty() {
-            self.inner.wanted.replace(ids);
+        if self.selected_positions().is_empty() && !keys.is_empty() {
+            self.inner.wanted.replace(keys);
             self.inner
                 .wanted_until
                 .set(Some(Instant::now() + TARGETS_WAIT));
@@ -1469,18 +2274,92 @@ impl MessageList {
         }
         let wanted = self.inner.wanted.take();
         let mut waiting = Vec::new();
-        for id in wanted {
-            match self.inner.model.position_of(id) {
+        for key in wanted {
+            match self.inner.model.position_of_key(key) {
                 Some(position) => {
                     if position >= self.inner.model.n_items() {
                         self.inner.model.complete_growth();
                     }
                     self.inner.selection.select_item(position, false);
                 }
-                None => waiting.push(id),
+                None => waiting.push(key),
             }
         }
         self.inner.wanted.replace(waiting);
+    }
+
+    /// After a filter or the grouping changed what the list shows, the rows that were
+    /// selected are selected again where the new content's first rows hold them (a filter
+    /// that keeps the selected conversation keeps the reader on it, with no new report), in
+    /// view and with the keyboard focus when the list has it; the others are gone. True when
+    /// one was.
+    fn select_carried(&self) -> bool {
+        let keys = self.inner.carried.take();
+        let model = &self.inner.model;
+        let mut positions: Vec<u32> = keys
+            .iter()
+            .filter_map(|key| model.position_of_key(*key))
+            .collect();
+        // Two message rows of one conversation are its one row now: selected alone, not one
+        // row ticked in the select mode (phase B's review).
+        positions.sort_unstable();
+        positions.dedup();
+        if positions.is_empty() {
+            return false;
+        }
+        self.select_all_of(&positions);
+        true
+    }
+
+    /// Selects the rows at `positions` (the first on top): one alone, several in the select
+    /// mode, the first under the cursor, in view and with the keyboard focus when the list has
+    /// it.
+    fn select_all_of(&self, positions: &[u32]) {
+        let Some(first) = positions.first().copied() else {
+            return;
+        };
+        let model = &self.inner.model;
+        self.set_select_mode(positions.len() > 1);
+        if let [position] = positions {
+            self.select_position(*position);
+            return;
+        }
+        if positions
+            .iter()
+            .any(|position| *position >= model.n_items())
+        {
+            model.complete_growth();
+        }
+        // One change for them all (an Undo of every row of a large folder).
+        let chosen = gtk::Bitset::new_empty();
+        for position in positions {
+            chosen.add(*position);
+        }
+        self.inner.selection.set_selection(&chosen, &chosen);
+        self.inner.cursor.set(model.key_at(first));
+        let flags = if self.has_focus_within() {
+            gtk::ListScrollFlags::FOCUS
+        } else {
+            gtk::ListScrollFlags::NONE
+        };
+        self.inner.view.scroll_to(first, flags, None);
+    }
+
+    /// The selected positions when there are at most [`KEPT_SELECTED`], else none: each is
+    /// looked for among the rows again later, so a selection of every row (Select All at
+    /// 100,000) isn't carried through a change.
+    fn selected_positions_if_few(&self) -> Vec<u32> {
+        if self.inner.selection.selection().size() > KEPT_SELECTED as u64 {
+            return Vec::new();
+        }
+        self.selected_positions()
+    }
+
+    fn selected_keys_if_few(&self) -> Vec<RowKey> {
+        self.selected_positions_if_few()
+            .into_iter()
+            .filter_map(|position| self.inner.model.key_at(position))
+            .collect()
     }
 
     /// The selected positions, first to last.
@@ -1492,19 +2371,32 @@ impl MessageList {
         }
     }
 
-    /// The selected messages whose rows are loaded.
-    pub fn selected_ids(&self) -> Vec<MessageId> {
+    /// The keys of the selected rows that are loaded.
+    pub fn selected_keys(&self) -> Vec<RowKey> {
         self.selected_positions()
             .into_iter()
-            .filter_map(|position| self.inner.model.row_at(position).map(|row| row.id))
+            .filter_map(|position| self.inner.model.key_at(position))
             .collect()
     }
 
-    /// The message selected, when it is the only one.
+    /// The message the reader shows for the row selected, when it is the only one: the
+    /// message, or the message its conversation was opened at.
     pub fn selected(&self) -> Option<MessageId> {
+        let position = self.selected_position()?;
+        let key = self.inner.model.key_at(position)?;
+        self.inner
+            .open_at
+            .get()
+            .filter(|(wanted, _)| *wanted == key)
+            .map(|(_, at)| at)
+            .or_else(|| self.reported_message(key))
+            .or_else(|| self.inner.model.message_at(position))
+    }
+
+    /// The row selected, when it is the only one.
+    pub fn selected_row(&self) -> Option<ListRow> {
         self.selected_position()
-            .and_then(|position| self.inner.model.row_at(position))
-            .map(|row| row.id)
+            .and_then(|position| self.inner.model.list_row_at(position))
     }
 
     /// The selected position, when it is the only one.
@@ -1515,31 +2407,30 @@ impl MessageList {
         }
     }
 
-    /// The selected messages as an action needs them, or the positions whose rows aren't
-    /// loaded yet.
-    pub fn selected_targets(&self) -> Result<Vec<Target>, Vec<u32>> {
-        let mut targets = Vec::new();
+    /// The selected rows, or the positions whose rows aren't loaded yet.
+    pub fn selected_rows(&self) -> Result<Vec<ListRow>, Vec<u32>> {
+        let mut rows = Vec::new();
         let mut missing = Vec::new();
         for position in self.selected_positions() {
-            match self.target_at(position) {
-                Some(target) => targets.push(target),
+            match self.inner.model.list_row_at(position) {
+                Some(row) => rows.push(row),
                 None => missing.push(position),
             }
         }
         if missing.is_empty() {
-            Ok(targets)
+            Ok(rows)
         } else {
             Err(missing)
         }
     }
 
-    /// The selected messages, once the rows of those far down a range are loaded too; `None`
-    /// when they don't come within [`TARGETS_WAIT`].
-    pub async fn wait_targets(&self) -> Option<Vec<Target>> {
+    /// The selected rows, once the rows of those far down a range are loaded too; `None` when
+    /// they don't come within [`TARGETS_WAIT`].
+    pub async fn wait_rows(&self) -> Option<Vec<ListRow>> {
         let started = Instant::now();
         loop {
-            match self.selected_targets() {
-                Ok(targets) => return Some(targets),
+            match self.selected_rows() {
+                Ok(rows) => return Some(rows),
                 Err(_) if started.elapsed() > TARGETS_WAIT => return None,
                 Err(missing) => {
                     for position in missing {
@@ -1551,25 +2442,35 @@ impl MessageList {
         }
     }
 
-    /// The message at `position`, as an action needs it.
-    pub fn target_at(&self, position: u32) -> Option<Target> {
-        self.inner.model.row_at(position).map(|row| Target {
-            id: row.id,
-            folder: row.folder,
-            flags: row.flags,
-        })
+    /// The selected rows as availability sees them (one target a row: a conversation stands
+    /// as its anchor with its members' state, [`Target::of_row`]), or the positions whose
+    /// rows aren't loaded yet.
+    pub fn selected_targets(&self) -> Result<Vec<Target>, Vec<u32>> {
+        self.selected_rows()
+            .map(|rows| rows.iter().map(Target::of_row).collect())
     }
 
-    /// Where a message is in the list, 1-based, and how many the list holds: the reader's
-    /// "n of N". `None` when its row isn't loaded.
+    /// The row at `position`, as availability sees it.
+    pub fn target_at(&self, position: u32) -> Option<Target> {
+        self.inner
+            .model
+            .list_row_at(position)
+            .map(|row| Target::of_row(&row))
+    }
+
+    /// The message the reader would show for the row at `position` (the reader lays out ahead
+    /// the rows next to the selection, `Reader::prefetch`).
+    pub fn message_at(&self, position: u32) -> Option<MessageId> {
+        self.inner.model.message_at(position)
+    }
+
+    /// Where the row the reader shows `id` for is in the list, 1-based, and how many rows the
+    /// list holds: the reader's "n of N" (conversations, with conversation rows). `None` when
+    /// its row isn't loaded.
     pub fn position(&self, id: MessageId) -> Option<(u32, u32)> {
         let total = self.inner.model.total();
         if let Some(selected) = self.selected_position()
-            && self
-                .inner
-                .model
-                .row_at(selected)
-                .is_some_and(|row| row.id == id)
+            && self.selected() == Some(id)
         {
             return Some((selected + 1, total));
         }
@@ -1577,6 +2478,35 @@ impl MessageList {
             .model
             .position_of(id)
             .map(|position| (position + 1, total))
+    }
+
+    /// Selects the row at `position` alone and opens it at `message` instead of its own
+    /// message (a notification's new message in its conversation), as Enter does.
+    pub fn open_at(&self, position: u32, message: MessageId) {
+        if let Some(key) = self.inner.model.key_at(position) {
+            self.inner.open_at.set(Some((key, message)));
+            // The row the reader shows already, at another message (the cursor's row in
+            // Focused, a reply's notification): reported again, at this one.
+            if self
+                .reported_message(key)
+                .is_some_and(|shown| shown != message)
+            {
+                self.inner.reported.set(Selected::Nothing);
+                self.inner.reported_key.set(None);
+            }
+        }
+        self.inner.select_mode.set(false);
+        self.select_position(position);
+        self.settle();
+        self.open_selected();
+    }
+
+    /// The row of `message` in this list: the message's own, or its conversation's (`thread`).
+    pub fn key_for(&self, message: MessageId, thread: sealwax_domain::model::ThreadId) -> RowKey {
+        match self.inner.model.grouping() {
+            ViewGrouping::Conversations => RowKey::Conversation(thread),
+            ViewGrouping::Messages => RowKey::Message(message),
+        }
     }
 
     /// Selects the next message (Next Message: `j`, and GtkListView's own Down); in the select
@@ -1605,7 +2535,14 @@ impl MessageList {
             return;
         }
         let target = match self.selected_positions().as_slice() {
-            [] => 0,
+            // Nothing selected: the row the keyboard's focus is on, which shows the bar (phase
+            // C; Split before a pick), else the first.
+            [] => self
+                .has_focus_within()
+                .then(|| self.focused_row())
+                .flatten()
+                .unwrap_or(0)
+                .min(total - 1),
             [first, ..] if delta < 0 => offset(*first, delta, total),
             positions => offset(positions[positions.len() - 1], delta, total),
         };
@@ -1648,8 +2585,8 @@ impl MessageList {
         if position >= self.inner.model.n_items() {
             self.inner.model.complete_growth();
         }
-        if let Some(row) = self.inner.model.row_at(position) {
-            self.inner.cursor.set(Some(row.id));
+        if let Some(key) = self.inner.model.key_at(position) {
+            self.inner.cursor.set(Some(key));
         }
         if self.inner.select_mode.get() {
             self.select_item(position, true, false);
@@ -1678,18 +2615,21 @@ impl MessageList {
         self.queue_settle();
     }
 
-    /// The messages of `ids` are about to leave the list (an action on the selection). Once
-    /// one has and nothing is selected any more, the row in the first one's place is selected.
-    pub fn advance_after(&self, ids: &[MessageId]) {
-        let Some(position) = ids
-            .iter()
-            .filter_map(|id| self.inner.model.position_of(*id))
-            .min()
-        else {
+    /// The rows of `keys` are about to leave the list (an action on the selection). Once one
+    /// has and nothing is selected any more, the row in the first one's place is selected.
+    pub fn advance_after(&self, keys: &[RowKey]) {
+        let keys: HashSet<RowKey> = keys.iter().copied().collect();
+        let placed = self.inner.model.rows_of_keys(&keys, newest_member);
+        let Some((position, _, _)) = placed.first().copied() else {
             return;
         };
+        self.inner.returning.borrow_mut().clear();
         self.inner.leaving.replace(Some(Leaving {
-            ids: ids.iter().copied().collect(),
+            keys,
+            newest: placed
+                .into_iter()
+                .map(|(_, key, newest)| (key, newest))
+                .collect(),
             position,
             since: Instant::now(),
         }));
@@ -1704,20 +2644,65 @@ impl MessageList {
             if leaving.since.elapsed() > LEAVING_WAIT {
                 None
             } else if !self.selected_positions().is_empty()
-                || self.inner.model.held(&leaving.ids) == leaving.ids.len()
+                || self.inner.model.held(&leaving.keys) == leaving.keys.len()
             {
                 return;
             } else {
                 Some(leaving.position)
             }
         };
-        self.inner.leaving.take();
+        let Some(leaving) = self.inner.leaving.take() else {
+            return;
+        };
         let total = self.inner.model.total();
-        if let Some(position) = ready
-            && total > 0
-        {
-            self.set_select_mode(false);
-            self.select_position(position.min(total - 1));
+        match ready {
+            Some(position) if total > 0 => {
+                self.set_select_mode(false);
+                self.select_position(position.min(total - 1));
+            }
+            // The last rows left (Inbox Zero): an Undo brings them back selected.
+            Some(_) => {
+                self.inner.returning.replace(leaving.newest);
+            }
+            None => {}
+        }
+    }
+
+    /// Rows came into a list with nothing selected: the last rows an action took out of it,
+    /// when they left it empty, are selected again once they are back as they left (an Undo
+    /// from Inbox Zero, in either mode): one alone (in Split, shown again), several in the
+    /// select mode (nothing shown, nothing read), and the keyboard focus goes with them when
+    /// the list had it. A conversation back with another newest member is new mail (a reply to
+    /// one archived), which selects nothing in Split (phase B's review: it was shown and read).
+    fn select_returning(&self) {
+        let inner = &self.inner;
+        if inner.returning.borrow().is_empty() || inner.model.is_pending() {
+            return;
+        }
+        if inner.selection.selection().size() > 0 {
+            // Something else took the cursor meanwhile (new mail in Focused): it stays.
+            inner.returning.borrow_mut().clear();
+            return;
+        }
+        let back: Vec<u32> = {
+            let returning = inner.returning.borrow();
+            let keys: HashSet<RowKey> = returning.keys().copied().collect();
+            inner
+                .model
+                .rows_of_keys(&keys, newest_member)
+                .into_iter()
+                .filter(|(_, key, newest)| returning.get(key) == Some(newest))
+                .map(|(position, _, _)| position)
+                .collect()
+        };
+        if back.is_empty() {
+            return;
+        }
+        inner.returning.borrow_mut().clear();
+        let focus = self.holds_focus();
+        self.select_all_of(&back);
+        if focus {
+            self.focus_selected();
         }
     }
 
@@ -1734,8 +2719,8 @@ impl MessageList {
         inner.wanted.borrow_mut().clear();
         let focus = self.has_focus_within();
         self.select_item(position, false, false);
-        if let Some(row) = inner.model.row_at(position) {
-            inner.cursor.set(Some(row.id));
+        if let Some(key) = inner.model.key_at(position) {
+            inner.cursor.set(Some(key));
         }
         let flags = if focus {
             gtk::ListScrollFlags::FOCUS
@@ -1767,8 +2752,8 @@ impl MessageList {
         if position >= inner.model.n_items() {
             inner.model.complete_growth();
         }
-        if let Some(row) = inner.model.row_at(position) {
-            inner.cursor.set(Some(row.id));
+        if let Some(key) = inner.model.key_at(position) {
+            inner.cursor.set(Some(key));
         }
         let flags = if self.has_focus_within() {
             gtk::ListScrollFlags::FOCUS
@@ -1788,7 +2773,7 @@ impl MessageList {
         self.inner
             .cursor
             .get()
-            .and_then(|id| self.inner.model.position_of(id))
+            .and_then(|key| self.inner.model.position_of_key(key))
             .or_else(|| self.selected_positions().first().copied())
     }
 
@@ -1819,8 +2804,18 @@ impl MessageList {
         let view = &self.inner.view;
         let click = gtk::GestureClick::new();
         click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        // From the press to its release (or the gesture's end without one: a drag away, a
+        // cancel), the focus the press gave its row isn't moved to the selection.
         let weak = self.downgrade();
-        click.connect_pressed(move |gesture, _, x, y| {
+        click.connect_begin(move |_, _| {
+            Self::with(&weak, |list| list.inner.pointer_down.set(true));
+        });
+        let weak = self.downgrade();
+        click.connect_end(move |_, _| {
+            Self::with(&weak, |list| list.inner.pointer_down.set(false));
+        });
+        let weak = self.downgrade();
+        click.connect_pressed(move |gesture, n_press, x, y| {
             let state = gesture.current_event_state();
             let modify = state.contains(gdk::ModifierType::CONTROL_MASK);
             let extend = state.contains(gdk::ModifierType::SHIFT_MASK);
@@ -1830,7 +2825,8 @@ impl MessageList {
                     widget.ancestor(gtk::CheckButton::static_type()).is_some()
                         || widget.ancestor(gtk::Button::static_type()).is_some()
                 });
-                list.inner.plain_click.set(!modify && !extend && !control);
+                let plain = !modify && !extend && !control;
+                list.inner.plain_click.set(plain);
                 // Ctrl and Shift clicks take effect here, on the press: GtkListView's own
                 // Ctrl+click on a selected row selected it alone on the press and unselected it
                 // on the release (seen headless, GTK 4.22).
@@ -1838,6 +2834,9 @@ impl MessageList {
                     .and_then(|widget| widget.ancestor(MessageRow::static_type()))
                     .and_downcast::<MessageRow>()
                     .and_then(|row| row.position());
+                list.inner
+                    .pressed
+                    .set(position.filter(|_| plain && n_press == 1));
                 if (modify || extend)
                     && !control
                     && let Some(position) = position
@@ -1847,6 +2846,35 @@ impl MessageList {
                     list.select_item(position, modify, extend);
                     list.move_cursor(position);
                 }
+            });
+        });
+        // Focused: a plain click opens the row, as Superhuman's does (phase B); Ctrl, Shift and
+        // the checkbox still select. GtkListView selects on the release, after this handler:
+        // the row opens once that is done.
+        let weak = self.downgrade();
+        click.connect_released(move |gesture, n_press, x, y| {
+            Self::with(&weak, |list| {
+                let pressed = list.inner.pressed.take();
+                if !list.inner.focused.get()
+                    || n_press != 1
+                    || !gesture.handles_sequence(gesture.current_sequence().as_ref())
+                {
+                    return;
+                }
+                let released = list
+                    .inner
+                    .view
+                    .pick(x, y, gtk::PickFlags::DEFAULT)
+                    .and_then(|widget| widget.ancestor(MessageRow::static_type()))
+                    .and_downcast::<MessageRow>()
+                    .and_then(|row| row.position());
+                let Some(position) = pressed.filter(|pressed| Some(*pressed) == released) else {
+                    return;
+                };
+                let weak = list.downgrade();
+                glib::idle_add_local_once(move || {
+                    Self::with(&weak, |list| list.click_open(position));
+                });
             });
         });
         view.add_controller(click);
@@ -1898,10 +2926,40 @@ impl MessageList {
             };
         }
         if state.contains(gdk::ModifierType::CONTROL_MASK) {
-            return if key.to_lower() == gdk::Key::a {
-                glib::Propagation::Stop
-            } else {
+            if key.to_lower() != gdk::Key::a {
+                // GtkListView's Ctrl with the arrows moves its focus row without selecting
+                // (Ctrl+Space then chooses it): the focus isn't sent back to the selection.
+                if is_cursor_key(key) {
+                    self.inner.cursor_keys.set(true);
+                    let weak = self.downgrade();
+                    glib::idle_add_local_once(move || {
+                        Self::with(&weak, |list| list.inner.cursor_keys.set(false));
+                    });
+                }
+                return glib::Propagation::Proceed;
+            }
+            // GtkListView's own Ctrl+A and Ctrl+Shift+A stay swallowed: they would select rows
+            // that have no message yet, or clear the select mode behind its back. The very key
+            // of a List command goes on to it (Superhuman pass: Select All on Ctrl+A, which
+            // loads the rows first).
+            let mut pressed = String::from("<Control>");
+            if shift {
+                pressed.push_str("<Shift>");
+            }
+            if state.contains(gdk::ModifierType::SUPER_MASK) {
+                pressed.push_str("<Super>");
+            }
+            pressed.push('a');
+            let ours = self
+                .inner
+                .keys
+                .borrow()
+                .as_ref()
+                .is_some_and(|keys| keys.handles(&pressed));
+            return if ours {
                 glib::Propagation::Proceed
+            } else {
+                glib::Propagation::Stop
             };
         }
         let delta = match key {
@@ -1927,14 +2985,116 @@ impl MessageList {
         glib::Propagation::Stop
     }
 
-    /// Opens the selected message (Open Message: Enter, `o`, or a double click).
+    /// A plain click on the row at `position` in Focused mode, once GtkListView selected it:
+    /// it opens, as Enter does (nothing when the click selected something else meanwhile).
+    fn click_open(&self, position: u32) {
+        if self.selected_position() != Some(position) {
+            return;
+        }
+        self.inner.double_clicks.borrow_mut().opened();
+        self.settle();
+        self.open_selected();
+    }
+
+    /// A double click on a row in Focused mode opens it on its first click ([`click_open`]),
+    /// and its second press would land on the reader that now fills the list's place: on a
+    /// link, an attachment's Open, a collapsed message (phase B's review). A press within GTK's
+    /// double-click time and distance of the click that opened a row is swallowed, with its
+    /// release, ahead of every widget of `window`.
+    ///
+    /// [`click_open`]: MessageList::click_open
+    pub fn swallow_double_clicks(&self, window: &impl IsA<gtk::Window>) {
+        let legacy = gtk::EventControllerLegacy::new();
+        legacy.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = self.downgrade();
+        legacy.connect_event(move |_, event| {
+            let Some(inner) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            // A key between the two (Escape back to the list) makes the next press a click of
+            // its own.
+            if event.event_type() == gdk::EventType::KeyPress {
+                inner.double_clicks.borrow_mut().key();
+            }
+            let primary = event
+                .downcast_ref::<gdk::ButtonEvent>()
+                .is_some_and(|button| button.button() == gdk::BUTTON_PRIMARY);
+            let Some((x, y)) = event.position().filter(|_| primary) else {
+                return glib::Propagation::Proceed;
+            };
+            let time = event.time();
+            let swallowed = match event.event_type() {
+                gdk::EventType::ButtonPress => {
+                    let (most_ms, most_px) =
+                        gtk::Settings::default().map_or((400, 5), |settings| {
+                            (
+                                settings.gtk_double_click_time(),
+                                settings.gtk_double_click_distance(),
+                            )
+                        });
+                    inner
+                        .double_clicks
+                        .borrow_mut()
+                        .press((x, y, time), most_ms, most_px)
+                }
+                gdk::EventType::ButtonRelease => {
+                    inner.double_clicks.borrow_mut().release((x, y, time))
+                }
+                _ => false,
+            };
+            if swallowed {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.upcast_ref::<gtk::Window>().add_controller(legacy);
+    }
+
+    /// Opens the selected message (Open Message: Enter, `o`, or a double click; a click in
+    /// Focused mode).
     pub fn open_selected(&self) {
+        self.report_new_unread();
         if let Some(id) = self.selected() {
             let handlers = self.inner.handlers.opened.borrow().clone();
             for handler in handlers {
                 handler(id);
             }
         }
+    }
+
+    /// The selected conversation, about to open, gained unread mail since it was reported (a
+    /// reply came in under the cursor): its anchor moved to that first unread message, and it
+    /// opens there, as a conversation selected afresh does. A conversation that gains a
+    /// message stays reported as it was, so the reader follows it in place without reloading
+    /// ([`MessageList::report`]); kept behind a Focused list, it opened at the old anchor, the
+    /// new reply a collapsed row (phase C's review). Reported again here, the reader shows it
+    /// at the new anchor in place ([`MessageList::open_at`]'s way), whatever message an
+    /// earlier notification's click opened it at. An anchor that moved for another reason
+    /// (marked read on open: the newest is the anchor then) isn't followed.
+    fn report_new_unread(&self) {
+        let inner = &self.inner;
+        let Some(position) = self.selected_position() else {
+            return;
+        };
+        let (Some(key), Some(ListRow::Conversation(row))) = (
+            inner.model.key_at(position),
+            inner.model.list_row_at(position),
+        ) else {
+            return;
+        };
+        let moved = self.reported_message(key).is_some()
+            && inner
+                .reported_anchor
+                .get()
+                .is_some_and(|anchor| anchor != row.anchor);
+        if row.unread == 0 || !moved {
+            return;
+        }
+        inner.open_at.set(None);
+        inner.reported.set(Selected::Nothing);
+        inner.reported_key.set(None);
+        self.settle();
     }
 
     /// Runs `handler` with every message the user selects: clicks, keys, next and previous.
@@ -1964,6 +3124,17 @@ impl MessageList {
             .push(Rc::new(handler));
     }
 
+    /// Runs `handler` once the rows of a view read anew are in (a reset), the selection settled
+    /// on them: a reload that keeps the same row selected (a filter, the Split Inbox turned on)
+    /// reports no new selection.
+    pub fn connect_reset(&self, handler: impl Fn() + 'static) {
+        self.inner
+            .handlers
+            .reset
+            .borrow_mut()
+            .push(Rc::new(handler));
+    }
+
     /// Runs `handler` with the count of selected messages while the list is in the select mode.
     pub fn connect_batch_selected(&self, handler: impl Fn(u32) + 'static) {
         self.inner
@@ -1973,9 +3144,9 @@ impl MessageList {
             .push(Rc::new(handler));
     }
 
-    /// Runs `handler` when a row's quick action is clicked: the command and that row's message,
-    /// selected or not.
-    pub fn connect_quick_action(&self, handler: impl Fn(ActionId, Target) + 'static) {
+    /// Runs `handler` when a row's quick action is clicked: the command and that row, selected
+    /// or not.
+    pub fn connect_quick_action(&self, handler: impl Fn(ActionId, ListRow) + 'static) {
         self.inner
             .handlers
             .quick
@@ -2071,6 +3242,8 @@ impl MessageList {
             .unwrap_or_default();
         self.inner.search_key.set_label(&key);
         self.show_search_key(self.inner.search.text().is_empty());
+        self.inner.zero.set_keymap(keymap);
+        self.set_split_keys(keymap);
     }
 
     pub fn keys(&self) -> Option<std::cell::Ref<'_, ScopedShortcuts>> {
@@ -2084,6 +3257,19 @@ impl MessageList {
             .and_then(|unix| glib::DateTime::from_unix_local(unix).ok())
             .or_else(|| glib::DateTime::now_local().ok())
             .unwrap_or_else(|| glib::DateTime::from_unix_utc(0).expect("the epoch is a valid date"))
+    }
+
+    /// When scheduled sends go (Unix ms), by their Drafts-folder copies (`outbox`): those rows
+    /// say "Sending Tue 08:00" in their date's place.
+    pub fn set_ai_drafts(
+        &self,
+        drafts: std::collections::HashSet<sealwax_domain::model::ThreadId>,
+    ) {
+        self.inner.context.set_ai_drafts(drafts);
+    }
+
+    pub fn set_scheduled(&self, scheduled: std::collections::HashMap<MessageId, i64>) {
+        self.inner.context.set_scheduled(scheduled);
     }
 
     /// "Now" as the list sees it (Unix seconds).
@@ -2102,10 +3288,20 @@ impl MessageList {
     /// self-test).
     pub fn set_clock(&self, unix: Option<i64>) {
         self.inner.clock.set(unix);
+        self.inner.context.clock.set(unix);
         self.regroup_if_needed();
     }
 
     fn regroup_if_needed(&self) {
+        // Inbox Zero's day too, for a list left empty past midnight.
+        self.inner.zero.set_date(&self.now());
+        // The Reminders view's wake times say their day from today (phase C).
+        if self.inner.context.reminders().wakes {
+            let rows = self.inner.context.bound.borrow().clone();
+            for row in rows {
+                row.refresh();
+            }
+        }
         let wanted = self.thresholds_now();
         if wanted != self.inner.model.thresholds() {
             tracing::debug!("the day changed; regrouping the list");
@@ -2137,7 +3333,8 @@ impl MessageList {
             .iter()
             .map(|row| BoundRow {
                 position: row.position(),
-                id: row.id(),
+                id: row.message(),
+                key: row.key(),
                 placeholder: row.is_placeholder(),
             })
             .collect()
@@ -2193,30 +3390,129 @@ impl MessageList {
     }
 }
 
-/// The scope row: "Search in", the folder shown and All folders, as chips.
+/// The scope: the folder shown and All folders, as two quiet toggles after the field in the
+/// header row, which a screen reader hears as "Search in" (the visual caption went with the
+/// second row of chips, phase B).
 fn scope_row() -> (gtk::Box, gtk::ToggleButton, gtk::ToggleButton) {
-    let caption = gtk::Label::builder().label("Search in").build();
-    caption.add_css_class("sw-search-scope-caption");
     let folder = gtk::ToggleButton::builder().active(true).build();
     folder.add_css_class("sw-chip");
     folder.set_widget_name("search-scope-folder");
-    let all = gtk::ToggleButton::builder().label("All folders").build();
+    let all = gtk::ToggleButton::builder().label(SCOPE_ALL).build();
     all.set_group(Some(&folder));
     all.add_css_class("sw-chip");
     all.set_widget_name("search-scope-all");
-    let row = gtk::Box::builder().spacing(6).visible(false).build();
+    let row = gtk::Box::builder()
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
     row.add_css_class("sw-search-scope");
     row.set_widget_name("list-search-scope");
     row.update_property(&[gtk::accessible::Property::Label("Search in")]);
-    row.append(&caption);
     row.append(&folder);
     row.append(&all);
     (row, folder, all)
 }
 
+/// Why a search shows nothing, in words: the filter that narrowed it, where it looked and what
+/// it looked for ("No unread conversations in Inbox match “contract”."; phase C, the visual QA:
+/// a filter narrowed the search with no word of it).
+fn no_results(
+    text: &str,
+    folder: Option<&str>,
+    filter: ViewFilter,
+    grouping: ViewGrouping,
+) -> String {
+    let rows = match grouping {
+        ViewGrouping::Conversations => "conversations",
+        ViewGrouping::Messages => "messages",
+    };
+    let what = match filter {
+        ViewFilter::Unread => format!("unread {rows}"),
+        ViewFilter::Starred => format!("starred {rows}"),
+        ViewFilter::Attachments => format!("{rows} with attachments"),
+        ViewFilter::All | ViewFilter::Important | ViewFilter::Other => rows.to_owned(),
+    };
+    let place = folder
+        .map(|folder| format!(" in {folder}"))
+        .unwrap_or_default();
+    // A long query is cut: the line is one line under the empty state's title.
+    let mut query: String = text.chars().take(40).collect();
+    if query.len() < text.len() {
+        query.push('…');
+    }
+    format!("No {what}{place} match “{query}”.")
+}
+
+/// Where and when a primary button event was: the window surface's coordinates, its time (ms).
+type Click = (f64, f64, u32);
+
+/// The primary button's presses and releases as Focused mode's double click sees them
+/// ([`MessageList::swallow_double_clicks`]): the last release, the release of the click that
+/// last opened a row, and whether a second press was swallowed, whose release goes too.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct DoubleClicks {
+    last_release: Option<Click>,
+    opened: Option<Click>,
+    swallowing: bool,
+}
+
+impl DoubleClicks {
+    /// The click just released opened a row.
+    fn opened(&mut self) {
+        self.opened = self.last_release;
+    }
+
+    /// A key between two presses makes the next one a click of its own.
+    fn key(&mut self) {
+        self.opened = None;
+    }
+
+    /// A press: swallowed when it is the second of a double click (within `most_ms` and
+    /// `most_px` of the release that opened a row). Any press starts afresh: a swallowed press
+    /// whose release never came (the window unmapped, a grab broken) doesn't eat this one's
+    /// (phase B's review).
+    fn press(&mut self, (x, y, time): Click, most_ms: i32, most_px: i32) -> bool {
+        let second = self.opened.take().is_some_and(|(at_x, at_y, at)| {
+            i64::from(time.wrapping_sub(at)) <= i64::from(most_ms)
+                && (x - at_x).abs() <= f64::from(most_px)
+                && (y - at_y).abs() <= f64::from(most_px)
+        });
+        self.swallowing = second;
+        second
+    }
+
+    /// A release: swallowed with its press.
+    fn release(&mut self, click: Click) -> bool {
+        if std::mem::take(&mut self.swallowing) {
+            return true;
+        }
+        self.last_release = Some(click);
+        false
+    }
+}
+
 /// `current` moved by `delta`, kept inside a list of `total` rows.
 fn offset(current: u32, delta: i64, total: u32) -> u32 {
     (i64::from(current) + delta).clamp(0, i64::from(total) - 1) as u32
+}
+
+/// The keys GtkListView moves its focus row by: with Ctrl, without selecting.
+fn is_cursor_key(key: gdk::Key) -> bool {
+    matches!(
+        key,
+        gdk::Key::Up
+            | gdk::Key::Down
+            | gdk::Key::Page_Up
+            | gdk::Key::Page_Down
+            | gdk::Key::Home
+            | gdk::Key::End
+            | gdk::Key::KP_Up
+            | gdk::Key::KP_Down
+            | gdk::Key::KP_Page_Up
+            | gdk::Key::KP_Page_Down
+            | gdk::Key::KP_Home
+            | gdk::Key::KP_End
+    )
 }
 
 /// The one-key keys of Next and Previous Message, which extend the selection with Shift.
@@ -2239,6 +3535,45 @@ fn extend_keys(keymap: &Keymap) -> Vec<(gdk::Key, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_double_clicks_second_press_is_swallowed_with_its_release_only() {
+        let mut clicks = DoubleClicks::default();
+        // A click opens a row; the second press, close and soon, goes, its release too.
+        assert!(!clicks.press((10.0, 10.0, 1000), 400, 5));
+        assert!(!clicks.release((10.0, 10.0, 1050)));
+        clicks.opened();
+        assert!(clicks.press((11.0, 10.0, 1200), 400, 5));
+        assert!(clicks.release((11.0, 10.0, 1250)));
+        // The next click is a click.
+        assert!(!clicks.press((11.0, 10.0, 1300), 400, 5));
+        assert!(!clicks.release((11.0, 10.0, 1350)));
+        // Too late, too far, or after a key: a click of its own.
+        clicks.opened();
+        assert!(!clicks.press((11.0, 10.0, 1900), 400, 5));
+        assert!(!clicks.release((11.0, 10.0, 1950)));
+        clicks.opened();
+        assert!(!clicks.press((40.0, 10.0, 2000), 400, 5));
+        assert!(!clicks.release((40.0, 10.0, 2050)));
+        clicks.opened();
+        clicks.key();
+        assert!(!clicks.press((40.0, 10.0, 2100), 400, 5));
+    }
+
+    #[test]
+    fn a_swallowed_press_whose_release_never_came_eats_nothing_more() {
+        let mut clicks = DoubleClicks::default();
+        clicks.release((10.0, 10.0, 1000));
+        clicks.opened();
+        // The second press is swallowed, and its release never reaches the window.
+        assert!(clicks.press((10.0, 10.0, 1100), 400, 5));
+        // An unrelated click later, elsewhere: its press and its release both go through.
+        assert!(!clicks.press((300.0, 200.0, 9000), 400, 5));
+        assert!(
+            !clicks.release((300.0, 200.0, 9050)),
+            "the next release isn't eaten for the lost one"
+        );
+    }
 
     #[test]
     fn offsets_stay_inside_the_list() {
@@ -2292,8 +3627,30 @@ mod tests {
     }
 
     #[test]
-    fn chips_name_the_store_filters() {
+    fn an_empty_search_says_what_narrowed_it() {
+        let conversations = ViewGrouping::Conversations;
+        assert_eq!(
+            no_results("contract", Some("Inbox"), ViewFilter::Unread, conversations),
+            "No unread conversations in Inbox match “contract”."
+        );
+        assert_eq!(
+            no_results("contract", None, ViewFilter::All, ViewGrouping::Messages),
+            "No messages match “contract”."
+        );
+        assert_eq!(
+            no_results("x", Some("Archive"), ViewFilter::Attachments, conversations),
+            "No conversations with attachments in Archive match “x”."
+        );
+        let long = "a".repeat(60);
+        assert!(no_results(&long, None, ViewFilter::Starred, conversations).ends_with("a…”."));
+    }
+
+    #[test]
+    fn filters_name_the_store_filters() {
         assert_eq!(filter_name(ViewFilter::Unread), "Unread");
         assert_eq!(FILTERS.len(), 4);
+        // The Split Inbox's sides as filters (phase B's backend) never show as "All".
+        assert_eq!(filter_name(ViewFilter::Important), "Important");
+        assert_eq!(filter_name(ViewFilter::Other), "Other");
     }
 }

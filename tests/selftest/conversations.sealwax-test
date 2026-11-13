@@ -1,0 +1,188 @@
+# Conversation rows (the Superhuman pass, phase B; docs/superhuman/conversations.md): one list
+# row a conversation, with its people, its size and its newest message. The reader opens a
+# conversation at its first unread message; a reply moves its row to the top, still selected,
+# and the reader isn't asked to show it again; Archive, Mark as Read or Unread and Star act on
+# the conversation's messages in the folder, as one Undo; `u` toggles by the conversation's
+# state; multi-select acts on every selected conversation; search lists conversations and opens
+# one at its newest match. Every message is fictional.
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/conversations.sealwax-test
+
+desktop tiling
+resize 1440 900
+conversation-account Alex alex.berg@example.test
+conversation-add singles
+conversation-add typical
+conversation-add trip
+folder inbox
+# The harness starts with one row a message: trip's 5 and typical's 9 in the Inbox (the user's
+# own are in Sent), and the 24 singles.
+assert-list-count 38
+grouping conversations
+assert-action-state win.group-by-conversation true
+assert-list-count 26
+assert-label list-subtitle "26 · Alex"
+
+# The rows, newest first by each conversation's newest message: trip, typical, then the singles.
+assert-list-row 0 kind conversation
+assert-row-conversation 0 trip-1
+assert-row-conversation 1 typical-1
+assert-row-conversation 2 single-1
+# Past three people, the first and the two who wrote last (phase C): Tomas wrote the newest.
+assert-list-row 0 sender "Ingrid … Sana, Tomas"
+assert-list-row 0 subject "Cabin trip in November?"
+assert-list-row 0 snippet "Perfect. I'll pick up firewood on the way; see you Friday."
+assert-list-row 0 count 6
+assert-list-row 0 members 5
+assert-list-row 0 unread true
+assert-list-row 0 attachment true
+assert-list-row 0 starred false
+assert-list-row 0 draft false
+assert-list-row 0 label-starts "Unread, Ingrid, Sana, Tomas and 1 other, 6 messages, Cabin trip in November?, "
+assert-list-row 2 count ""
+assert-list-row 2 members 1
+assert-list-row 2 unread false
+assert-list-exact
+screenshot $DIR/../../.local/selftest/conversations-split.png
+
+# Selected, a conversation opens at its first unread message, and once on screen its unread
+# messages are read: the row too. The reader showed it once.
+conversation-count-shows
+list-select 0
+wait-until assert-conversation selected trip-5
+assert-selected-conversation trip-1
+assert-list-position "1 of 26"
+wait-until assert-list-row 0 unread false
+assert-conversation read trip-5 true
+assert-conversation read trip-6 true
+assert-conversation-shows 1
+
+# A reply to typical (row 1, selected) moves it to the top: still selected, the keyboard focus
+# on it, and the reader keeps showing it (no new show), the reply put in in place.
+list-select 1
+wait-until assert-conversation selected typical-3
+focus list
+assert-focus-row 1
+conversation-count-shows
+conversation-reply typical
+wait-until assert-row-conversation 0 typical-1
+assert-list-selected 0
+assert-selected-conversation typical-1
+assert-focus-row 0
+assert-conversation selected typical-3
+wait-until assert-conversation messages 11
+assert-conversation-shows 0
+assert-list-moves at-once 1
+assert-list-position "1 of 26"
+assert-list-exact
+
+# A move told row by row (a conversation far down) keeps the selection by its key too. Trip is
+# read now: it opens at its newest message.
+list-move-span 0
+list-select 1
+wait-until assert-conversation selected trip-6
+assert-focus-row 1
+conversation-count-shows
+conversation-reply trip
+wait-until assert-row-conversation 0 trip-1
+assert-list-selected 0
+assert-selected-conversation trip-1
+assert-focus-row 0
+assert-conversation-shows 0
+assert-list-moves by-rows 1
+list-move-span 256
+assert-list-exact
+
+# Archive acts on the conversation's five messages in the Inbox, as one action and one Undo;
+# the list moves on to the next conversation.
+triage-mark-read-on-open false
+triage-undo-window 4000
+list-select 0
+focus list
+key e
+wait-until assert-list-count 25
+assert-toast "Archived 1 conversation"
+assert-selected-conversation typical-1
+folder archive
+assert-list-count 1
+assert-list-row 0 members 6
+folder inbox
+key z
+wait-until assert-list-count 26
+assert-row-conversation 0 trip-1
+assert-list-row 0 members 6
+
+# u marks every unread message of a conversation read, or the newest of a read one unread.
+list-select 2
+focus list
+assert-list-row 2 unread false
+key u
+wait-until assert-list-row 2 unread true
+key u
+wait-until assert-list-row 2 unread false
+# Trip's reply came while it showed, as a row: still unread.
+list-select 0
+assert-list-row 0 unread true
+key u
+wait-until assert-list-row 0 unread false
+assert-conversation read trip-reply-1 true
+key u
+wait-until assert-list-row 0 unread true
+assert-conversation read trip-reply-1 false
+assert-conversation read trip-6 true
+key u
+wait-until assert-list-row 0 unread false
+
+# Star stars the newest message of an unstarred conversation; Unstar every starred one.
+key s
+wait-until assert-list-row 0 starred true
+assert-action-enabled win.star true
+key s
+wait-until assert-list-row 0 starred false
+
+# Several conversations selected: the batch counts conversations and Archive takes them all.
+key x
+key <Shift>j
+assert-select-mode true
+assert-label batch-title "2 conversations selected"
+key e
+wait-until assert-list-count 24
+assert-toast "Archived 2 conversations"
+key z
+wait-until assert-list-count 26
+
+# Search lists conversations, counted as such, and opens one at its newest match.
+search Hemsedal
+assert-list-search 1 false
+assert-row-conversation 0 trip-1
+conversation-count-shows
+list-select 0
+wait-until assert-conversation selected trip-1
+assert-conversation-shows 1
+search-escape
+assert-list-count 26
+
+# Back to a row a message: the selected conversation stays selected as the message shown.
+grouping messages
+assert-action-state win.group-by-conversation false
+assert-list-count 40
+grouping conversations
+assert-list-count 26
+
+# Two message rows of one conversation chosen, then one row a conversation: its one row,
+# selected alone, not the select mode with one row ticked (phase C; phase B's review).
+grouping messages
+search Cabin
+assert-list-row 0 subject "Cabin trip in November?"
+assert-list-row 1 subject "Cabin trip in November?"
+focus list
+list-select 0
+key x
+key j
+key x
+assert-select-mode true
+assert-list-selection 0,1
+grouping conversations
+assert-select-mode false
+assert-list-selected 0
+assert-row-conversation 0 trip-1
+search-escape

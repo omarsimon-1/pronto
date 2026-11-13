@@ -5,12 +5,12 @@
 # on this desktop). A scripted engine answers; every name, address and link is fictional, and
 # no page is opened. Not part of tools/ci.sh; it writes into tools/progress/public/. Run from
 # the repository root:
-#   tools/headless.sh 61 target/debug/sealwax --self-test tests/selftest/preview-ml032.sealwax-test
+#   tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/preview-ml032.sealwax-test
 
 desktop tiling
 resize 1440 900
 engine-attach
-write-file $TMP/config/sealwax/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
+write-file $TMP/config/pronto/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
 wait-until assert-setup client-id set
 
 # ---- the assistant, matte-black, square ----
@@ -32,7 +32,7 @@ screenshot $DIR/../../tools/progress/public/ml032-waiting-matte-black-square-202
 engine-reply signed-in sign-in-declined
 assert-label setup-alert-title "The sign-in was declined"
 screenshot $DIR/../../tools/progress/public/ml032-failed-matte-black-square-2026-10-05.png
-write-file $TMP/config/sealwax/config.toml ""
+write-file $TMP/config/pronto/config.toml ""
 wait-until assert-shown setup-microsoft-unavailable true
 setup-click setup-back
 setup-key enter
@@ -46,7 +46,7 @@ screenshot $DIR/../../tools/progress/public/ml032-no-client-id-matte-black-squar
 theme catppuccin-latte
 corners 8
 screenshot $DIR/../../tools/progress/public/ml032-no-client-id-catppuccin-latte-rounded-2026-10-05.png
-write-file $TMP/config/sealwax/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
+write-file $TMP/config/pronto/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
 wait-until assert-sensitive setup-microsoft-button true
 setup-click setup-microsoft-button
 engine-expect sign-in
@@ -74,14 +74,14 @@ engine-expect sign-in
 engine-reply signed-in ok anne@example.test
 engine-expect add-account
 engine-reply added ok
-write-file $TMP/config/sealwax/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n\n[[account]]\nkey = \"anne\"\nname = \"Anne Berg\"\naddress = \"anne@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n"
+write-file $TMP/config/pronto/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n\n[[account]]\nkey = \"anne\"\nname = \"Anne Berg\"\naddress = \"anne@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\nhost = \"smtp.example.test\"\n"
 # The "Added" toasts go first.
 setup-dismiss-toasts
 
 # ---- the banner and the assistant it opens, catppuccin-latte, rounded ----
 engine-reply sync-failed kari@example.test wrong-password
 engine-reply sync-failed anne@example.test sign-in-declined
-wait-until assert-label banner-body "Microsoft ended the session. Sealwax keeps your mail; nothing syncs until you sign in. 1 more account needs it too."
+wait-until assert-label banner-body "Microsoft ended the session. Pronto keeps your mail; nothing syncs until you sign in. 1 more account needs it too."
 screenshot $DIR/../../tools/progress/public/ml032-banner-catppuccin-latte-rounded-2026-10-05.png
 setup-click banner-primary
 engine-expect sign-in account=kari

@@ -4,7 +4,7 @@
 # the user didn't ask for (each check is one Verify, at most two logins). Then the ways saving
 # can fail, and an app-password failure (iCloud's) with the manual settings, as in the mock. Every
 # address and server is fictional. Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/setup-failures.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/setup-failures.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -101,7 +101,7 @@ engine-expect verify imap=mail.example.test:143:starttls smtp=smtp.example.test:
 
 engine-reply verified smtp certificate
 assert-label setup-alert-title "The server's certificate isn't trusted"
-assert-text-contains setup-alert-body "smtp.example.test showed a certificate Sealwax can't verify."
+assert-text-contains setup-alert-body "smtp.example.test showed a certificate Pronto can't verify."
 assert-setup focus setup-smtp-host
 
 setup-key enter
@@ -178,7 +178,7 @@ engine-expect verify username=kari.nordmann@example.test second=none
 engine-reply verified imap app-password
 assert-label setup-title "Couldn't sign in"
 assert-label setup-alert-title "The server asked for an app password"
-assert-label setup-alert-body "iCloud lets mail apps in with an app password: turn on two-step verification in your account if it isn't on, then create an app password for Sealwax and type it here."
+assert-label setup-alert-body "iCloud lets mail apps in with an app password: turn on two-step verification in your account if it isn't on, then create an app password for Pronto and type it here."
 assert-label setup-alert-link "Open the Apple account page"
 assert-field setup-manual-username kari.nordmann@example.test
 assert-contrast setup-alert 4.5

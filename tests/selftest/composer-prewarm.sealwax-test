@@ -1,0 +1,60 @@
+# The composer's speed (the fork's phase B): every card's editor shares one web process (the
+# reader has its own: two in all, whatever the cards), and a spare editor, its page loaded after
+# startup and again after each card opens, makes a card's body ready about as soon as its draft
+# is: Compose and Forward are timed from the command to a body ready to type in (the editor page
+# loaded and the draft in it). The editor page loads while the draft is prepared. The window
+# closed into background mode lets the spare and its web process go; a new window makes a spare
+# again. The stand-in backend; every name and message is fictional.
+# Run: tools/headless.sh 67 target/debug/pronto --self-test tests/selftest/composer-prewarm.sealwax-test
+
+desktop tiling
+fixtures --count 40 --seed 9 --folders spread
+resize 1440 900
+triage-mark-read-on-open false
+list-wait
+list-select 0
+wait-until assert-reader-page message
+composer-backend stand-in
+focus list
+
+# The spare editor is made after startup, at low priority.
+wait-until assert-composer spare true
+# Compose and Forward with the spare waiting: timed, the card closed after each.
+measure-compose compose 5 150 spare
+measure-compose forward 3 150 spare
+# Without a spare editor, for comparison (each card loads its editor page while its draft is
+# prepared).
+composer-prewarm false
+measure-compose compose 3 300
+measure-compose forward 3 300
+composer-prewarm true
+wait-until assert-composer spare true
+# One after the other, as fast as the spare comes back: still one web process for the cards.
+action win.compose
+composer-wait
+assert-composer focus to
+action win.compose
+composer-wait
+action win.forward
+composer-wait
+assert-composer focus to
+assert-composer count 3
+assert-web-sandbox 2
+composer-close
+composer-pick 1
+composer-close
+composer-pick 0
+composer-close
+wait-until assert-composer count 0
+assert-web-sandbox 2
+
+# Background mode: the window closed, no spare waits and the composer's web process ends (the
+# reader's stays, M5); a new window makes a spare again.
+close-window
+wait-until assert-window false
+wait-until assert-composer spare false
+wait-until assert-web-sandbox 1
+bus-activate
+wait-until assert-window true
+wait-until assert-composer spare true
+assert-web-sandbox 2

@@ -333,7 +333,7 @@ fn parts_and_originals_are_fetched_on_demand_and_answered_once() {
         .unwrap(),
     );
     let engine = Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: store.clone(),
         blobs: blobs.clone(),
         paths: AccountPaths::new(&dirs),
@@ -341,6 +341,7 @@ fn parts_and_originals_are_fetched_on_demand_and_answered_once() {
         secrets: SecretBackend::Memory,
         detect: DetectOptions::default(),
         microsoft_client_id: None,
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig {
             account_pass: Duration::from_secs(600),

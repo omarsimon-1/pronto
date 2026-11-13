@@ -15,7 +15,7 @@
 //! | `assert-tab-chain STOP,STOP,…` | The last chain, from where it started, passed these stops in this order (others may lie between). A stop is the nearest named widget around the focus |
 //! | `assert-tab-stops N` | The last chain had N distinct stops |
 //! | `assert-focus-stop STOP [window\|composer]` | The keyboard focus is at STOP (as `tab-chain` names stops) in the main window or the newest composer |
-//! | `assert-dialog TITLE\|none` | The main window's top dialog has that title, or none is open |
+//! | `assert-dialog TITLE\|none` | The main window's top dialog has that title, or none is open; the command palette counts as one ("Command Palette"): it draws over the window with a dialog's role |
 //! | `menu-open NAME`, `menu-close NAME` | Opens or closes the menu of the menu button NAME, as a click does |
 //! | `link-hooks` | The app's reader records the links it would open instead of opening them |
 //! | `link-dialog-answer cancel\|open` | Answers the reader's "Open this link?" dialog |
@@ -37,6 +37,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char, c_int};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+use webkit6::prelude::WebViewExt;
 
 /// The commands this module adds to the script format, with their argument counts.
 pub const COMMANDS: &[(&str, usize, usize)] = &[
@@ -175,7 +176,9 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
             let title = window
                 .window()
                 .visible_dialog()
-                .map(|dialog| dialog_title(&dialog));
+                .map(|dialog| dialog_title(&dialog))
+                .or_else(|| open_palette(harness).map(|_| "Command Palette".to_owned()))
+                .or_else(|| crate::picker::of(window.window()).title());
             equal(
                 "the window's dialog",
                 title.as_deref().unwrap_or("none"),
@@ -300,6 +303,11 @@ fn roots(harness: &Harness, which: &str) -> Result<Vec<gtk::Widget>, String> {
             .window()
             .visible_dialog()
             .map(|dialog| vec![dialog.upcast()])
+            .or_else(|| open_palette(harness).map(|card| vec![card]))
+            .or_else(|| {
+                let picker = crate::picker::of(harness.window().ok()?.window());
+                picker.is_open().then(|| vec![picker.card()])
+            })
             .ok_or_else(|| "no dialog is open".to_owned()),
         "all" => Ok(gtk::Window::list_toplevels()
             .into_iter()
@@ -307,6 +315,15 @@ fn roots(harness: &Harness, which: &str) -> Result<Vec<gtk::Widget>, String> {
             .collect()),
         other => Err(format!("use window, dialog, composer or all, not {other}")),
     }
+}
+
+/// The command palette's card, while it is open.
+fn open_palette(harness: &Harness) -> Option<gtk::Widget> {
+    harness
+        .state
+        .palette()
+        .filter(crate::palette::Palette::is_open)
+        .map(|palette| palette.card())
 }
 
 /// The newest composer card.
@@ -925,9 +942,17 @@ async fn tab_chain(harness: &Harness, which: &str, backward: bool, max: usize) -
     let mut left = false;
     let mut result = Err(String::new());
     for _ in 0..max {
+        let web = focus_widget().and_downcast::<webkit6::WebView>();
+        let page = match &web {
+            Some(view) => Some(page_focus(view).await),
+            None => None,
+        };
         let watch = releases(&window);
         press(if backward { "<Shift>Tab" } else { "Tab" })?;
         delivered(watch).await;
+        if let (Some(view), Some(page)) = (&web, &page) {
+            web_answered(&window, view, page).await;
+        }
         harness.wait_until_settled().await;
         let Some(focus) = focus_widget() else {
             result = Err("a Tab press left the focus nowhere".to_owned());
@@ -955,6 +980,36 @@ async fn tab_chain(harness: &Harness, which: &str, backward: bool, max: usize) -
             error
         }
     })
+}
+
+/// What has the keyboard focus in `view`'s page, "" when nothing in it has.
+async fn page_focus(view: &webkit6::WebView) -> String {
+    view.evaluate_javascript_future(
+        "(() => { const active = document.activeElement; \
+         return document.hasFocus() && active ? active.outerHTML.slice(0, 120) : ''; })()",
+        None,
+        None,
+    )
+    .await
+    .map(|value| value.to_str().to_string())
+    .unwrap_or_default()
+}
+
+/// Waits, 2 s at most, until WebKit has answered a Tab press in `view`: the page's focus moved
+/// (`page` was it before), or the focus left the view. The web process takes the press and
+/// hands the focus back to GTK a round trip later; read before that, the chain recorded the
+/// view again, and the next press then skipped a stop (a11y-reader's Forward, once in a sweep).
+async fn web_answered(window: &gtk::Window, view: &webkit6::WebView, page: &str) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        if gtk::prelude::GtkWindowExt::focus(window).as_ref() != Some(view.upcast_ref()) {
+            return;
+        }
+        if page_focus(view).await != page {
+            return;
+        }
+        glib::timeout_future(Duration::from_millis(10)).await;
+    }
 }
 
 /// Presses `spec`, a GTK accelerator, with the keysym already chosen.

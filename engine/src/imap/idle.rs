@@ -41,6 +41,18 @@ pub enum Idled {
     Stopped,
 }
 
+/// Whether `response` tells of a change of the selected mailbox: new mail, a removal, a flag
+/// change.
+pub(crate) fn notice(response: &Response<'_>) -> bool {
+    matches!(
+        response,
+        Response::MailboxData(MailboxDatum::Exists(_))
+            | Response::Expunge(_)
+            | Response::Fetch(..)
+            | Response::Vanished { .. }
+    )
+}
+
 impl Connection {
     /// NOOP; whether the server reported a change of the selected mailbox with it. S1: Stalwart
     /// doesn't report changes made between a client's last command and IDLE, so a NOOP that finds
@@ -48,15 +60,7 @@ impl Connection {
     pub async fn noop(&mut self) -> Result<bool, ImapError> {
         let mut changed = false;
         raw::run(&mut self.session, "NOOP", |response| {
-            if matches!(
-                response,
-                Response::MailboxData(MailboxDatum::Exists(_))
-                    | Response::Expunge(_)
-                    | Response::Fetch(..)
-                    | Response::Vanished { .. }
-            ) {
-                changed = true;
-            }
+            changed |= notice(response)
         })
         .await?;
         Ok(changed)

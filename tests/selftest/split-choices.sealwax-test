@@ -1,0 +1,75 @@
+# A sender's side chosen in an earlier run (the fork's phase C, docs/superhuman/split.md "UI"):
+# the store holds it when Pronto starts, and the sender commands know it from the start. On
+# that sender's conversation Reset Sender Split applies and Always Other (the side it has)
+# doesn't, so nothing offers a choice that changes nothing; Undo puts the earlier run's choice
+# back, never "no choice". Every name and address is fictional.
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/split-choices.sealwax-test
+
+desktop tiling
+layout-defaults app
+# Written to the store before Pronto opens it, as an earlier run leaves it.
+stored-sender-split karinordmann@example.test other
+resize 1440 900
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+mail-add Personal:inbox 18m "Lunch on Friday?" "from=Kari Nordmann" "text=Want to try the new ramen place by the station?"
+mail-add Personal:inbox 2h "Contract renewal: signed copy" read "from=Marius Dahl" "text=Signed and scanned, attached."
+mail-add Personal:inbox 3h "Issue 212: Rust in the kernel" "from=The Weekly Byte" "text=This week: Rust in the kernel." list=weekly.example.test
+# A fresh view of the Inbox, all of it there when it first fills.
+folder archive Personal
+list-wait
+folder inbox Personal
+list-wait
+split-inbox on
+
+# Kari's mail went to Other, as the earlier run chose, and the commands know it.
+assert-split-choice karinordmann@example.test other
+wait-until assert-split-totals 1 2
+split-side other
+focus list
+list-select 0
+assert-list-row 0 subject "Lunch on Friday?"
+assert-action-enabled win.reset-sender-split true
+assert-action-enabled win.always-important true
+assert-action-enabled win.always-other false
+key <Control>k
+wait-until assert-palette open true
+type "sender split"
+assert-palette first "Reset Sender Split: karinordmann@example.test"
+key Escape
+wait-until assert-palette open false
+# Always Other again would change nothing: it doesn't apply, and nothing happens.
+action win.always-other
+assert-toasts 0
+assert-action-enabled win.undo false
+assert-split-choice karinordmann@example.test other
+assert-list-count 2
+
+# Always Important moves her conversation at once; Undo puts the earlier run's Other back.
+focus list
+list-select 0
+action win.always-important
+wait-until assert-list-count 1
+assert-toast "Mail from karinordmann@example.test now goes to Important"
+assert-split-choice karinordmann@example.test important
+wait-until assert-split-totals 2 1
+toast-undo
+wait-until assert-split-choice karinordmann@example.test other
+wait-until assert-list-count 2
+wait-until assert-split-totals 1 2
+
+# Reset Sender Split forgets it: her mail is sorted by its headers again (a person's, so
+# Important); z puts Other back.
+focus list
+list-select 0
+assert-list-row 0 subject "Lunch on Friday?"
+action win.reset-sender-split
+wait-until assert-list-count 1
+assert-toast "Mail from karinordmann@example.test is sorted by its headers again"
+assert-split-choice karinordmann@example.test none
+wait-until assert-split-totals 2 1
+focus list
+key z
+wait-until assert-split-choice karinordmann@example.test other
+wait-until assert-list-count 2
+wait-until assert-split-totals 1 2

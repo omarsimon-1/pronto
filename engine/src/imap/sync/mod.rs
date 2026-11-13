@@ -52,6 +52,20 @@ pub struct SyncOptions {
     pub now: Option<i64>,
     /// Where each step's new mail goes the moment it is committed, besides the report.
     pub arrivals: Option<async_channel::Sender<Arrived>>,
+    /// Told the account's INBOX the moment an account pass has stored the folder list, before
+    /// its folder passes: an account new to the store starts its IDLE connection then, not after
+    /// every folder's first sync (the fork's Superhuman pass).
+    pub inbox: Option<tokio::sync::watch::Sender<Option<FolderId>>>,
+    /// Compare HIGHESTMODSEQ in the account pass's STATUS check even where it is the account's
+    /// (Gmail: one for every folder, so it changes with anything anywhere). Off, such a server's
+    /// folders are passed when their messages, UIDNEXT, UIDVALIDITY or UNSEEN change (UNSEEN
+    /// against [`unseen`](Self::unseen), where kept), and any other flag change waits for a pass
+    /// with it on (the actor's flag sweep). Always on elsewhere.
+    pub flag_sweep: bool,
+    /// Each folder's UNSEEN from the STATUS of the account pass that last checked it, kept by
+    /// the caller from one pass to the next: without `flag_sweep`, a folder whose UNSEEN moved
+    /// since is passed, so a message read or unread elsewhere shows at the next account pass.
+    pub unseen: Option<Arc<Mutex<HashMap<FolderId, u32>>>>,
 }
 
 impl Default for SyncOptions {
@@ -62,6 +76,9 @@ impl Default for SyncOptions {
             elsewhere: None,
             now: None,
             arrivals: None,
+            inbox: None,
+            flag_sweep: true,
+            unseen: None,
         }
     }
 }

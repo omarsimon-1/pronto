@@ -380,6 +380,59 @@ fn bodies_leave_with_the_last_message_that_holds_them() {
 }
 
 #[test]
+fn a_blob_is_deleted_only_while_nothing_refers_to_it() {
+    let bodies = open();
+    let archive = bodies
+        .store
+        .upsert_folder(FolderSpec::local(
+            bodies.account,
+            "Arkiv",
+            FolderRole::Archive,
+        ))
+        .recv_blocking()
+        .unwrap()
+        .value;
+    let inbox = bodies.ingest(vec![header_only(bodies.inbox, 1, T0)]);
+    bodies.download(inbox[0], 1, T0);
+    let key = BlobStore::key(&raw(1));
+    let removed = bodies.store.remove(vec![inbox[0]]).recv_blocking().unwrap();
+    assert_eq!(removed.orphaned_blobs, [key]);
+    // The same message arrives again before the caller acts on that list.
+    let copy = bodies.ingest(vec![header_only(archive, 1, T0)]);
+    bodies.download(copy[0], 1, T0);
+    let discard = |older_than| {
+        bodies
+            .store
+            .discard_blobs(bodies.blobs.clone(), vec![key, key], older_than)
+            .recv_blocking()
+            .unwrap()
+    };
+    assert_eq!(
+        discard(None),
+        BlobsDiscarded {
+            referenced: 1,
+            ..BlobsDiscarded::default()
+        }
+    );
+    assert_eq!(bodies.blobs.get(&key).unwrap(), raw(1));
+    assert_eq!(bodies.detail(copy[0]).blob, Some(key));
+
+    bodies.store.remove(vec![copy[0]]).recv_blocking().unwrap();
+    // The sweep leaves a blob stored a moment ago: its row may not be committed yet.
+    let day = Duration::from_secs(24 * 3600);
+    assert_eq!(discard(Some(day)), BlobsDiscarded::default());
+    assert!(bodies.blobs.contains(&key));
+    let removed = BlobsDiscarded {
+        removed: 1,
+        ..BlobsDiscarded::default()
+    };
+    assert_eq!(discard(None), removed);
+    assert!(!bodies.blobs.contains(&key));
+    assert_eq!(discard(None), BlobsDiscarded::default(), "gone already");
+    bodies.store.close().unwrap();
+}
+
+#[test]
 fn the_cap_evicts_the_bodies_used_longest_ago() {
     let bodies = open();
     let ids = bodies.ingest(
@@ -521,7 +574,7 @@ fn prefetch_candidates_are_recent_inbox_mail_of_server_accounts() {
     bodies.store.close().unwrap();
 }
 
-const CHILD_DIR: &str = "SEALWAX_BODY_CRASH_DIR";
+const CHILD_DIR: &str = "PRONTO_BODY_CRASH_DIR";
 
 /// Run by `kill_between_blob_and_commit_leaves_orphans_and_no_broken_row`: downloads bodies in a
 /// loop, printing each blob it stored and each upgrade committed, and waiting between the two

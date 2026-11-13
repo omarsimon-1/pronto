@@ -1,5 +1,6 @@
 //! Recounts what the writer maintains and lists disagreements: folder counts (of shown rows),
-//! conversation sizes (each Message-ID once) and dates, aliases, empty conversations, foreign
+//! conversation sizes (each Message-ID once) and dates, the fork's conversation rows per
+//! folder and its Split Inbox rows per message (`fork.rs`), aliases, empty conversations, foreign
 //! keys, full-text rows without a message, drafts and the outbox (parts held, bytes recorded
 //! from the start of a send), contacts, and the op queue: every overlay recomputed from the
 //! server's flags and the pending ops, and every pending op at its message. A new folder
@@ -172,6 +173,17 @@ pub(crate) fn run(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let bad = overlays(&tx)?;
     if bad != 0 {
         problems.push(format!("overlays: {bad} disagree"));
+    }
+    let fork = super::fork::disagreements(&tx)?;
+    for (name, bad) in [
+        ("conversation rows", fork.rows),
+        ("conversation counts", fork.folders),
+        ("split rows", fork.splits),
+        ("split counts", fork.split_counts),
+    ] {
+        if bad != 0 {
+            problems.push(format!("{name}: {bad} disagree"));
+        }
     }
     let violations = tx
         .prepare("PRAGMA foreign_key_check")?

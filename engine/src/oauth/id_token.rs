@@ -8,11 +8,17 @@
 //! (`https://login.microsoftonline.com/{tid}/v2.0`), the audience is this client (and `azp` too
 //! when there are several), it hasn't expired, and it names a user. No nonce is sent, so none is
 //! checked.
+//!
+//! Google's ID token (ADR-023) is checked the same way, against Google's issuer
+//! (`https://accounts.google.com`, or `accounts.google.com` as Google also writes it), and names
+//! the user by its `email`, which must be verified: Gmail's XOAUTH2 takes that address as
+//! `user=`.
 
 use super::error::OAuthError;
 use base64::Engine;
 use base64::alphabet;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+use sealwax_domain::account::OAuthProvider;
 use serde::Deserialize;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,6 +27,8 @@ use zeroize::Zeroizing;
 /// The tenant of every personal Microsoft account (Outlook.com, Hotmail): its `tid`.
 pub const CONSUMER_TENANT: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 const ISSUER: &str = "https://login.microsoftonline.com/";
+/// Google's issuer, in both of the forms Google's ID tokens use.
+const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
 /// Clock skew allowed on `exp`.
 const LEEWAY: Duration = Duration::from_secs(300);
 
@@ -33,9 +41,10 @@ const BASE64URL: GeneralPurpose = GeneralPurpose::new(
 /// Who signed in. Its debug form doesn't show the username.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Identity {
-    /// `preferred_username`: XOAUTH2's `user=` for IMAP and SMTP.
+    /// `preferred_username` (Microsoft) or the verified `email` (Google): XOAUTH2's `user=` for
+    /// IMAP and SMTP.
     pub username: String,
-    /// `tid`, lower case.
+    /// Microsoft's `tid`, lower case; empty for Google.
     pub tenant: String,
 }
 
@@ -62,6 +71,25 @@ struct Claims {
     exp: f64,
     tid: Option<String>,
     preferred_username: Option<String>,
+    email: Option<String>,
+    email_verified: Option<Verified>,
+}
+
+/// `email_verified` is a boolean, but older Google tokens sent it as a string.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Verified {
+    Flag(bool),
+    Text(String),
+}
+
+impl Verified {
+    fn yes(&self) -> bool {
+        match self {
+            Self::Flag(flag) => *flag,
+            Self::Text(text) => text.eq_ignore_ascii_case("true"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -71,8 +99,9 @@ enum Audience {
     Many(Vec<String>),
 }
 
-/// Reads and checks the ID token's claims (above) for `client_id` at `now`.
+/// Reads and checks `provider`'s ID token's claims (above) for `client_id` at `now`.
 pub(crate) fn check(
+    provider: OAuthProvider,
     id_token: &str,
     client_id: &str,
     now: SystemTime,
@@ -90,13 +119,25 @@ pub(crate) fn check(
     );
     let claims: Claims =
         serde_json::from_slice(&json).map_err(|_| OAuthError::IdToken("unreadable claims"))?;
-    let tenant = claims
-        .tid
-        .filter(|tenant| guid(tenant))
-        .ok_or(OAuthError::IdToken("no tenant"))?;
-    if claims.iss != format!("{ISSUER}{tenant}/v2.0") {
-        return Err(OAuthError::IdToken("not Microsoft's issuer for its tenant"));
-    }
+    let tenant = match provider {
+        OAuthProvider::Microsoft => {
+            let tenant = claims
+                .tid
+                .clone()
+                .filter(|tenant| guid(tenant))
+                .ok_or(OAuthError::IdToken("no tenant"))?;
+            if claims.iss != format!("{ISSUER}{tenant}/v2.0") {
+                return Err(OAuthError::IdToken("not Microsoft's issuer for its tenant"));
+            }
+            tenant.to_ascii_lowercase()
+        }
+        OAuthProvider::Google => {
+            if !GOOGLE_ISSUERS.contains(&claims.iss.as_str()) {
+                return Err(OAuthError::IdToken("not Google's issuer"));
+            }
+            String::new()
+        }
+    };
     let ours = match &claims.aud {
         Audience::One(audience) => audience == client_id,
         Audience::Many(audiences) => {
@@ -113,15 +154,19 @@ pub(crate) fn check(
     if claims.exp + LEEWAY.as_secs_f64() <= now {
         return Err(OAuthError::IdToken("expired"));
     }
-    let username = claims
-        .preferred_username
-        .map(|username| username.trim().to_owned())
-        .filter(|username| !username.is_empty())
-        .ok_or(OAuthError::IdToken("no username"))?;
-    Ok(Identity {
-        username,
-        tenant: tenant.to_ascii_lowercase(),
-    })
+    let username = match provider {
+        OAuthProvider::Microsoft => claims.preferred_username,
+        OAuthProvider::Google => {
+            if !claims.email_verified.as_ref().is_some_and(Verified::yes) {
+                return Err(OAuthError::IdToken("the address isn't verified"));
+            }
+            claims.email
+        }
+    }
+    .map(|username| username.trim().to_owned())
+    .filter(|username| !username.is_empty())
+    .ok_or(OAuthError::IdToken("no username"))?;
+    Ok(Identity { username, tenant })
 }
 
 /// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` in hex digits.

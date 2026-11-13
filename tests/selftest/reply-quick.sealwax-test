@@ -1,11 +1,13 @@
 # The quick reply under the conversation (M6, ML-068): it answers the latest message that isn't
 # the user's own ("Reply to Tomas Berg"); typing in it keeps every letter, and no one-key
 # shortcut (j, k, e, #, r, s, z, …) or reader command (Ctrl+Z, Ctrl+J, Ctrl+R, Delete) fires
-# from it; Ctrl+Enter sends through the seam phase B wires, Ctrl+Shift+E and a click on the hint
+# from it; Ctrl+Enter sends through the seam phase B wires, the box empties at once and the
+# focus goes back to the conversation (the fork's phase B); Ctrl+Shift+E and a click on Pop Out
 # take the text to a composer window, Escape gives the focus back to the conversation; the text
-# is kept per message across selection changes, and keeps its message when a reply arrives.
+# is kept per message across selection changes, and keeps its message when a reply arrives; an
+# empty box answers the row the user opened (a row per message), else the latest.
 # Keys and clicks go through Broadway as real presses. Every message is fictional.
-# Run: tools/headless.sh 43 target/debug/sealwax --self-test tests/selftest/reply-quick.sealwax-test
+# Run: tools/headless.sh 43 target/debug/pronto --self-test tests/selftest/reply-quick.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -25,17 +27,20 @@ assert-quick-reply target trip-6
 assert-quick-reply label "Reply to Tomas Berg"
 assert-quick-reply text ""
 assert-quick-reply send false
-assert-label quick-reply-placeholder "Write a reply…"
+# Closed, the box is one quiet line naming whom it answers; open, room to write.
+assert-label quick-reply-placeholder "Reply to Tomas Berg…"
 assert-action-enabled win.send false
 assert-action-enabled win.quick-reply true
 assert-action-enabled win.reply-in-composer true
 assert-tooltip quick-reply-send "Send (Ctrl+Enter)"
 assert-labelled
 
-# Quick Reply puts the focus in it.
+# Quick Reply puts the focus in it, and the box opens.
 action win.quick-reply
 assert-quick-reply focused true
 assert-focus quick-reply-text
+assert-label quick-reply-placeholder "Write a reply…"
+assert-shown quick-reply-send true
 
 # Typing keeps every letter: no one-key shortcut and no mail command runs.
 action-log
@@ -60,16 +65,20 @@ assert-conversation messages 6
 assert-quick-reply send true
 assert-action-enabled win.send true
 
-# Ctrl+Enter sends what it holds as a reply to trip-6, and the box empties.
+# Ctrl+Enter sends what it holds as a reply to trip-6, and the box empties at once; the focus
+# goes back to the conversation. The box answers as Enter does: everyone, by default since
+# phase C (Tomas alone here).
 key <Control>a
 key BackSpace
 type "See you Friday!"
 key <Control>Return
 assert-quick-sends 1
-assert-quick-send-last trip-6 "See you Friday!"
+assert-quick-send-last trip-6 "See you Friday!" reply-all
 assert-quick-reply text ""
 assert-quick-reply send false
+assert-quick-reply focused false
 # With nothing to send, Ctrl+Enter does nothing, and adds no line.
+action win.quick-reply
 key <Control>Return
 assert-quick-sends 1
 assert-quick-reply text ""
@@ -81,7 +90,7 @@ assert-compose-requests 1
 assert-compose-last quick-reply trip-6 "Bringing the waffle iron."
 assert-quick-reply text ""
 composer-close
-# A click on the hint does the same.
+# A click on Pop Out does the same.
 focus quick-reply-text
 type "And cards."
 click quick-reply-expand
@@ -94,7 +103,7 @@ composer-close
 focus quick-reply-text
 key Escape
 assert-quick-reply focused false
-assert-action-log win.send,win.reply-in-composer,win.reply-in-composer
+assert-action-log win.send,win.quick-reply,win.reply-in-composer,win.pop-out-draft
 
 # What was typed stays with its message across selection changes.
 focus quick-reply-text
@@ -110,7 +119,10 @@ conversation-show trip-2
 assert-quick-reply target trip-6
 assert-quick-reply text "Half typed"
 
-# A reply arriving leaves a reply with text answering its message; an empty one follows it.
+# A reply arriving leaves a reply with text answering its message. An empty one goes to the
+# message the user chose: here, a row per message, the one whose row they opened (trip-2; phase
+# C's review: the row picked is the user's choice, as a move to a message is); with a row per
+# conversation, the latest, so it follows each reply that arrives.
 conversation-reply trip
 wait-until assert-conversation messages 7
 assert-quick-reply target trip-6
@@ -120,6 +132,13 @@ key <Control>a
 key BackSpace
 conversation-reply trip
 wait-until assert-conversation messages 8
+wait-until assert-quick-reply target trip-2
+assert-quick-reply label "Reply to Tomas Berg"
+grouping conversations
+list-wait
 wait-until assert-quick-reply target trip-reply-2
+conversation-reply trip
+wait-until assert-conversation messages 9
+wait-until assert-quick-reply target trip-reply-3
 assert-quick-reply label "Reply to Tomas Berg"
 assert-conversation criticals 0

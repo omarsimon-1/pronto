@@ -3,14 +3,18 @@
 //! message list and a message, in the theme's `sw-` classes. They stand in until the store
 //! (ML-023), the list (ML-026) and the reader (ML-027) are connected.
 
-use crate::window::panes::{classed, icon, icon_button};
+use crate::list::row::{MessageRow, Participant, RowContext, RowFields};
+use crate::list::sections::LABELS;
+use crate::window::panes::{classed, icon_button};
 use crate::window::{
     AccountStatus, FolderRole, SidebarAccount, SidebarFolder, SidebarModel, Window,
 };
 use gtk4 as gtk;
+use gtk4::glib;
 use gtk4::prelude::*;
 use sealwax_domain::actions::ActionId;
 use sealwax_domain::theme::{avatar_class, initials};
+use std::rc::Rc;
 
 pub fn model() -> SidebarModel {
     SidebarModel {
@@ -79,14 +83,15 @@ fn account(
                 folded: false,
             })
             .collect(),
+        reminders: None,
     }
 }
 
 struct Message {
     section: &'static str,
     from: &'static str,
-    address: &'static str,
-    time: &'static str,
+    /// Days before today, hour, minute.
+    at: (i32, i32, i32),
     subject: &'static str,
     snippet: &'static str,
     unread: bool,
@@ -97,10 +102,9 @@ struct Message {
 
 const MESSAGES: &[Message] = &[
     Message {
-        section: "Today",
+        section: "TODAY",
         from: "Ingrid Solberg",
-        address: "ingrid@fjordpost.example",
-        time: "10:32",
+        at: (0, 10, 32),
         subject: "Cabin weekend — final plan",
         snippet: "Hi! I've booked the cabin in Hemsedal for the 17th–19th. It sleeps six, has a \
                   sauna and the road is cleared…",
@@ -112,8 +116,7 @@ const MESSAGES: &[Message] = &[
     Message {
         section: "",
         from: "Northwind Weekly",
-        address: "news@northwind.example",
-        time: "08:15",
+        at: (0, 8, 15),
         subject: "This week in design systems",
         snippet: "Tokens, typography and twelve small utilities that make a big difference — plus \
                   a reader question about dark mode.",
@@ -125,8 +128,7 @@ const MESSAGES: &[Message] = &[
     Message {
         section: "",
         from: "Marius Dahl",
-        address: "marius@stavtech.example",
-        time: "07:50",
+        at: (0, 7, 50),
         subject: "Re: Quarterly report draft",
         snippet: "Looks good. Two small comments on page 4 — the churn chart uses last year's \
                   scale…",
@@ -136,10 +138,9 @@ const MESSAGES: &[Message] = &[
         thread: "5",
     },
     Message {
-        section: "Yesterday",
+        section: "YESTERDAY",
         from: "Fjord Cycling Club",
-        address: "rides@fjordcycling.example",
-        time: "18:44",
+        at: (1, 18, 44),
         subject: "Saturday ride: route and coffee stop",
         snippet: "We meet at 09:00 by the fountain. 62 km, mostly flat, coffee in Drøbak at the \
                   halfway point.",
@@ -151,8 +152,7 @@ const MESSAGES: &[Message] = &[
     Message {
         section: "",
         from: "Leah Kim",
-        address: "leah@studio-kim.example",
-        time: "13:02",
+        at: (1, 13, 2),
         subject: "Invoice #2041",
         snippet: "Attached is the invoice for September. Payment terms are the usual 14 days — \
                   thanks again!",
@@ -164,8 +164,7 @@ const MESSAGES: &[Message] = &[
     Message {
         section: "",
         from: "Aker Library",
-        address: "noreply@akerlibrary.example",
-        time: "09:30",
+        at: (1, 9, 30),
         subject: "Your reservation is ready",
         snippet: "'The Lighthouse Keeper's Atlas' is ready for pickup at the main desk until \
                   Friday.",
@@ -175,10 +174,9 @@ const MESSAGES: &[Message] = &[
         thread: "",
     },
     Message {
-        section: "This week",
+        section: "THIS WEEK",
         from: "Tomas Berg",
-        address: "tomas.berg@example.net",
-        time: "Mon",
+        at: (2, 16, 5),
         subject: "Photos from Saturday",
         snippet: "A few favourites — the rest are in the shared album. The one by the lighthouse \
                   is my pick.",
@@ -190,8 +188,7 @@ const MESSAGES: &[Message] = &[
     Message {
         section: "",
         from: "Sana Iqbal",
-        address: "sana@example.org",
-        time: "Mon",
+        at: (2, 12, 40),
         subject: "Lunch Thursday?",
         snippet: "Are you free at 12? There's a new ramen place on Grünerløkka I've been meaning \
                   to try.",
@@ -256,8 +253,22 @@ pub fn list() -> gtk::Widget {
         &["sw-message-list"],
     );
     let mut selected = None;
+    let context = RowContext::new();
+    let ruler = classed(
+        gtk::Box::builder()
+            .can_target(false)
+            .accessible_role(gtk::AccessibleRole::Presentation)
+            .build(),
+        &["sw-row-ruler"],
+    );
+    context.set_ruler(&ruler);
+    let mut section = 0;
     for message in MESSAGES {
         if !message.section.is_empty() {
+            section = LABELS
+                .iter()
+                .position(|label| label.to_uppercase() == message.section)
+                .unwrap_or_default();
             rows.append(
                 &gtk::ListBoxRow::builder()
                     .activatable(false)
@@ -267,7 +278,7 @@ pub fn list() -> gtk::Widget {
             );
         }
         let row = gtk::ListBoxRow::builder()
-            .child(&message_row(message))
+            .child(&message_row(&context, message, section))
             .build();
         if message.from == "Marius Dahl" {
             selected = Some(row.clone());
@@ -287,6 +298,7 @@ pub fn list() -> gtk::Widget {
             .child(&rows)
             .build(),
     );
+    list.append(&ruler);
     list.upcast()
 }
 
@@ -304,65 +316,51 @@ fn avatar(name: &str, address: &str, size: &str) -> gtk::Label {
     avatar
 }
 
-fn message_row(message: &Message) -> gtk::Box {
-    let row = classed(
-        gtk::Box::new(gtk::Orientation::Horizontal, 0),
-        &["sw-message-row"],
+/// A message row as the list draws it (list/row.rs), from a sample message in `section`.
+fn message_row(context: &Rc<RowContext>, message: &Message, section: usize) -> MessageRow {
+    let row = MessageRow::new(context.clone());
+    let sender = [Participant {
+        name: message.from,
+        me: false,
+        unread: message.unread,
+        last: 0,
+    }];
+    row.show_unbound(
+        &RowFields {
+            participants: &sender,
+            writers: 1,
+            address: "",
+            count: message.thread.parse().unwrap_or(1),
+            draft: false,
+            subject: message.subject,
+            snippet: message.snippet,
+            date: sample_date(message.at),
+            unread: message.unread,
+            starred: message.starred,
+            attachment: message.attachment,
+            scheduled: None,
+        },
+        section,
     );
-    if message.unread {
-        row.add_css_class("sw-unread");
-    }
-    let dot = classed(
-        gtk::Box::builder()
-            .valign(gtk::Align::Start)
-            .margin_top(12)
-            .build(),
-        &["sw-unread-dot"],
-    );
-    dot.set_opacity(if message.unread { 1.0 } else { 0.0 });
-    let top = gtk::Box::builder().spacing(8).build();
-    let sender = label(message.from, &["sw-sender"]);
-    sender.set_hexpand(true);
-    top.append(&sender);
-    if !message.thread.is_empty() {
-        top.append(&classed(
-            gtk::Label::new(Some(message.thread)),
-            &["sw-thread-count"],
-        ));
-    }
-    top.append(&label(message.time, &["sw-time"]));
-    let snippet = label(message.snippet, &["sw-snippet"]);
-    snippet.set_wrap(true);
-    snippet.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    snippet.set_lines(2);
-    let text = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .hexpand(true)
-        .build();
-    text.append(&top);
-    text.append(&label(message.subject, &["sw-subject"]));
-    text.append(&snippet);
-    let indicators = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(22)
-        .width_request(16)
-        .build();
-    if message.starred {
-        indicators.append(&classed(icon(&["starred-symbolic"]), &["sw-star"]));
-    }
-    if message.attachment {
-        indicators.append(&classed(
-            icon(&["mail-attachment-symbolic"]),
-            &["sw-indicator"],
-        ));
-    }
-    row.append(&dot);
-    row.append(&avatar(message.from, message.address, ""));
-    row.append(&text);
-    row.append(&indicators);
     row
+}
+
+/// `days` before today at `hour:minute`, local time, in Unix seconds.
+fn sample_date((days, hour, minute): (i32, i32, i32)) -> i64 {
+    glib::DateTime::now_local()
+        .and_then(|now| {
+            glib::DateTime::new(
+                &now.timezone(),
+                now.year(),
+                now.month(),
+                now.day_of_month(),
+                hour,
+                minute,
+                0.0,
+            )
+        })
+        .and_then(|today| today.add_days(-days))
+        .map_or(0, |date| date.to_unix())
 }
 
 /// A stand-in for the reader: one fictional message on a card, with its attachment. The

@@ -7,17 +7,17 @@
 //! | Command | What it does |
 //! | --- | --- |
 //! | `notify-server [plain]` | Starts the stand-in with omarchy-shell's capabilities; `plain` without `body-markup` |
-//! | `notify-mail NAME [ACCOUNT:]ROLE SUBJECT [read] [from=NAME] [ago=MINUTES] [text=WORDS]` | A fictional message in the store, unread unless `read` |
+//! | `notify-mail NAME [ACCOUNT:]ROLE SUBJECT [read] [from=NAME] [ago=MINUTES] [text=WORDS] [reply=NAME]` | A fictional message in the store, unread unless `read`; with `reply=`, an answer to that message (in its conversation) |
 //! | `notify-arrive NAME…` | `Event::NewMail` for the named messages, one per folder |
 //! | `notify-click N default\|LABEL` | The stand-in clicks notification N: its default action, or the button labelled LABEL |
 //! | `notify-expire N` | Notification N leaves the screen by itself |
 //! | `assert-notify-count N` | The stand-in received N notifications |
 //! | `assert-notify N FIELD VALUE` | Notification N's `app-name`, `summary`, `body`, `actions` (labels, `default` first), `urgency`, `category`, `desktop-entry` (`app-id`: the run's), `image`, `icon`, `expire`, `target` (the message its buttons name, or `none`), `replaces` (`none`, or the notification it replaced) |
-//! | `assert-notify-closed N BOOL` | Whether notification N was closed, by Sealwax or by a click |
+//! | `assert-notify-closed N BOOL` | Whether notification N was closed, by Pronto or by a click |
 //! | `assert-notify-open N` | Notifications not closed |
-//! | `assert-notified NAME alone\|counted\|none` | How Sealwax shows the message: its own notification, in the count, or not at all |
-//! | `assert-notify-withdrawn NAME` | Sealwax withdrew the message's own notification |
-//! | `assert-notify-settings on\|off sender\|count` | `[notifications]` as Sealwax applies it |
+//! | `assert-notified NAME alone\|counted\|none` | How Pronto shows the message: its own notification, in the count, or not at all |
+//! | `assert-notify-withdrawn NAME` | Pronto withdrew the message's own notification |
+//! | `assert-notify-settings on\|off sender\|count [other\|quiet]` | `[notifications]` as Pronto applies it; with the third, whether the Split Inbox's Other side notifies (`other`) |
 //! | `assert-notify-opened NAME [had-window\|new-window]` | The last click selected NAME in the list and the reader painted it (with the window there before the click, or built by it); prints the times |
 //! | `assert-message NAME read\|unread\|gone` | The message as the store holds it |
 //! | `assert-notify-latency N MS` | Notification N reached the stand-in at most MS after the last `notify-arrive` handed its event to the app; prints the time |
@@ -38,7 +38,7 @@ use std::time::Instant;
 
 pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("notify-server", 0, 1),
-    ("notify-mail", 3, 7),
+    ("notify-mail", 3, 8),
     ("notify-arrive", 1, usize::MAX),
     ("notify-click", 2, 2),
     ("notify-expire", 1, 1),
@@ -48,7 +48,7 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("assert-notify-open", 1, 1),
     ("assert-notified", 2, 2),
     ("assert-notify-withdrawn", 1, 1),
-    ("assert-notify-settings", 2, 2),
+    ("assert-notify-settings", 2, 3),
     ("assert-notify-opened", 1, 2),
     ("assert-message", 2, 2),
     ("assert-notify-latency", 2, 2),
@@ -61,10 +61,17 @@ thread_local! {
         RefCell::new(HashMap::new());
     /// When the last `notify-arrive` handed its event to the app.
     static ARRIVED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// Each message's self-test number, which its Message-ID carries (for `reply=`).
+    static SERIALS: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
 }
 
 pub fn handles(command: &str) -> bool {
     COMMANDS.iter().any(|(name, _, _)| *name == command)
+}
+
+/// Message `name` that `notify-mail` added, for the other commands that name messages.
+pub(super) fn named(name: &str) -> Option<MessageId> {
+    MESSAGES.with(|messages| messages.borrow().get(name).map(|(id, _)| *id))
 }
 
 fn message(name: &str) -> Result<(MessageId, FolderId), String> {
@@ -218,7 +225,15 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
                 sealwax_domain::config::NotificationContent::SenderAndSubject => "sender",
                 sealwax_domain::config::NotificationContent::Count => "count",
             };
-            equal("[notifications]", (enabled, show), (arg(0), arg(1)))
+            let other = if settings.other { "other" } else { "quiet" };
+            match args.get(2) {
+                Some(wanted) => equal(
+                    "[notifications]",
+                    (enabled, show, other),
+                    (arg(0), arg(1), wanted.as_str()),
+                ),
+                None => equal("[notifications]", (enabled, show), (arg(0), arg(1))),
+            }
         }
         "assert-notify-opened" => opened(harness, arg(0), args.get(1).map(String::as_str)),
         "assert-message" => {
@@ -329,6 +344,13 @@ async fn add_message(harness: &Harness, args: &[String]) -> StepResult {
                 Some(("from", from)) => fiction.from = from.to_owned(),
                 Some(("ago", minutes)) => ago = number(minutes)? as i64,
                 Some(("text", text)) => fiction.text = text.to_owned(),
+                Some(("reply", parent)) => {
+                    fiction.reply_to = Some(
+                        SERIALS
+                            .with(|serials| serials.borrow().get(parent).copied())
+                            .ok_or_else(|| format!("no message {parent} to answer"))?,
+                    );
+                }
                 _ => return Err(format!("unknown option {other}")),
             },
         }
@@ -362,6 +384,7 @@ async fn add_message(harness: &Harness, args: &[String]) -> StepResult {
         .flatten()
         .ok_or("the store already held that message")?;
     println!("  # {name} is message {}", id.0);
+    SERIALS.with(|serials| serials.borrow_mut().insert(name.clone(), serial));
     MESSAGES.with(|messages| messages.borrow_mut().insert(name, (id, folder.id)));
     harness.wait_until_settled().await;
     Ok(())

@@ -112,7 +112,7 @@ fn start(dirs: &SealwaxDirs, trust: Trust) -> Engine {
     };
     let store = Store::open(&dirs.store_file(), options).unwrap();
     Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: Arc::new(store),
         blobs,
         paths: AccountPaths::new(dirs),
@@ -120,6 +120,7 @@ fn start(dirs: &SealwaxDirs, trust: Trust) -> Engine {
         secrets: SecretBackend::Memory,
         detect: DetectOptions::default(),
         microsoft_client_id: None,
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig::default(),
     })

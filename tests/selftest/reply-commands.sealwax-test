@@ -1,12 +1,17 @@
 # Compose, Reply, Reply All, Forward and Edit Draft from the main window (M6: ML-069, ML-074):
 # each key from the list and from the reader, each card's buttons by real clicks, and the window's
-# actions as the palette runs them, open the right composer request (`composer::open`). Reply,
-# Reply All and Forward act on the selected message in the list, and in the reader on the message
-# the user is on (the focused card, else the one n or p reached); they don't apply to several
-# messages or to a draft. Compose writes from the account the list shows. `mailto:` links reach
-# the composer through the application's open path. Every name and message is fictional.
-# A composer that opens takes the focus, so each check closes it again (`composer-close`).
-# Run: tools/headless.sh 43 target/debug/sealwax --self-test tests/selftest/reply-commands.sealwax-test
+# actions as the palette runs them. Since the fork's phase B, Reply and Reply All answer under the
+# conversation, in the inline reply (its target and how it answers are checked; Escape in it,
+# empty, goes back); Forward, Compose, Edit Draft and `mailto:` open the right composer request
+# (`composer::open`). Reply, Reply All and Forward act on the selected message in the list, and in
+# the reader on the message the user moved to (n or p, a click in it), else on the selected one,
+# whose row they picked (this script's rows are messages; with a row per conversation, the latest,
+# phase C); they don't apply to several messages or to a draft. Compose writes from the account the
+# list shows.
+# `mailto:` links reach the composer through the application's open path. Every name and message
+# is fictional. A composer that opens takes the focus, so each check closes it again
+# (`composer-close`).
+# Run: tools/headless.sh 43 target/debug/pronto --self-test tests/selftest/reply-commands.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -19,7 +24,8 @@ mail-add Work:inbox 5m "Quarterly numbers" read from=Leah
 folder inbox Personal
 focus list
 
-# The list: the selected message (trip-6) and every key of the four commands.
+# The list: the selected message (trip-6) and every key of the four commands. Reply and Reply
+# All answer under the conversation; Forward opens a card.
 conversation-show trip-6
 focus list
 assert-action-enabled win.reply true
@@ -27,24 +33,28 @@ assert-action-enabled win.reply-all true
 assert-action-enabled win.forward true
 assert-action-enabled win.edit-draft false
 key r
-assert-compose-last reply trip-6 reply
-composer-close
+assert-quick-reply focused true
+assert-quick-reply target trip-6
+assert-quick-reply kind reply
+key Escape
+assert-focus-stop message-list
 key a
-assert-compose-last reply trip-6 reply-all
-composer-close
+assert-quick-reply target trip-6
+assert-quick-reply kind reply-all
+key Escape
 key f
 assert-compose-last reply trip-6 forward
 composer-close
 key <Control>r
-assert-compose-last reply trip-6 reply
-composer-close
+assert-quick-reply kind reply
+key Escape
 key <Control><Shift>r
-assert-compose-last reply trip-6 reply-all
-composer-close
+assert-quick-reply kind reply-all
+key Escape
 key <Control>l
 assert-compose-last reply trip-6 forward
 composer-close
-assert-compose-requests 6
+assert-compose-requests 2
 # Compose (c, Ctrl+N) writes from the account whose folder the list shows.
 key c
 assert-compose-last new Personal
@@ -52,38 +62,69 @@ composer-close
 key <Control>n
 assert-compose-last new Personal
 composer-close
-assert-compose-requests 8
+assert-compose-requests 4
+
+# An older message's row (Sana's, trip-4): the commands act on it, not on the conversation's
+# latest message, and the box under the conversation names her (phase C's review: Forward and
+# Reply took trip-6 from any row of the trip).
+conversation-show trip-4
+focus list
+assert-quick-reply target trip-4
+assert-quick-reply placeholder "Reply to Sana Malik…"
+key f
+assert-compose-last reply trip-4 forward
+composer-close
+key r
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-4
+assert-quick-reply kind reply
+key Escape
+key a
+wait-until assert-quick-reply focused true
+assert-quick-reply target trip-4
+assert-quick-reply kind reply-all
+key Escape
+assert-compose-requests 5
+conversation-show trip-6
+focus list
+assert-quick-reply target trip-6
 
 # The reader: n and p move to a message, and the commands act on it.
 key p
 wait-until assert-conversation top-of trip-5
 key r
-assert-compose-last reply trip-5 reply
-composer-close
+assert-quick-reply target trip-5
+assert-quick-reply kind reply
+key Escape
 key p
 wait-until assert-conversation top-of trip-4
 key f
 assert-compose-last reply trip-4 forward
 composer-close
-# The focus in a card: its message (`focus reader` puts it in the first plain-text body, trip-5's).
+# A focus put in a card by a program (`focus reader`: the first plain-text body, trip-5's) is no
+# move of the user's (phase C's review: only `n`/`p`, a press in a message or Tab from another
+# one are): `a` answers trip-4, which `p` reached.
 focus reader
 key a
-assert-compose-last reply trip-5 reply-all
-composer-close
+assert-quick-reply target trip-4
+assert-quick-reply kind reply-all
+key Escape
 key c
 assert-compose-last new Personal
 composer-close
-assert-compose-requests 12
+assert-compose-requests 7
 
 # Each card's buttons act on that card's message.
 action win.expand-all
 wait-until assert-conversation cards 6
 reply-click-card trip-1 reply
-assert-compose-last reply trip-1 reply
-composer-close
+assert-quick-reply target trip-1
+assert-quick-reply kind reply
+key Escape
 reply-click-card trip-3 reply-all
-assert-compose-last reply trip-3 reply-all
-composer-close
+assert-quick-reply target trip-3
+assert-quick-reply kind reply-all
+key Escape
 reply-click-card trip-5 forward
 assert-compose-last reply trip-5 forward
 composer-close
@@ -91,20 +132,22 @@ assert-tooltip reader-card-reply "Reply (r, Ctrl+R)"
 assert-tooltip reader-card-reply-all "Reply all (a, Ctrl+Shift+R)"
 assert-tooltip reader-card-forward "Forward (f, Ctrl+L)"
 assert-labelled
-assert-compose-requests 15
+assert-compose-requests 8
 
-# As the palette runs them: the focus is still on trip-5's Forward button.
+# As the palette runs them: the focus is still on trip-5's Forward button. From the list, the
+# message the user last moved to in the conversation: trip-5 again, whose card was clicked last
+# (`n` and `p`, a press in a message or Tab from another one move; phase C).
 action win.reply
-assert-compose-last reply trip-5 reply
-composer-close
+assert-quick-reply target trip-5
+key Escape
 focus list
 action win.reply
-assert-compose-last reply trip-4 reply
-composer-close
+assert-quick-reply target trip-5
+key Escape
 action win.compose
 assert-compose-last new Personal
 composer-close
-assert-compose-requests 18
+assert-compose-requests 9
 
 # Several messages: Reply, Reply All and Forward don't apply, and their keys do nothing.
 focus list
@@ -115,7 +158,7 @@ assert-action-enabled win.reply-all false
 assert-action-enabled win.forward false
 key r
 key f
-assert-compose-requests 18
+assert-compose-requests 9
 key Escape
 assert-select-mode false
 
@@ -131,7 +174,7 @@ composer-close
 reply-click-card selected edit-draft
 assert-compose-last server-draft selected
 composer-close
-assert-compose-requests 20
+assert-compose-requests 11
 # Opening a draft (Enter, o) edits it in the composer, as Gmail and Thunderbird do (the user's
 # choice at the M6 gate).
 focus list
@@ -141,7 +184,7 @@ composer-close
 key o
 assert-compose-last server-draft selected
 composer-close
-assert-compose-requests 22
+assert-compose-requests 13
 
 # All Inboxes: the selected message's account; another account's folder: that account.
 folder all-inboxes
@@ -154,12 +197,12 @@ folder inbox Work
 action win.compose
 assert-compose-last new Work
 composer-close
-assert-compose-requests 24
+assert-compose-requests 15
 
 # A mailto: link through the application's open path (D-Bus Open, `sealwax mailto:`); the
 # attach parameter is dropped.
 bus-open "mailto:ingrid@example.test?subject=Cabin&attach=%2Fetc%2Fpasswd"
-wait-until assert-compose-requests 25
+wait-until assert-compose-requests 16
 assert-compose-last mailto ingrid@example.test
 composer-close
 assert-compose-count 1

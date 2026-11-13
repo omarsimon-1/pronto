@@ -1,7 +1,6 @@
-//! Edit Account (the user's UI tweak, 2026-10-08): what Sealwax calls an account and its
-//! colour, for an account already set up. A dialog asks which account (when there are
-//! several), its "Account name" (the address when left empty) and its "Colour", then sends
-//! `Command::EditAccount`; the engine writes the account's `label` and `color` lines in
+//! Edit Account: the account's name, colour and plain-text signature. A dialog asks which
+//! account (when there are several), then sends `Command::EditAccount`; the engine writes
+//! the account's `label`, `color` and `signature` lines in
 //! `accounts.toml`, and the sidebar follows as the app reads the file. A toast reports the
 //! result. The sender name is the setup's and stays.
 
@@ -18,17 +17,18 @@ use sealwax_engine::api::{Command, Event};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// An account whose name and colour can be changed: one `accounts.toml` lists.
+/// An account whose settings can be changed: one `accounts.toml` lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Editable {
     pub key: AccountKey,
     pub address: String,
     pub label: Option<String>,
     pub color: Option<AccountColor>,
+    pub signature: Option<String>,
 }
 
 impl Editable {
-    /// What Sealwax calls it now.
+    /// What Pronto calls it now.
     fn title(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.address)
     }
@@ -48,13 +48,14 @@ impl Editable {
     }
 }
 
-const BODY: &str = "Sealwax shows the account by this name and colour in the sidebar. The name \
-                    people see on your mail stays as it is.";
+const BODY: &str = "Pronto shows this name and colour in the sidebar. The signature appears \
+                    below your message in new mail, replies and forwards.";
 
 /// The dialog's fields, filled from the account chosen.
 struct Fields {
     label: gtk::Entry,
     colors: Rc<ColorChoice>,
+    signature: gtk::TextView,
 }
 
 impl Fields {
@@ -63,10 +64,13 @@ impl Fields {
             .set_text(account.label.as_deref().unwrap_or_default());
         self.label.set_placeholder_text(Some(&account.address));
         self.colors.choose(account.color, false);
+        self.signature
+            .buffer()
+            .set_text(account.signature.as_deref().unwrap_or_default());
     }
 }
 
-/// Asks for the name and colour of one of `accounts`, `chosen` first, then sends the command.
+/// Edits the settings of one of `accounts`, `chosen` first, then sends the command.
 pub fn open(window: &Window, engine: &EngineLink, accounts: Vec<Editable>, chosen: usize) {
     let chosen = chosen.min(accounts.len().saturating_sub(1));
     let Some(first) = accounts.get(chosen) else {
@@ -103,10 +107,45 @@ pub fn open(window: &Window, engine: &EngineLink, accounts: Vec<Editable>, chose
     content.append(&field("Account name", &label, "edit-account-label-field"));
     let colors = ColorChoice::new("edit-account");
     content.append(&field("Colour", &colors.root, "edit-account-color-field"));
+    let signature = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .accepts_tab(false)
+        .top_margin(10)
+        .bottom_margin(10)
+        .left_margin(10)
+        .right_margin(10)
+        .build();
+    signature.set_widget_name("edit-account-signature");
+    signature.update_property(&[gtk::accessible::Property::Label("Signature")]);
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_height(100)
+        .max_content_height(180)
+        .propagate_natural_height(true)
+        .has_frame(true)
+        .child(&signature)
+        .build();
+    content.append(&field(
+        "Signature",
+        &scroller,
+        "edit-account-signature-field",
+    ));
+    content.append(
+        &gtk::Label::builder()
+            .label("Plain text. Leave empty for no signature; the -- separator is added automatically.")
+            .wrap(true)
+            .xalign(0.0)
+            .css_classes(["dim-label"])
+            .build(),
+    );
     dialog.set_extra_child(Some(&content));
     dialog.set_property("focus-widget", &label);
 
-    let fields = Rc::new(Fields { label, colors });
+    let fields = Rc::new(Fields {
+        label,
+        colors,
+        signature,
+    });
     fields.show(first);
     let accounts = Rc::new(accounts);
     if let Some(choice) = &choice {
@@ -139,10 +178,16 @@ pub fn open(window: &Window, engine: &EngineLink, accounts: Vec<Editable>, chose
         };
         let label = account.label_for(&fields.label.text());
         let color = fields.colors.chosen();
-        if label == account.label && color == account.color {
+        let buffer = fields.signature.buffer();
+        let signature = sealwax_domain::accounts_file::normalize_signature(&buffer.text(
+            &buffer.start_iter(),
+            &buffer.end_iter(),
+            false,
+        ));
+        if label == account.label && color == account.color && signature == account.signature {
             return;
         }
-        send(&engine, &toasts, account, label, color);
+        send(&engine, &toasts, account, label, color, signature);
     });
     dialog.present(Some(window.window()));
 }
@@ -153,6 +198,7 @@ fn send(
     account: &Editable,
     label: Option<String>,
     color: Option<AccountColor>,
+    signature: Option<String>,
 ) {
     let title = label.clone().unwrap_or_else(|| account.address.clone());
     let request = engine.next_request();
@@ -161,6 +207,7 @@ fn send(
         key: account.key.clone(),
         label,
         color,
+        signature,
     };
     if engine.send(command).is_err() {
         toasts.add_toast(adw::Toast::new("Not connected to the mail engine"));
@@ -201,6 +248,7 @@ mod tests {
             address: "kari@example.test".to_owned(),
             label: label.map(str::to_owned),
             color: None,
+            signature: None,
         }
     }
 

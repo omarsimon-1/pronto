@@ -1,5 +1,6 @@
-//! The live Omarchy theme as Sealwax draws it (ADR-004, ADR-019; DESIGN.md "Theme tokens",
-//! "Typography" and "HTML mail inside the theme"): the resolved palette, the mail roles, the
+//! The theme as Pronto draws it (ADR-004, ADR-019; DESIGN.md "Theme tokens", "Typography" and
+//! "HTML mail inside the theme"): the palette (Adwaita by default, Tokyo Night, or the live
+//! Omarchy theme, as `config.toml` chooses), the mail roles, the
 //! fonts and type scale, omarchy-shell's control states and spacing, the corner radius, and
 //! the stylesheets made from them. Pure: callers read `colors.toml`, `shell.toml`,
 //! fontconfig and Hyprland and pass the values in.
@@ -13,21 +14,27 @@ mod typography;
 mod webview;
 
 pub use color::{Rgb, distinct, distinct_pairs, hue_distance, readable_on};
-pub use css::{COMPONENT_SIZES, avatar_class};
+pub use css::{COMPONENT_SIZES, MOTION_MS, avatar_class};
 pub use palette::{Mode, Palette, resolve_colors};
 pub use roles::{
     ACCOUNT_CHROMA_DARK, ACCOUNT_CHROMA_LIGHT, ACCOUNT_LIGHTNESS_DARK, ACCOUNT_LIGHTNESS_LIGHT,
     AVATAR_HUE_STEP, AVATAR_LIGHTNESS_DARK, AVATAR_LIGHTNESS_LIGHT, AVATAR_SATURATION,
-    AVATAR_TINTS, AvatarTint, BORDER_MIX, INITIALS_DARK, INITIALS_LIGHT, MailRoles, RowRoles,
-    SECONDARY_MIX, STATUS_HUES, STATUS_MIN_GAP, TEXT_CONTRAST, UiRoles, account_colors,
-    avatar_index, avatar_tints, initials, secondary_text, secondary_text_on,
+    AVATAR_TINTS, AvatarTint, BORDER_MIX, INITIALS_DARK, INITIALS_LIGHT, LINK_MIX_MAX,
+    MARK_CONTRAST, MARK_MIX_MAX, MailRoles, PRIMARY_CONTRAST, PRIMARY_DEEPEN_MAX, READ_MIX,
+    ROW_HOVER_MAX_SHARE, ROW_HOVER_MIN_STEP, ROW_HOVER_SHARE, ROW_SELECTED_TINT, RowRoles,
+    SECONDARY_MIX, STATUS_HUES, STATUS_MIN_GAP, TERTIARY_MIX, TEXT_CONTRAST, UiRoles,
+    account_colors, avatar_index, avatar_tints, deepened, initials, link_on, muted_text_on,
+    raised_secondary_text, raised_surface, reminder_mark, secondary_text, secondary_text_on,
 };
 pub use shell::{ControlState, ControlStates, SPACING_TOKENS, ShellValues, Spacing};
 pub use typography::{
-    ChromeFont, DEFAULT_BASE_SIZE, FontFamilies, Fonts, MAX_BASE_SIZE, READING_LINE_HEIGHT,
-    READING_SIZE, ReadingFont, TypeScale, css_family,
+    ADWAITA_SANS, ChromeFont, DEFAULT_BASE_SIZE, FONT_WEIGHTS, FontFamilies, Fonts, MAX_BASE_SIZE,
+    READING_LINE_HEIGHT, READING_SIZE, ReadingFont, TypeScale, css_family,
 };
-pub use webview::{BodyStyle, MARGINS_COLOR, MEASURE_CSS, PAPER, PAPER_TEXT, WebViewFonts};
+pub use webview::{
+    BodyStyle, MARGINS_COLOR, MEASURE_CSS, PAPER, PAPER_TEXT, QUOTE_TOGGLE_FILL, QUOTE_TOGGLE_TEXT,
+    READING_MEASURE, WebViewFonts,
+};
 
 use std::str::FromStr;
 
@@ -71,9 +78,49 @@ impl FromStr for CornerRadius {
     }
 }
 
+/// `config.toml`'s `palette`: where the colours come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PaletteChoice {
+    /// libadwaita's own look ([`Palette::DARK`], [`Palette::LIGHT`]), light or dark as the
+    /// desktop prefers.
+    #[default]
+    Adwaita,
+    /// [`Palette::TOKYO_NIGHT`], always dark.
+    TokyoNight,
+    /// The live Omarchy theme, followed as it changes; Adwaita's colours outside Omarchy.
+    Omarchy,
+}
+
+impl PaletteChoice {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Adwaita => "adwaita",
+            Self::TokyoNight => "tokyo-night",
+            Self::Omarchy => "omarchy",
+        }
+    }
+}
+
+impl FromStr for PaletteChoice {
+    type Err = String;
+
+    /// `adwaita`, `tokyo-night` or `omarchy`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "adwaita" => Ok(Self::Adwaita),
+            "tokyo-night" => Ok(Self::TokyoNight),
+            "omarchy" => Ok(Self::Omarchy),
+            _ => Err(format!(
+                "expected \"adwaita\", \"tokyo-night\" or \"omarchy\", not {text:?}"
+            )),
+        }
+    }
+}
+
 /// The appearance choices `config.toml` makes; the app fills them from its settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ThemeOptions {
+    pub palette: PaletteChoice,
     pub corner_radius: CornerRadius,
     pub chrome_font: ChromeFont,
     pub reading_font: ReadingFont,
@@ -84,8 +131,10 @@ pub struct ThemeOptions {
 pub enum ThemeSource {
     /// An Omarchy theme, by its `theme.name`.
     Omarchy(String),
-    /// A built-in palette: no Omarchy theme was found.
+    /// Adwaita's palette: chosen, or no Omarchy theme was found.
     Builtin,
+    /// The built-in Tokyo Night palette (`palette = "tokyo-night"`).
+    TokyoNight,
 }
 
 /// Everything read from the system that the theme depends on.
@@ -120,8 +169,12 @@ pub struct Theme {
     pub ui: UiRoles,
     pub mail: MailRoles,
     pub controls: ControlStates,
-    /// The message list's hovered and selected rows.
+    /// The message list's rows on the sidebar's colour, the list's own beside the reader
+    /// (Split): their fills and text.
     pub rows: RowRoles,
+    /// The rows on the window's colour, where the list is alone (one pane at a time: Focused,
+    /// or a narrow window).
+    pub window_rows: RowRoles,
     pub fonts: Fonts,
     pub scale: TypeScale,
     pub spacing: Spacing,
@@ -141,7 +194,8 @@ impl Theme {
         Self {
             source: inputs.source.clone(),
             palette: palette.clone(),
-            rows: RowRoles::new(palette, ui.sidebar, &controls),
+            rows: RowRoles::new(palette, ui.sidebar, ui.error, &controls),
+            window_rows: RowRoles::new(palette, palette.background, ui.error, &controls),
             ui,
             mail: MailRoles::new(palette),
             controls,
@@ -157,7 +211,8 @@ impl Theme {
         self.palette.mode
     }
 
-    /// The Omarchy theme's name, or `builtin-dark` / `builtin-light`.
+    /// The Omarchy theme's name, `builtin-dark` / `builtin-light` for Adwaita's palette, or
+    /// `builtin-tokyo-night`.
     pub fn name(&self) -> &str {
         match &self.source {
             ThemeSource::Omarchy(name) => name,
@@ -165,6 +220,7 @@ impl Theme {
                 Mode::Dark => "builtin-dark",
                 Mode::Light => "builtin-light",
             },
+            ThemeSource::TokyoNight => "builtin-tokyo-night",
         }
     }
 
@@ -189,6 +245,20 @@ mod tests {
         assert_eq!("0".parse(), Ok(CornerRadius::Px(0)));
         assert!("round".parse::<CornerRadius>().is_err());
         assert!("-2".parse::<CornerRadius>().is_err());
+    }
+
+    #[test]
+    fn palette_choice_parses_its_names() {
+        assert_eq!(PaletteChoice::default(), PaletteChoice::Adwaita);
+        for choice in [
+            PaletteChoice::Adwaita,
+            PaletteChoice::TokyoNight,
+            PaletteChoice::Omarchy,
+        ] {
+            assert_eq!(choice.as_str().parse(), Ok(choice));
+        }
+        assert_eq!(" Tokyo-Night ".parse(), Ok(PaletteChoice::TokyoNight));
+        assert!("tokyonight".parse::<PaletteChoice>().is_err());
     }
 
     #[test]
@@ -220,6 +290,16 @@ mod tests {
         assert_eq!(
             Theme::new(&named, &ThemeOptions::default()).name(),
             "tokyo-night"
+        );
+        let tokyo = ThemeInputs {
+            source: ThemeSource::TokyoNight,
+            palette: Palette::TOKYO_NIGHT,
+            ..ThemeInputs::builtin(Mode::Dark)
+        };
+        let theme = Theme::new(&tokyo, &ThemeOptions::default());
+        assert_eq!(
+            (theme.name(), theme.mode()),
+            ("builtin-tokyo-night", Mode::Dark)
         );
     }
 }

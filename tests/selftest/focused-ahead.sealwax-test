@@ -1,0 +1,50 @@
+# Conversations laid out ahead behind a Focused list (the Superhuman pass, docs/superhuman/layout.md
+# and reader.md), with HTML bodies: the warm reader behind the list is drawn into nothing, so
+# WebKit keeps painting its views and the cursor's neighbours get ready there; j swaps one in
+# behind the list, Enter shows it in the list's place, and j from the open conversation swaps
+# again. Integration check for phase A: a reader that was never drawn left WebKit's views at
+# their first frame, and the neighbours never got ready. Every message is fictional.
+# Run: tools/headless.sh 41 target/debug/pronto --self-test tests/selftest/focused-ahead.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+engine-attach
+mail-account Personal
+conversation-add singles
+assert-list-count 24
+assert-view-mode focused
+
+# The cursor on single-2 (HTML): its neighbours, one of them HTML too, are laid out ahead
+# behind the list, unseen.
+focus list
+list-select 1
+wait-until assert-reader-selected
+assert-reader-warm true
+assert-reader-on-screen false
+assert-shown reader false
+wait-until assert-conversation ahead 2
+
+# j moves the cursor: the next conversation swaps in behind the list, and its neighbours follow.
+key j
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+wait-until assert-conversation ahead 2
+
+# Enter: on screen in the list's place; j from there swaps in the next one too.
+key Return
+assert-pane reader
+assert-reader-on-screen true
+assert-shown reader true
+wait-until assert-focus reader
+key j
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-pane reader
+
+# Escape: the list again, the reader warm behind it.
+key Escape
+assert-pane list
+assert-reader-warm true
+assert-shown reader false
+assert-conversation criticals 0

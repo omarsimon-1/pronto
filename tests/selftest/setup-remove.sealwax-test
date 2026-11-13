@@ -2,7 +2,7 @@
 # lists, then a confirmation that names the account and what goes; Cancel sends nothing, Remove
 # sends the account's key, and the sidebar lets the account go. With two accounts the dialog asks
 # which. Every address and name is fictional.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/setup-remove.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/setup-remove.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -26,6 +26,8 @@ engine-expect verify address=kari@example.test
 engine-reply verified ok
 engine-expect add-account address=kari@example.test
 engine-reply added ok
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 wait-until assert-setup open false
 wait-until assert-shown welcome false
 assert-action-enabled win.remove-account true
@@ -59,6 +61,8 @@ engine-expect verify address=ola@example.test
 engine-reply verified ok
 engine-expect add-account address=ola@example.test
 engine-reply added ok
+# A first account again: the window opens its Inbox (phase C's first view).
+engine-expect folder-opened
 wait-until assert-setup open false
 action win.add-account
 setup-type setup-address per@example.test

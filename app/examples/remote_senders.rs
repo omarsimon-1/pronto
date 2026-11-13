@@ -13,7 +13,7 @@
 //! Hide in another of the sender's cards hides them all again. Run it through the wrapper:
 //!
 //! ```sh
-//! SEALWAX_HEADLESS_TIMEOUT=300 tools/headless.sh 35 target/debug/examples/remote_senders
+//! PRONTO_HEADLESS_TIMEOUT=300 tools/headless.sh 35 target/debug/examples/remote_senders
 //! ```
 
 #[path = "hostile_support/canary.rs"]
@@ -190,7 +190,7 @@ fn main() -> glib::ExitCode {
     )
     .expect("the conversation goes into the scratch store");
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.RemoteSenders")
+        .application_id("io.github.omarsimon1.Pronto.RemoteSenders")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let passed = Rc::new(Cell::new(false));

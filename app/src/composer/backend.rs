@@ -7,14 +7,15 @@
 //! Every future resolves on the GTK thread and must not block it: the store's and the
 //! engine's work happens on their own threads.
 
-use super::ComposeRequest;
 use super::recipients;
+use super::{ComposeRequest, Recipients};
 use crate::application::AppState;
 use sealwax_domain::compose::{Draft, DraftSource, ReplyKind};
-use sealwax_domain::model::{AccountId, Address, DraftId};
+use sealwax_domain::model::{AccountId, Address, DraftId, MessageId};
 use sealwax_infrastructure::blobs::BlobStore;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
@@ -50,6 +51,21 @@ pub struct Prepared {
     pub title: String,
 }
 
+/// What the compose rules plan for an answer to a message: whom it goes to, its subject and
+/// the address it goes out from. The counts only in `Debug`: the rest is the user's mail.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReplyPlan {
+    pub recipients: Recipients,
+    pub subject: String,
+    pub from: Address,
+}
+
+impl fmt::Debug for ReplyPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ReplyPlan({:?})", self.recipients)
+    }
+}
+
 /// An address the user has written to or heard from, for the suggestions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Suggestion {
@@ -62,19 +78,45 @@ pub struct Suggestion {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal(pub String);
 
+/// Why a draft wasn't saved or discarded (the fork's phase B: the inline reply's keeper tells
+/// them apart).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unsaved {
+    /// The draft is out of this writer's hands: it is being sent, or it is gone (sent, or
+    /// discarded in a composer card). Trying again can't help.
+    Gone(String),
+    /// It failed this time (the store isn't open, or failed); a later try may work.
+    Failed(String),
+}
+
+impl fmt::Display for Unsaved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gone(why) | Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
 pub trait Backend {
     /// The draft for `request`, with who it can be sent as.
     fn prepare(&self, request: ComposeRequest) -> Local<Result<Prepared, String>>;
     /// Keeps the draft as it is now.
-    fn save(&self, id: DraftId, draft: Draft) -> Local<Result<(), String>>;
+    fn save(&self, id: DraftId, draft: Draft) -> Local<Result<(), Unsaved>>;
     /// The window closed; the draft is kept (it was saved just before).
     fn close(&self, id: DraftId);
     /// The user discarded the draft.
-    fn discard(&self, id: DraftId) -> Local<Result<(), String>>;
-    /// Queues the draft for sending (phase B: the outbox, with the undo window).
-    fn send(&self, id: DraftId, draft: Draft) -> Local<Result<(), Refusal>>;
+    fn discard(&self, id: DraftId) -> Local<Result<(), Unsaved>>;
+    /// Queues the draft for sending (phase B: the outbox): after the undo window, or with `at`
+    /// (Unix ms; Send Later, the fork's phase B) at that time.
+    fn send(&self, id: DraftId, draft: Draft, at: Option<i64>) -> Local<Result<(), Refusal>>;
     /// Addresses matching `query`, best first.
     fn recipients(&self, account: AccountId, query: String) -> Local<Vec<Suggestion>>;
+    /// What the compose rules plan for a `kind` answer to `message` (a reply card switched
+    /// between Reply and Reply All, or going back under its conversation); `None` when it
+    /// can't be said (the message can't be read).
+    fn reply_plan(&self, _message: MessageId, _kind: ReplyKind) -> Local<Option<ReplyPlan>> {
+        Box::pin(async { None })
+    }
     /// The largest message the account's submission server takes, `None` when unknown.
     fn submission_limit(&self, account: AccountId) -> Local<Option<u64>>;
     /// Where attachments and inline images go; `None` until the store is open.
@@ -96,6 +138,8 @@ pub struct StandIn {
     closed: RefCell<Vec<DraftId>>,
     discarded: RefCell<Vec<DraftId>>,
     sent: RefCell<Vec<(DraftId, Draft)>>,
+    /// When each of `sent` was to go: `None` after the undo window, else Send Later's time.
+    sent_at: RefCell<Vec<Option<i64>>>,
     limit: Cell<Option<u64>>,
     identities: RefCell<Vec<Sender>>,
     contacts: RefCell<Vec<Suggestion>>,
@@ -126,6 +170,7 @@ impl StandIn {
             closed: RefCell::new(Vec::new()),
             discarded: RefCell::new(Vec::new()),
             sent: RefCell::new(Vec::new()),
+            sent_at: RefCell::new(Vec::new()),
             limit: Cell::new(Some(STAND_IN_LIMIT)),
             identities: RefCell::new(Vec::new()),
             contacts: RefCell::new(contacts),
@@ -147,6 +192,12 @@ impl StandIn {
 
     pub fn sent(&self) -> Vec<(DraftId, Draft)> {
         self.sent.borrow().clone()
+    }
+
+    /// When each sent draft was to go, in the order of [`StandIn::sent`]: `None` after the undo
+    /// window, else Send Later's time (Unix ms).
+    pub fn sent_at(&self) -> Vec<Option<i64>> {
+        self.sent_at.borrow().clone()
     }
 
     /// The last saved state of `id`.
@@ -211,20 +262,25 @@ impl StandIn {
                     ReplyKind::Forward => "Forward",
                 }
                 .to_owned();
-                stand_in_reply(&mut draft, message, kind, "");
+                stand_in_reply(&mut draft, message, kind, "", None);
                 self.next_id()
             }
             ComposeRequest::QuickReply {
                 message,
                 text,
                 kind,
+                recipients,
+                signature,
             } => {
                 title = match kind {
                     ReplyKind::ReplyAll => "Reply all",
                     _ => "Reply",
                 }
                 .to_owned();
-                stand_in_reply(&mut draft, message, kind, &text);
+                stand_in_reply(&mut draft, message, kind, &text, signature.as_deref());
+                if let Some(recipients) = recipients {
+                    recipients.apply(&mut draft);
+                }
                 self.next_id()
             }
             ComposeRequest::Draft(id) => {
@@ -249,7 +305,7 @@ impl StandIn {
 impl Backend for StandIn {
     fn prepare(&self, request: ComposeRequest) -> Local<Result<Prepared, String>> {
         let Some(state) = self.state.upgrade() else {
-            return Box::pin(async { Err("Sealwax is quitting".to_owned()) });
+            return Box::pin(async { Err("Pronto is quitting".to_owned()) });
         };
         let mailbox = state.mailbox();
         let ready = mailbox.wait_ready();
@@ -268,7 +324,7 @@ impl Backend for StandIn {
         Box::pin(async move {
             ready.await;
             let Some(state) = me.upgrade() else {
-                return Err("Sealwax is quitting".to_owned());
+                return Err("Pronto is quitting".to_owned());
             };
             let accounts = state.mailbox().accounts();
             let account = wanted
@@ -313,7 +369,7 @@ impl Backend for StandIn {
         })
     }
 
-    fn save(&self, id: DraftId, draft: Draft) -> Local<Result<(), String>> {
+    fn save(&self, id: DraftId, draft: Draft) -> Local<Result<(), Unsaved>> {
         self.drafts.borrow_mut().insert(id, draft);
         self.saves.borrow_mut().push((id, Instant::now()));
         Box::pin(async { Ok(()) })
@@ -323,15 +379,16 @@ impl Backend for StandIn {
         self.closed.borrow_mut().push(id);
     }
 
-    fn discard(&self, id: DraftId) -> Local<Result<(), String>> {
+    fn discard(&self, id: DraftId) -> Local<Result<(), Unsaved>> {
         self.drafts.borrow_mut().remove(&id);
         self.discarded.borrow_mut().push(id);
         Box::pin(async { Ok(()) })
     }
 
-    fn send(&self, id: DraftId, draft: Draft) -> Local<Result<(), Refusal>> {
+    fn send(&self, id: DraftId, draft: Draft, at: Option<i64>) -> Local<Result<(), Refusal>> {
         self.drafts.borrow_mut().remove(&id);
         self.sent.borrow_mut().push((id, draft));
+        self.sent_at.borrow_mut().push(at);
         Box::pin(async { Ok(()) })
     }
 
@@ -408,7 +465,7 @@ pub fn id_domain(sender: &str) -> String {
     if valid {
         ascii
     } else {
-        "sealwax.invalid".to_owned()
+        "pronto.invalid".to_owned()
     }
 }
 
@@ -444,6 +501,7 @@ fn stand_in_reply(
     message: sealwax_domain::model::MessageId,
     kind: ReplyKind,
     text: &str,
+    signature: Option<&str>,
 ) {
     let original = Address::new("Grace Hopper", "grace@example.test");
     draft.subject = match kind {
@@ -465,6 +523,8 @@ fn stand_in_reply(
     } else {
         text_html(text)
     };
+    let signature = signature.and_then(sealwax_domain::compose::identity::signature);
+    let typed = sealwax_domain::compose::body(&typed, signature.as_ref(), None);
     draft.html = format!(
         "{typed}<div><br></div><div>On Monday 5 October 2026 at 14:02, {name} &lt;{email}&gt; \
          wrote:</div><blockquote type=\"cite\"><div>Here are the quarterly figures we talked \
@@ -483,7 +543,7 @@ mod tests {
     fn ids_use_the_sender_domain() {
         assert_eq!(id_domain("kari@Example.COM"), "example.com");
         assert!(id_domain("ola@blåbær.example").starts_with("xn--"));
-        assert_eq!(id_domain("nobody"), "sealwax.invalid");
+        assert_eq!(id_domain("nobody"), "pronto.invalid");
         let id = message_id("kari@example.com");
         assert!(id.ends_with("@example.com"));
         let host = gtk4::glib::host_name().to_ascii_lowercase();

@@ -7,7 +7,7 @@
   triage_mailbox.py show SERVER...  prints each folder's messages as the server holds them
 
 SERVER is dovecot, dovecot-rev1 or stalwart. It touches only `triage`, never starts, stops or
-reseeds the testbed, and connects only to 127.0.0.1. The CA is $SEALWAX_TESTBED_CA, else
+reseeds the testbed, and connects only to 127.0.0.1. The CA is $PRONTO_TESTBED_CA, else
 certs/ca.pem beside this file. All content is synthetic.
 """
 
@@ -30,7 +30,7 @@ FETCHED = re.compile(rb"^\* \d+ FETCH \(.*FLAGS \(([^)]*)\).*\{(\d+)\}$")
 def connect(server: str) -> seed.Imap:
     if server not in seed.SERVERS:
         sys.exit(f"triage_mailbox: unknown server {server}; choose from {', '.join(seed.SERVERS)}")
-    ca = os.environ.get("SEALWAX_TESTBED_CA")
+    ca = os.environ.get("PRONTO_TESTBED_CA")
     if ca:
         # seed.Imap reads certs/ca.pem under seed.HERE.
         seed.HERE = Path(ca).resolve().parent.parent

@@ -2,10 +2,13 @@
 # one-key shortcut and scoped Ctrl key of the registry, in the list and in the reader, runs its
 # command (the log of commands run says which); the go-to keys and Back to List's keys (built in
 # M9) run theirs; g waits for its second key, and a mistyped sequence runs nothing; the unshifted alternatives (Delete for #, Ctrl+F for /,
-# Ctrl+J for !, h for ?) work; the search field and the Move to… picker's entry keep every
-# letter, Delete and Ctrl+Z. The keysyms are chosen by the script, so which keys need Shift on
-# US and Norwegian keyboards is the audit's (domain/src/keymap.rs), not this script's.
-# Run: tools/headless.sh 23 target/debug/sealwax --self-test tests/selftest/triage-keys.sealwax-test
+# Ctrl+J for !, Ctrl+H for ?) work; the search field and the Move to… picker's entry keep every
+# letter, Delete and Ctrl+Z. The Superhuman pass: u marks read or unread (Escape alone goes
+# back to the list), h is Remind Me (phase C), Shift+U and Shift+S filter the list, Ctrl+A selects
+# every row, g e and g l go to the Archive and to a folder, Ctrl+K opens and closes the palette.
+# The keysyms are chosen by the script, so which keys need Shift on US and Norwegian keyboards
+# is the audit's (domain/src/keymap.rs), not this script's.
+# Run: tools/headless.sh 23 target/debug/pronto --self-test tests/selftest/triage-keys.sealwax-test
 
 desktop tiling
 fixtures --count 60 --seed 9 --folders spread
@@ -31,10 +34,15 @@ assert-list-selection 0
 assert-action-log none
 key Return
 assert-action-log win.open-message
+# Opening puts the keyboard focus in the conversation (the Superhuman pass): o and l from the
+# list again.
+focus list
 key o
 assert-action-log win.open-message
+focus list
 key l
 assert-action-log win.open-message
+focus list
 
 # The mail commands, in the list.
 key s
@@ -42,9 +50,16 @@ assert-action-log win.star
 assert-list-row 0 starred true
 key s
 mail-flag 0 +read
-key <Shift>u
+key u
+assert-list-row 0 unread true
 key <Shift>i
-assert-action-log win.star,win.mark-unread,win.mark-read
+assert-action-log win.star,win.toggle-read,win.mark-read
+assert-list-row 0 unread false
+key u
+assert-action-log win.toggle-read
+assert-list-row 0 unread true
+key u
+assert-action-log win.toggle-read
 assert-list-row 0 unread false
 key x
 assert-action-log win.select
@@ -88,19 +103,21 @@ assert-action-log win.move-to
 assert-move-to open true
 key Escape
 
-# Compose and the replies (M6), in the list. Each opens a composer, which takes the focus.
+# Compose and the replies (M6), in the list. Compose and Forward open a composer, which takes
+# the focus; Reply and Reply All answer under the conversation (the fork's phase B), and Escape in
+# the empty reply gives the focus back.
 key c
 composer-close
 key r
-composer-close
+key Escape
 key a
-composer-close
+key Escape
 key f
 composer-close
 key <Control>r
-composer-close
+key Escape
 key <Control><Shift>r
-composer-close
+key Escape
 key <Control>l
 composer-close
 assert-action-log win.compose,win.reply,win.reply-all,win.forward,win.reply,win.reply-all,win.forward
@@ -108,7 +125,7 @@ assert-action-log win.compose,win.reply,win.reply-all,win.forward,win.reply,win.
 # g waits for its second key, and a mistyped sequence runs nothing; g after 1.5 s is gone, so s
 # stars. (The go-to keys lead to their folders at the end, after the reader's keys.)
 key g
-key e
+key y
 assert-action-log none
 key g
 sleep 1700
@@ -137,10 +154,27 @@ key question
 assert-action-log app.shortcuts
 key Escape
 focus list
-key h
+key <Control>h
 assert-action-log app.shortcuts
 key Escape
 focus list
+# h is Remind Me (phase C): its picker opens over the window, and Escape closes it.
+key h
+assert-action-log win.remind-me
+wait-until assert-picker shown true
+assert-picker title "Remind Me"
+key Escape
+assert-picker shown false
+focus list
+# Ctrl+K opens the palette; the same key closes it, no second one stacks.
+key <Control>k
+assert-action-log win.command-palette
+assert-palette open true
+assert-focus palette-search
+key <Control>k
+assert-action-log win.command-palette
+assert-palette open false
+assert-focus list
 
 # The search field keeps every letter, Delete and Ctrl+Z.
 focus search
@@ -191,9 +225,9 @@ assert-list-selection 0
 mail-flag 0 +read
 focus reader
 key s
-key <Shift>u
+key u
 key <Shift>i
-wait-until assert-action-log win.star,win.mark-unread,win.mark-read
+wait-until assert-action-log win.star,win.toggle-read,win.mark-read
 key Delete
 wait-until assert-action-log win.delete
 assert-list-row 0 subject HTML-melding
@@ -232,24 +266,28 @@ key question
 wait-until assert-action-log app.shortcuts
 key Escape
 focus reader
-key h
+key <Control>h
 wait-until assert-action-log app.shortcuts
 key Escape
 focus reader
-# Compose and the replies (M6) in the reader; Back to List (u, Escape) and the go-to keys (M9)
-# there too; x and Space and Enter are the list's alone.
+# Compose and the replies (M6) in the reader, and Enter, which answers there as Reply does (the
+# fork's phase B); u (Mark as Read or Unread), Back to List (Escape) and the go-to keys (M9)
+# there too; x is the list's alone (Space, Select's there, scrolls a page here).
 key c
 composer-close
 key r
-composer-close
+key Escape
 key a
-composer-close
+key Escape
 key f
 composer-close
 assert-action-log win.compose,win.reply,win.reply-all,win.forward
+focus reader
+key Return
+assert-action-log win.quick-reply
+key Escape
 key u
-wait-until assert-action-log win.back-to-list
-assert-focus list
+wait-until assert-action-log win.toggle-read
 focus reader
 key Escape
 wait-until assert-action-log win.back-to-list
@@ -260,7 +298,6 @@ key i
 wait-until assert-action-log win.go-to-inbox
 focus reader
 key x
-key space
 sleep 500
 assert-action-log none
 
@@ -285,7 +322,8 @@ assert-action-log win.go-to-inbox
 assert-folder folder-1
 
 # Issue #12's keys (2026-10-19): g then a goes to All Inboxes, g then 1 to the first account's
-# Inbox; a ninth account that isn't there leaves the folder as it is.
+# Inbox; a ninth account that isn't there leaves the folder as it is, and its command waits for
+# one (the palette doesn't offer it either).
 key g
 key a
 assert-action-log win.go-to-all-inboxes
@@ -296,5 +334,53 @@ assert-action-log win.go-to-account-1
 assert-folder folder-1
 key g
 key 9
-assert-action-log win.go-to-account-9
+assert-action-log none
 assert-folder folder-1
+assert-action-enabled win.go-to-account-9 false
+assert-action-enabled win.go-to-account-1 true
+
+# The Superhuman pass's go-to keys: g then e goes to the account's Archive, g then l opens the
+# folder picker, which goes where Enter says.
+key g
+key e
+assert-action-log win.go-to-archive
+assert-folder folder-3
+key g
+key l
+assert-action-log win.go-to-folder
+assert-move-to open true
+assert-focus move-to
+type sent
+assert-move-to selected Sent
+key Return
+assert-move-to open false
+assert-folder folder-2
+assert-focus list
+key g
+key i
+assert-action-log win.go-to-inbox
+
+# The filters: Shift+U shows the unread mail, again everything; Shift+S the starred. Show All
+# Messages applies while a filter is on, from the key on.
+key <Shift>u
+assert-action-log win.show-unread-only
+assert-list-filter unread
+assert-action-enabled win.show-all true
+key <Shift>u
+assert-list-filter all
+assert-action-enabled win.show-all false
+key <Shift>s
+assert-action-log win.show-unread-only,win.show-starred-only
+assert-list-filter starred
+action win.show-all
+assert-action-log win.show-all
+assert-list-filter all
+assert-focus list
+
+# Ctrl+A selects every row, in the select mode; Escape leaves it.
+list-select 0
+key <Control>a
+assert-action-log win.select-all
+assert-select-mode true
+key Escape
+assert-select-mode false

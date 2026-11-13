@@ -394,7 +394,7 @@ fn the_end_of_a_pass_records_the_first_pass_deletions_and_forgets() {
         .iter()
         .map(|uidl| (uidl.0.as_str(), uidl.3))
         .collect();
-    // u2's first deletion stays; u3 isn't forgotten, since Sealwax never deleted it.
+    // u2's first deletion stays; u3 isn't forgotten, since Pronto never deleted it.
     assert_eq!(
         deleted,
         [

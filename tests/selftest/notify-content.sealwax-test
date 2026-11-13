@@ -1,11 +1,11 @@
-# New-mail notifications (ML-083): what Sealwax sends the notification server, through the stand-in
+# New-mail notifications (ML-083): what Pronto sends the notification server, through the stand-in
 # server on the wrapper's private bus. A new unread message in an Inbox gets a notification named
-# Sealwax with the sender as its title and the subject as its body, normal urgency, the mail
+# Pronto with the sender as its title and the subject as its body, normal urgency, the mail
 # category, the app-id's desktop entry, a default action and the Archive and Mark Read buttons; a
 # message in Junk, Sent or Archive and one already read stay quiet; markup and direction overrides
 # in a subject reach the server as text; the count mode shows "New mail" and a count; off sends
 # nothing; a change to config.toml applies at once. Every name and subject is fictional.
-# Run: tools/headless.sh 55 target/debug/sealwax --self-test tests/selftest/notify-content.sealwax-test
+# Run: tools/headless.sh 55 target/debug/pronto --self-test tests/selftest/notify-content.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -20,14 +20,14 @@ notify-mail first Personal:inbox "Hyttetur i oktober" "from=Ingrid Solberg"
 notify-arrive first
 wait-until assert-notify-count 1
 assert-notify-latency 1 1000
-assert-notify 1 app-name Sealwax
+assert-notify 1 app-name Pronto
 assert-notify 1 summary "Ingrid Solberg"
 assert-notify 1 body "Hyttetur i oktober"
 assert-notify 1 actions "default,Archive,Mark Read"
 assert-notify 1 urgency 1
 assert-notify 1 category email.arrived
 assert-notify 1 desktop-entry app-id
-assert-notify 1 image io.github.pixdevsapps.Sealwax
+assert-notify 1 image io.github.omarsimon1.Pronto
 assert-notify 1 target first
 assert-notified first alone
 
@@ -59,20 +59,20 @@ assert-notify 3 body "Fakturafdp.exe"
 
 # The count mode: switching withdraws what shows a sender or a subject; then "New mail" and a
 # count, and no buttons.
-write-file $TMP/config/sealwax/config.toml "[notifications]\nshow = \"count\"\n"
+write-file $TMP/config/pronto/config.toml "[notifications]\nshow = \"count\"\n"
 wait-until assert-notify-settings on count
 wait-until assert-notify-open 0
 notify-mail private Personal:inbox "Lønnsslipp" "from=Lønn"
 notify-arrive private
 wait-until assert-notify-count 4
-assert-notify 4 app-name Sealwax
+assert-notify 4 app-name Pronto
 assert-notify 4 summary "New mail"
 assert-notify 4 body "1 new message"
 assert-notify 4 actions default
 assert-notified private counted
 
 # Off: nothing, and what was shown is withdrawn.
-write-file $TMP/config/sealwax/config.toml "[notifications]\nenabled = false\n"
+write-file $TMP/config/pronto/config.toml "[notifications]\nenabled = false\n"
 wait-until assert-notify-settings off sender
 wait-until assert-notify-open 0
 notify-mail quiet Personal:inbox "Ingen varsling" "from=Ingrid Solberg"
@@ -82,10 +82,13 @@ assert-notify-count 4
 assert-notified quiet none
 
 # On again, sender and subject.
-write-file $TMP/config/sealwax/config.toml ""
+write-file $TMP/config/pronto/config.toml ""
 wait-until assert-notify-settings on sender
 notify-mail again Personal:inbox "Middag fredag" "from=Leah Kim"
 notify-arrive again
 wait-until assert-notify-count 5
 assert-notify 5 summary "Leah Kim"
 assert-notify 5 body "Middag fredag"
+
+# No GTK warning on the way (phase C: the list pane once gave a row -12 px).
+assert-gtk-warnings 0

@@ -36,9 +36,9 @@ pub const STALWART: Server = Server {
 };
 pub const SERVERS: [Server; 3] = [DOVECOT, DOVECOT_REV1, STALWART];
 
-/// `SEALWAX_TESTBED_CA`, else the CA `tools/testbed/up.sh` generated.
+/// `PRONTO_TESTBED_CA`, else the CA `tools/testbed/up.sh` generated.
 pub fn ca() -> PathBuf {
-    std::env::var_os("SEALWAX_TESTBED_CA")
+    std::env::var_os("PRONTO_TESTBED_CA")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/testbed/certs/ca.pem")

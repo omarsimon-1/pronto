@@ -1,0 +1,89 @@
+# Conversations laid out unseen are drawn until they settle, and drawn again when they change
+# (docs/superhuman/polish.md): a body whose inline image comes late, or that grows after it
+# settled, is measured while it waits, so swapping it in doesn't jump. Left undrawn, WebKit
+# lays out nothing more in a view whose last frame wasn't taken: an animated page left before
+# its image came kept its old height until shown, and one that grew late stopped one frame
+# into the growth (the Superhuman pass's review). Every message is fictional.
+# Run: tools/headless.sh 71 target/debug/pronto --self-test tests/selftest/reader-late.sealwax-test
+
+desktop tiling
+resize 1440 900
+engine-attach
+mail-account Personal
+# The window opens the account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
+triage-mark-read-on-open false
+mail-add inbox 50m "Train tickets" html "from=Sana Malik" "text=The tickets for Saturday are booked."
+files-add-text files-late-image
+assert-list-count 2
+# Its first rows in, the list has the Inbox's end in view and asks for older mail.
+engine-expect load-older
+
+# Train tickets shown beside the list: the club's message, its neighbour, is laid out ahead. It
+# animates, and its map is a large message's part that comes from the server: it isn't left
+# undrawn while the map is out; once the map is in, it is measured with it, settles, and stops
+# being drawn.
+focus list
+list-select 1
+wait-until assert-reader-selected
+engine-expect fetch-part
+wait-until assert-conversation ahead 1
+sleep 1500
+assert-conversation ahead-measured 40 200
+assert-conversation ahead-settled false
+assert-conversation ahead-drawn 300 5+
+engine-reply part-fetched ok
+wait-until assert-conversation ahead-settled true
+assert-conversation ahead-measured 230
+assert-conversation ahead-drawn 1000 1
+
+# k swaps it in with its map.
+key k
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-files message files-late-image
+assert-files cid-loaded 1
+
+# Train tickets again: Late growth, laid out ahead beside it, settles and is left undrawn
+# before its block grows from 10 to 400 px, 3 s after it loaded; then the reader draws it
+# again until the growth is measured and it settles at its new height. k swaps it in.
+mail-add inbox 40m "Late growth" html "from=Marius Dahl" "text=<style>@keyframes grow{to{height:400px}}.g{height:10px;background:#c33;animation:grow 0.6s linear 3s forwards}</style><p>Above the block</p><div class=g></div><p>Below the block</p>"
+assert-list-count 3
+list-select 2
+wait-until assert-reader-selected
+wait-until assert-conversation ahead 1
+wait-within 2500 assert-conversation ahead-settled true
+assert-conversation ahead-measured 80 200
+sleep 3000
+wait-until assert-conversation ahead-settled true
+assert-conversation ahead-measured 450
+assert-conversation ahead-drawn 1000 1
+key k
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-body-text "Below the block"
+
+# Focused: the cursor on the club's message, which animates; the reader warm behind the list
+# lays out its neighbour, Late again, whose block grows from 10 to 700 px 3 s after it loads.
+# Once all has settled the panes leave the reader undrawn, the animated page with it (GTK then
+# passes no draw up from inside it); when the growth starts, the reader has itself drawn again
+# until the growth is measured.
+mail-add inbox 35m "Late again" html "from=Marius Dahl" "text=<style>@keyframes grow{to{height:700px}}.g{height:10px;background:#36c;animation:grow 0.6s linear 3s forwards}</style><p>Above the block</p><div class=g></div><p>Below the block</p>"
+assert-list-count 4
+view-mode focused
+assert-pane list
+focus list
+list-select 0
+wait-until assert-reader-selected
+assert-reader-warm true
+wait-until assert-conversation ahead 1
+wait-within 2500 assert-conversation quiet true
+assert-conversation ahead-measured 80 200
+sleep 3000
+wait-until assert-conversation quiet true
+assert-conversation ahead-measured 750
+assert-conversation warm-drawn 1000 1
+key j
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-conversation criticals 0

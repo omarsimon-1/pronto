@@ -1,4 +1,4 @@
-//! omarchy-shell's `shell.toml` tokens that Sealwax follows: the control states and the
+//! omarchy-shell's `shell.toml` tokens that Pronto follows: the control states and the
 //! spacing scale (DESIGN.md "Theme tokens"), read the way `Commons/Style.qml` reads them.
 
 use super::color::Rgb;

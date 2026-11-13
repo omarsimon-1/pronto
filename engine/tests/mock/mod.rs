@@ -1,7 +1,13 @@
-//! A fake Microsoft for the engine's sign-in tests, on 127.0.0.1 only: the sign-in page and the
-//! token endpoint over plain HTTP (which the engine accepts only on a loopback address), and
-//! IMAP and SMTP servers over TLS with a throwaway CA. The servers take XOAUTH2 with the access
-//! tokens the token endpoint issued; SMTP, like Outlook's (S5), only as the token's identity.
+//! A fake Microsoft (or, started with [`Microsoft::google`], a fake Google) for the engine's
+//! sign-in tests, on 127.0.0.1 only: the sign-in page and the token endpoint over plain HTTP
+//! (which the engine accepts only on a loopback address), and IMAP and SMTP servers over TLS with
+//! a throwaway CA. The servers take XOAUTH2 with the access tokens the token endpoint issued;
+//! SMTP, like Outlook's (S5), only as the token's identity.
+//!
+//! As Google, the ID token is Google's (its issuer, a verified `email`), a refresh keeps the
+//! refresh token instead of rotating it, every access token belongs to the user it was issued
+//! to (so several accounts can sign in one after another), and the token endpoint insists on the
+//! client secret when one is set.
 
 #![allow(dead_code)]
 
@@ -13,7 +19,7 @@ use rcgen::{
 };
 use rustls::ServerConfig;
 use rustls_pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-use sealwax_domain::account::{Endpoint, Security};
+use sealwax_domain::account::{Endpoint, OAuthProvider, Security};
 use sealwax_engine::net::Trust;
 use sealwax_engine::oauth::{CONSUMER_TENANT, Provider};
 use sha2::{Digest, Sha256};
@@ -63,6 +69,14 @@ pub fn tls() -> Tls {
 
 /// What the fake Microsoft knows and has seen.
 pub struct State {
+    /// Google's behaviour instead of Microsoft's (above).
+    pub google: bool,
+    /// The client secret the token endpoint requires, if any.
+    pub secret: Option<String>,
+    /// Every sign-in page's query, in order.
+    pub authorize: Vec<HashMap<String, String>>,
+    /// Who each live access token and refresh token belongs to.
+    pub owners: HashMap<String, String>,
     /// The ID token's `preferred_username`: who signs in next.
     pub username: String,
     pub tenant: String,
@@ -87,7 +101,7 @@ pub struct State {
 impl State {
     fn next(&mut self, kind: &str) -> String {
         self.issued += 1;
-        let value = format!("Sealwax-mock-{kind}-{}-7c41e9", self.issued);
+        let value = format!("Pronto-mock-{kind}-{}-7c41e9", self.issued);
         self.secrets.push(value.clone());
         value
     }
@@ -98,7 +112,7 @@ impl State {
         self.secrets
             .iter()
             .rev()
-            .find(|secret| secret.starts_with("Sealwax-mock-") && secret.contains(&marker))
+            .find(|secret| secret.starts_with("Pronto-mock-") && secret.contains(&marker))
             .cloned()
     }
 
@@ -115,9 +129,22 @@ pub struct Microsoft {
 
 impl Microsoft {
     pub async fn start(username: &str) -> Self {
+        Self::launch(username, false).await
+    }
+
+    /// A fake Google instead.
+    pub async fn google(username: &str) -> Self {
+        Self::launch(username, true).await
+    }
+
+    async fn launch(username: &str, google: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let state = Arc::new(Mutex::new(State {
+            google,
+            secret: None,
+            authorize: Vec::new(),
+            owners: HashMap::new(),
             username: username.to_owned(),
             tenant: CONSUMER_TENANT.to_owned(),
             lifetime: 3600,
@@ -140,7 +167,13 @@ impl Microsoft {
     }
 
     pub fn provider(&self) -> Provider {
+        let kind = if self.state().google {
+            OAuthProvider::Google
+        } else {
+            OAuthProvider::Microsoft
+        };
         Provider::new(
+            kind,
             &format!("http://127.0.0.1:{}/authorize", self.port),
             &format!("http://127.0.0.1:{}/token", self.port),
         )
@@ -160,15 +193,28 @@ fn now() -> u64 {
 }
 
 fn id_token(state: &mut State) -> String {
-    let claims = serde_json::json!({
-        "iss": format!("https://login.microsoftonline.com/{}/v2.0", state.tenant),
-        "aud": CLIENT,
-        "exp": now() + 3600,
-        "iat": now(),
-        "tid": state.tenant,
-        "preferred_username": state.username,
-        "ver": "2.0",
-    });
+    let claims = if state.google {
+        serde_json::json!({
+            "iss": "https://accounts.google.com",
+            "azp": CLIENT,
+            "aud": CLIENT,
+            "sub": "1234567890",
+            "email": state.username,
+            "email_verified": true,
+            "exp": now() + 3600,
+            "iat": now(),
+        })
+    } else {
+        serde_json::json!({
+            "iss": format!("https://login.microsoftonline.com/{}/v2.0", state.tenant),
+            "aud": CLIENT,
+            "exp": now() + 3600,
+            "iat": now(),
+            "tid": state.tenant,
+            "preferred_username": state.username,
+            "ver": "2.0",
+        })
+    };
     let token = format!(
         "{}.{}.{}",
         URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","typ":"JWT"}"#),
@@ -192,13 +238,37 @@ fn tokens(state: &mut State) -> String {
     let refresh = state.next("refresh");
     state.access.insert(access.clone());
     state.refresh.insert(refresh.clone());
+    let owner = state.username.clone();
+    state.owners.insert(access.clone(), owner.clone());
+    state.owners.insert(refresh.clone(), owner);
+    let scope = if state.google {
+        "https://mail.google.com/ openid https://www.googleapis.com/auth/userinfo.email"
+    } else {
+        "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send"
+    };
     let body = serde_json::json!({
         "token_type": "Bearer",
         "access_token": access,
         "refresh_token": refresh,
         "expires_in": state.lifetime,
-        "scope": "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send",
+        "scope": scope,
         "id_token": id_token(state),
+    });
+    json("200 OK", &body.to_string())
+}
+
+/// Google's answer to a refresh: a new access token for the refresh token's owner, and no new
+/// refresh token.
+fn google_refresh(state: &mut State, refresh: &str) -> String {
+    let access = state.next("access");
+    state.access.insert(access.clone());
+    let owner = state.owners[refresh].clone();
+    state.owners.insert(access.clone(), owner);
+    let body = serde_json::json!({
+        "token_type": "Bearer",
+        "access_token": access,
+        "expires_in": state.lifetime,
+        "scope": "https://mail.google.com/",
     });
     json("200 OK", &body.to_string())
 }
@@ -215,7 +285,8 @@ fn refused(error: &str, code: u32) -> String {
 async fn http(stream: TcpStream, state: Arc<Mutex<State>>) {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).await.is_err() {
+    // A connection closed without a request (a client's spare connection) gets no answer.
+    if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
         return;
     }
     let mut length = 0;
@@ -239,6 +310,7 @@ async fn http(stream: TcpStream, state: Arc<Mutex<State>>) {
             .collect();
         let mut state = state.lock().unwrap();
         assert!(!query.contains_key("login_hint"));
+        state.authorize.push(query.clone());
         let redirect = &query["redirect_uri"];
         let answer = if state.decline {
             "error=access_denied&error_description=AADSTS65004%3A+User+declined+to+consent"
@@ -261,7 +333,12 @@ async fn http(stream: TcpStream, state: Arc<Mutex<State>>) {
             url::form_urlencoded::parse(&body).into_owned().collect();
         let mut state = state.lock().unwrap();
         assert_eq!(form["client_id"], CLIENT);
+        let secret_fits = state.secret.as_ref() == form.get("client_secret");
         match form["grant_type"].as_str() {
+            _ if !secret_fits => {
+                let body = r#"{"error":"invalid_client","error_description":"Unauthorized"}"#;
+                json("401 Unauthorized", body)
+            }
             "authorization_code" => {
                 state.grants.push("code".into());
                 state.secrets.push(form["code_verifier"].clone());
@@ -278,7 +355,9 @@ async fn http(stream: TcpStream, state: Arc<Mutex<State>>) {
             "refresh_token" => {
                 let token = form["refresh_token"].clone();
                 state.grants.push(format!("refresh {token}"));
-                if state.refresh.remove(&token) {
+                if state.google && state.refresh.contains(&token) {
+                    google_refresh(&mut state, &token)
+                } else if !state.google && state.refresh.remove(&token) {
                     tokens(&mut state)
                 } else {
                     refused("invalid_grant", 70000)
@@ -406,7 +485,8 @@ pub async fn imap(tls: &Tls, microsoft: &Microsoft) -> Server {
                         let (user, token) = xoauth2(&line(&mut io).await.unwrap_or_default());
                         let live = {
                             let state = state.lock().unwrap();
-                            !state.imap_refuses && state.access.contains(&token)
+                            let owned = !state.google || state.owners.get(&token) == Some(&user);
+                            !state.imap_refuses && state.access.contains(&token) && owned
                         };
                         seen.lock().unwrap().push((user, token));
                         if live {
@@ -461,7 +541,12 @@ pub async fn smtp(tls: &Tls, microsoft: &Microsoft) -> Server {
                     let (user, token) = xoauth2(encoded);
                     let accepted = {
                         let state = state.lock().unwrap();
-                        state.access.contains(&token) && state.username == user
+                        let owner = if state.google {
+                            state.owners.get(&token).cloned()
+                        } else {
+                            Some(state.username.clone())
+                        };
+                        state.access.contains(&token) && owner.as_ref() == Some(&user)
                     };
                     seen.lock().unwrap().push((user, token));
                     if accepted {

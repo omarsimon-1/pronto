@@ -21,7 +21,8 @@
 //! on the admin approval a work account's organization may need, and the username the sign-in
 //! belongs to is the one saved. The window's banner opens the assistant straight at that
 //! step for an account that must sign in again. Neither the page's address nor the username
-//! is logged.
+//! is logged. Google sign-in (ADR-023) uses the same step for Gmail's servers once a Google
+//! client is configured; without one, Gmail keeps the app-password step.
 //!
 //! A server on this computer whose certificate the system doesn't trust (Proton Mail Bridge,
 //! issue #9) gets a trust step after the check fails on it: the engine reads the certificate,
@@ -94,8 +95,9 @@ pub enum Step {
     /// Settings found for a password: the settings, the username where it must be typed or
     /// confirmed, and the password.
     Password,
-    /// Settings found for Microsoft sign-in, or an account to sign in again: the button that
-    /// starts it, or how to make it available without a client ID.
+    /// Settings found for a browser sign-in (Microsoft's, or Google's for Gmail with a Google
+    /// client in use), or an account to sign in again: the button that starts it, or how to
+    /// make it available without a client.
     Microsoft,
     /// Waiting for `SignedIn` while the browser signs in.
     SigningIn,
@@ -185,6 +187,8 @@ pub struct Again {
     pub incoming: Endpoint,
     pub receive: Receive,
     pub smtp: Endpoint,
+    /// A password, or the provider a browser sign-in is made with.
+    pub auth: AuthMethod,
 }
 
 /// A server on this computer that showed a certificate the system doesn't trust, while the trust
@@ -200,10 +204,10 @@ struct Untrusted {
     from: Step,
 }
 
-/// Whether Microsoft sign-in can start: a client ID is in use
-/// ([`crate::oauth::microsoft_client_id`]). Asked whenever the assistant draws, so a client ID
-/// added to `config.toml` meanwhile counts.
-pub type MicrosoftAvailable = Rc<dyn Fn() -> bool>;
+/// Whether a provider's browser sign-in can start: a client is in use for it
+/// ([`crate::oauth::microsoft_client_id`], [`crate::oauth::google_client`]). Asked whenever the
+/// assistant draws, so a client added to `config.toml` meanwhile counts.
+pub type SignInAvailable = Rc<dyn Fn(OAuthProvider) -> bool>;
 
 #[derive(Default)]
 struct State {
@@ -252,6 +256,19 @@ impl State {
         self.signed_in_as
             .as_ref()
             .map(|(_, address)| address.as_str())
+    }
+
+    /// The provider the sign-in step signs in with: the account's own when it signs in again,
+    /// else the one detection found; Microsoft when neither names one.
+    pub(super) fn oauth_provider(&self) -> OAuthProvider {
+        let auth = match &self.again {
+            Some(again) => Some(again.auth),
+            None => self.found().map(|settings| settings.auth),
+        };
+        match auth {
+            Some(AuthMethod::OAuth(provider)) => provider,
+            _ => OAuthProvider::Microsoft,
+        }
     }
 
     /// The address detection ran for, as typed.
@@ -370,7 +387,7 @@ struct Inner {
     dialog: adw::Dialog,
     engine: EngineLink,
     toasts: glib::WeakRef<adw::ToastOverlay>,
-    microsoft: MicrosoftAvailable,
+    available: SignInAvailable,
     widgets: Widgets,
     state: RefCell<State>,
     /// The rows of the sources list as last drawn.
@@ -439,7 +456,7 @@ pub fn current() -> Option<Assistant> {
 pub fn open(
     window: &Window,
     engine: &EngineLink,
-    microsoft: MicrosoftAvailable,
+    available: SignInAvailable,
     used: &[AccountColor],
 ) -> Assistant {
     let parent = window.window();
@@ -450,7 +467,7 @@ pub fn open(
         }
         open.close();
     }
-    let assistant = Assistant::new(engine, window.toasts(), microsoft);
+    let assistant = Assistant::new(engine, window.toasts(), available);
     assistant
         .inner
         .widgets
@@ -468,7 +485,7 @@ pub fn open(
 pub fn sign_in_again(
     window: &Window,
     engine: &EngineLink,
-    microsoft: MicrosoftAvailable,
+    available: SignInAvailable,
     again: Again,
 ) -> Assistant {
     let parent = window.window();
@@ -486,7 +503,7 @@ pub fn sign_in_again(
         }
         open.close();
     }
-    let assistant = Assistant::new(engine, window.toasts(), microsoft);
+    let assistant = Assistant::new(engine, window.toasts(), available);
     assistant.inner.widgets.address.set_text(&again.address);
     {
         let mut state = assistant.inner.state.borrow_mut();
@@ -507,7 +524,7 @@ pub fn sign_in_again(
 pub fn type_password_again(
     window: &Window,
     engine: &EngineLink,
-    microsoft: MicrosoftAvailable,
+    available: SignInAvailable,
     again: Again,
 ) -> Assistant {
     let parent = window.window();
@@ -525,7 +542,7 @@ pub fn type_password_again(
         }
         open.close();
     }
-    let assistant = Assistant::new(engine, window.toasts(), microsoft);
+    let assistant = Assistant::new(engine, window.toasts(), available);
     assistant.inner.widgets.address.set_text(&again.address);
     {
         let mut state = assistant.inner.state.borrow_mut();
@@ -557,14 +574,14 @@ pub fn refresh() {
 }
 
 impl Assistant {
-    fn new(engine: &EngineLink, toasts: adw::ToastOverlay, microsoft: MicrosoftAvailable) -> Self {
+    fn new(engine: &EngineLink, toasts: adw::ToastOverlay, available: SignInAvailable) -> Self {
         let (widgets, dialog) = Widgets::build();
         let assistant = Self {
             inner: Rc::new(Inner {
                 dialog,
                 engine: engine.clone(),
                 toasts: toasts.downgrade(),
-                microsoft,
+                available,
                 widgets,
                 state: RefCell::new(State::default()),
                 drawn_sources: RefCell::new(None),
@@ -913,7 +930,17 @@ impl Assistant {
         self.focus_first();
     }
 
-    fn detected(&self, detection: Detection) {
+    fn detected(&self, mut detection: Detection) {
+        // Gmail's servers sign in with Google when a Google client is in use (ADR-023); without
+        // one they keep the app password, as before.
+        if let Detection::Found(settings) = &mut detection
+            && settings.auth == AuthMethod::Password
+            && presets::google_host(&settings.imap.host)
+            && (self.inner.available)(OAuthProvider::Google)
+        {
+            settings.auth = AuthMethod::OAuth(OAuthProvider::Google);
+            settings.second_username = None;
+        }
         let (step, proposed) = {
             let mut state = self.inner.state.borrow_mut();
             state.pending = None;
@@ -1320,7 +1347,7 @@ impl Assistant {
     /// "Sign in with Microsoft": `SignIn` for the address (or the account signed in again);
     /// the engine answers with the page to open, then `SignedIn`.
     fn sign_in(&self) {
-        if !(self.inner.microsoft)() {
+        if !self.sign_in_available() {
             return;
         }
         let target = {
@@ -1328,10 +1355,7 @@ impl Assistant {
             if state.step != Step::Microsoft {
                 return;
             }
-            let provider = match state.found().map(|settings| settings.auth) {
-                Some(AuthMethod::OAuth(provider)) => provider,
-                _ => OAuthProvider::Microsoft,
-            };
+            let provider = state.oauth_provider();
             match &state.again {
                 Some(again) => Some((provider, again.address.clone(), Some(again.key.clone()))),
                 None => state
@@ -1385,7 +1409,10 @@ impl Assistant {
         }
         tracing::info!(request, "setup: still waiting for the browser");
         self.render();
-        crate::accessibility::announce(&self.inner.widgets.still_waiting, text::STILL_WAITING);
+        // The note is about Microsoft's admin approval; Google's sign-in shows none.
+        if self.inner.state.borrow().oauth_provider() == OAuthProvider::Microsoft {
+            crate::accessibility::announce(&self.inner.widgets.still_waiting, text::STILL_WAITING);
+        }
     }
 
     /// `SignInOpen`: the page goes to the browser, and stays at hand to open again.
@@ -1437,7 +1464,8 @@ impl Assistant {
                     state.pending = None;
                     state.sign_in_url = None;
                     let provider = state.found().and_then(|settings| settings.provider.clone());
-                    state.notice = Some(text::sign_in_failure(&error, provider.as_deref()));
+                    let oauth = state.oauth_provider();
+                    state.notice = Some(text::sign_in_failure(&error, provider.as_deref(), oauth));
                     state.step = Step::Microsoft;
                 }
                 self.render();
@@ -1793,11 +1821,17 @@ impl Assistant {
 
     fn render(&self) {
         let problem = self.problem();
-        let microsoft = (self.inner.microsoft)();
+        let available = self.sign_in_available();
         let state = self.inner.state.borrow();
         self.inner
             .widgets
-            .draw(&state, problem, &self.inner.drawn_sources, microsoft);
+            .draw(&state, problem, &self.inner.drawn_sources, available);
+    }
+
+    /// Whether the sign-in step's provider has a client in use.
+    fn sign_in_available(&self) -> bool {
+        let provider = self.inner.state.borrow().oauth_provider();
+        (self.inner.available)(provider)
     }
 
     /// The first field the step needs typed: the address, a username to type or confirm, the
@@ -1819,7 +1853,7 @@ impl Assistant {
                 None => w.incoming.host.clone().upcast(),
             }),
             Step::PasswordAgain => Some(w.password.clone().upcast()),
-            Step::Microsoft if (self.inner.microsoft)() => {
+            Step::Microsoft if self.sign_in_available() => {
                 Some(w.microsoft_button.clone().upcast())
             }
             Step::Microsoft if !w.back.is_visible() => Some(w.close.clone().upcast()),

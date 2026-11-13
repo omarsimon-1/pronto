@@ -269,11 +269,17 @@ fn the_first_inbox_sync_on_every_server() {
                 .unwrap();
             let what = server.name;
             assert_eq!((report.fetched, report.total), (30, 30), "{what}");
+            // The ramp's first batch of 25 shows before the other 5 (the fork's Superhuman
+            // pass).
             assert_eq!(
                 progress,
                 vec![
                     Progress {
                         fetched: 0,
+                        total: 30
+                    },
+                    Progress {
+                        fetched: 25,
                         total: 30
                     },
                     Progress {

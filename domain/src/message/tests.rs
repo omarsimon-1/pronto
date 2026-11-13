@@ -332,14 +332,50 @@ fn check_invariants(raw: &[u8]) {
     assert!(parsed.snippet.chars().count() <= 200);
     assert!(parsed.body_text.len() <= SEARCH_TEXT_LIMIT);
     assert_eq!(parsed.size, raw.len() as u64);
-    for index in parsed
+    let indexes: Vec<u32> = parsed
         .text_parts
         .iter()
         .chain(&parsed.html_parts)
         .chain(parsed.attachments.iter().map(|attachment| &attachment.part))
-    {
+        .copied()
+        .collect();
+    for index in &indexes {
         assert!(part(raw, *index).is_some(), "part {index} missing");
     }
+    // One parse reads what a parse per part reads (only where `parse` found parts: it catches
+    // a panic beneath the parser, `Parsed` doesn't).
+    if !indexes.is_empty() {
+        let once = Parsed::new(raw);
+        let each: Vec<Option<Part>> = indexes.iter().map(|index| part(raw, *index)).collect();
+        assert_eq!(once.parts(&indexes), each);
+        assert_eq!(once.inspect(), crate::reading::inspect(raw));
+    }
+}
+
+#[test]
+fn one_parse_reads_every_part_and_what_the_reader_inspects() {
+    let raw = crlf(ATTACHMENTS);
+    let parsed = parse(&raw);
+    let once = Parsed::new(&raw);
+    let html = once.part(parsed.html_parts[0]).expect("the HTML part");
+    assert_eq!(html.mime_type, "text/html");
+    assert!(
+        html.text
+            .as_deref()
+            .is_some_and(|text| text.contains("faktura"))
+    );
+    let logo = &parsed.attachments[0];
+    assert_eq!(once.part(logo.part), part(&raw, logo.part));
+    assert_eq!(
+        once.part(logo.part).map(|part| part.data),
+        Some(b"\x89PNG\r\n\x1a\n".to_vec())
+    );
+    assert_eq!(once.part(0), None, "a multipart is no single part");
+    assert_eq!(once.parts(&[99]), [None]);
+    assert_eq!(once.inspect(), crate::reading::inspect(&raw));
+    let none = Parsed::new(b"");
+    assert_eq!(none.part(0), None);
+    assert_eq!(none.inspect(), crate::reading::Inspection::default());
 }
 
 #[test]

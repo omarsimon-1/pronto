@@ -14,7 +14,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use sealwax_domain::model::{Flags, Folder, FolderId, FolderRole, MessageId};
 use sealwax_infrastructure::ingest::{self, RawMessage};
-use sealwax_infrastructure::store::{FolderSpec, NewAccount, ViewScope};
+use sealwax_infrastructure::store::{FolderSpec, ListRow, NewAccount, ViewScope};
 use sealwax_infrastructure::xdg::SealwaxDirs;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -46,8 +46,14 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("list-scroll-end", 0, 0),
     ("list-wait", 0, 0),
     ("list-remember", 0, 0),
+    ("list-move-span", 1, 1),
+    ("list-replay", 2, 2),
+    ("assert-list-moves", 2, 2),
     // Assertions.
     ("assert-list-count", 1, 1),
+    // GTK's warnings and criticals since the script's first store or list command (phase C:
+    // the list pane allocated a row -12 px high).
+    ("assert-gtk-warnings", 1, 1),
     // The view a window shows and the one layout.toml remembers (issue #5).
     ("assert-folder-at", 1, 1),
     ("assert-layout-view", 1, 1),
@@ -63,7 +69,8 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("assert-list-top", 1, 1),
     ("assert-list-focus", 1, 1),
     ("assert-list-placeholders", 1, 1),
-    ("assert-list-empty", 1, 1),
+    // The empty state's title, and with a second word its line.
+    ("assert-list-empty", 1, 2),
     ("assert-list-search", 2, 2),
     ("assert-list-matches-folder", 1, 1),
     ("assert-sidebar-count", 2, 2),
@@ -92,7 +99,7 @@ pub fn before_start(steps: &[Step], dirs: &mut SealwaxDirs) -> Result<(), String
     let mut chosen = false;
     for step in steps {
         match step.command.as_str() {
-            "desktop" => {}
+            "desktop" | "layout-defaults" => {}
             "store-dir" | "fixtures" if !leading => {
                 return Err(format!(
                     "line {}: {} must come before the window's steps",
@@ -160,13 +167,39 @@ fn import(args: &[String], dirs: &SealwaxDirs) -> Result<Vec<String>, String> {
     Ok(report)
 }
 
+/// GTK's own warnings and criticals (its `Gtk` log domain) since [`count_gtk_warnings`].
+static GTK_WARNINGS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Counts GTK's warnings and criticals from now on, still writing them as GLib does. GTK logs
+/// them structured, past `g_log_set_handler`, so the process's one log writer counts them.
+fn count_gtk_warnings() {
+    static WRITER: std::sync::Once = std::sync::Once::new();
+    WRITER.call_once(|| {
+        glib::log_set_writer_func(|level, fields| {
+            let gtk = fields
+                .iter()
+                .any(|field| field.key() == "GLIB_DOMAIN" && field.value_str() == Some("Gtk"));
+            if gtk && matches!(level, glib::LogLevel::Warning | glib::LogLevel::Critical) {
+                GTK_WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            glib::log_writer_default(level, fields)
+        });
+    });
+}
+
 /// Runs `command` when it is one of this module's; `None` otherwise.
 pub(super) async fn run(harness: &Harness, command: &str, args: &[String]) -> Option<StepResult> {
     if let Some(result) = super::perf::run(harness, command, args).await {
         return Some(result);
     }
+    count_gtk_warnings();
     let arg = |index: usize| args[index].as_str();
     let result = match command {
+        "assert-gtk-warnings" => equal(
+            "GTK warnings and criticals",
+            GTK_WARNINGS.load(std::sync::atomic::Ordering::Relaxed),
+            number(arg(0)).map(|count| count as u32).unwrap_or(u32::MAX),
+        ),
         "store-dir" => Ok(()),
         "fixtures" => {
             let report = IMPORTS.with(|imports| imports.borrow_mut().pop_front());
@@ -241,6 +274,16 @@ pub(super) async fn run(harness: &Harness, command: &str, args: &[String]) -> Op
             Err(error) => Err(error),
         },
         "list-wait" => settled(harness).await,
+        "list-replay" => super::replay::replay(args),
+        // The longest move of a conversation told GTK at once (`MOVE_SPAN`); 0 tells each
+        // move row by row, as one from far down is.
+        "list-move-span" => match (list(harness), number(arg(0))) {
+            (Ok(list), Ok(rows)) => {
+                list.model().set_move_span(rows as u32);
+                Ok(())
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        },
         "list-remember" => match list(harness) {
             Ok(list) => match list.selected() {
                 Some(id) => {
@@ -292,6 +335,7 @@ fn is_idle(list: &MessageList) -> bool {
         && !model.is_searching()
         && (!shown || (!model.is_growing() && !list.is_growing()))
         && list.bound_rows().iter().all(|row| !row.placeholder)
+        && !list.splits_busy()
 }
 
 /// Waits until the list is idle, painting frames.
@@ -315,7 +359,7 @@ pub(super) async fn settled(harness: &Harness) -> StepResult {
         }
         if started.elapsed() > WAIT_TIMEOUT {
             return Err(format!(
-                "the list didn't settle: pending {}, searching {}, growing {}, {} rows bound, {} placeholders",
+                "the list didn't settle: pending {}, searching {}, growing {}, {} rows bound, {} placeholders, the Split Inbox busy {}",
                 list.model().is_pending(),
                 list.model().is_searching(),
                 list.is_growing(),
@@ -323,7 +367,8 @@ pub(super) async fn settled(harness: &Harness) -> StepResult {
                 list.bound_rows()
                     .iter()
                     .filter(|row| row.placeholder)
-                    .count()
+                    .count(),
+                list.splits_busy()
             ));
         }
     }
@@ -349,6 +394,8 @@ async fn add_account(harness: &Harness, name: &str) -> StepResult {
             address: account_address(name),
         });
     let account = reply.recv().await.map_err(|error| error.to_string())?.value;
+    // The account first, then its folders, as after a real setup (`account_read`).
+    account_read(harness, account).await?;
     for (role, folder) in [
         (FolderRole::Inbox, "INBOX"),
         (FolderRole::Drafts, "Drafts"),
@@ -371,6 +418,27 @@ async fn add_account(harness: &Harness, name: &str) -> StepResult {
         glib::timeout_future(Duration::from_millis(10)).await;
     }
     settled(harness).await
+}
+
+/// Waits until the app has read `account`, before its folders are added, as a real setup lists
+/// them a server round trip after the account. The window opens a first account's Inbox once
+/// they come either way (phase C's first view: before, a new first account stayed on All
+/// Inboxes when it came alone, or opened its Inbox when the account and its folders landed in
+/// one read, sending a `FolderOpened` some runs only), so a script with an engine attached
+/// expects that `folder-opened`.
+pub(super) async fn account_read(
+    harness: &Harness,
+    account: sealwax_domain::model::AccountId,
+) -> StepResult {
+    let mailbox = harness.state.mailbox();
+    let started = Instant::now();
+    while !mailbox.accounts().iter().any(|known| known.id == account) {
+        if started.elapsed() > WAIT_TIMEOUT {
+            return Err("the app never read the new account".to_owned());
+        }
+        glib::timeout_future(Duration::from_millis(10)).await;
+    }
+    Ok(())
 }
 
 /// `[ACCOUNT:]ROLE` or `[ACCOUNT:]NAME`: a folder by its role (`inbox`, `sent`, …), else by its
@@ -538,7 +606,7 @@ pub(super) fn raw_message(fiction: &Fiction, date: i64, serial: u32) -> Vec<u8> 
 
 /// Stores a fictional message through the real ingest path (blob store and parser off the GTK
 /// thread, then the app's store writer), and returns its id.
-async fn ingest_fiction(
+pub(super) async fn ingest_fiction(
     harness: &Harness,
     folder: FolderId,
     fiction: &Fiction,
@@ -553,6 +621,8 @@ async fn ingest_fiction(
     });
     let raw = RawMessage {
         folder,
+        // A stand-in server's folder gives it a UID (`remind-server-account`).
+        uid: super::remind::server_uid(folder),
         flags,
         internal_date: Some(date),
         raw: raw_message(fiction, date, serial),
@@ -611,11 +681,11 @@ async fn add_message(harness: &Harness, args: &[String]) -> StepResult {
     settled(harness).await
 }
 
+/// The message of the row at `position`: its own, or a conversation's anchor.
 fn row_id(list: &MessageList, position: &str) -> Result<MessageId, String> {
     let position = number(position)? as u32;
     list.model()
-        .row_at(position)
-        .map(|row| row.id)
+        .message_at(position)
         .ok_or_else(|| format!("row {position} isn't loaded"))
 }
 
@@ -872,6 +942,38 @@ async fn press(harness: &Harness, key: &str) -> StepResult {
     settled(harness).await
 }
 
+/// A row's state as the list shows it: a message's own; a conversation's members' in the view
+/// (unread while one is), its messages and its draft.
+struct RowState {
+    unread: bool,
+    starred: bool,
+    attachment: bool,
+    count: u32,
+    members: u32,
+    draft: bool,
+}
+
+fn row_state(row: &ListRow) -> RowState {
+    match row {
+        ListRow::Message(row) => RowState {
+            unread: !row.flags.is_seen(),
+            starred: row.flags.is_flagged(),
+            attachment: row.has_attachments,
+            count: row.thread_count,
+            members: 1,
+            draft: row.flags.is_draft(),
+        },
+        ListRow::Conversation(row) => RowState {
+            unread: row.unread > 0,
+            starred: row.flagged > 0,
+            attachment: row.attachments > 0,
+            count: row.messages,
+            members: row.members,
+            draft: row.has_draft,
+        },
+    }
+}
+
 /// The folder counts the list should match.
 fn folder_counts(harness: &Harness, scope: ViewScope) -> (u32, u32) {
     let folders = harness.state.mailbox().folders();
@@ -912,23 +1014,65 @@ async fn check(harness: &Harness, assertion: &str, args: &[String]) -> StepResul
         "assert-list-row" => {
             let position = number(arg(0))? as u32;
             let row = model
-                .row_at(position)
+                .list_row_at(position)
                 .ok_or_else(|| format!("row {position} isn't loaded"))?;
             let shown = || {
                 list.row_widget(position)
                     .map(|row| row.texts())
                     .ok_or_else(|| format!("row {position} isn't bound"))
             };
+            let state = row_state(&row);
             let value = match arg(1) {
                 "sender" => shown()?[0].clone(),
                 "subject" => shown()?[1].clone(),
                 "snippet" => shown()?[2].clone(),
                 "time" => shown()?[3].clone(),
+                // A scheduled send's draft says when it goes in the date's place.
+                "scheduled" => shown()?[3].starts_with("Sending ").to_string(),
                 "section" => model.section_label(position).to_owned(),
-                "unread" => (!row.flags.is_seen()).to_string(),
-                "starred" => row.flags.is_flagged().to_string(),
-                "attachment" => row.has_attachments.to_string(),
-                "threads" => row.thread_count.to_string(),
+                "unread" => state.unread.to_string(),
+                "starred" => state.starred.to_string(),
+                "attachment" => state.attachment.to_string(),
+                "threads" => state.count.to_string(),
+                // Conversation rows: the members in the view, whether one is a draft, and the
+                // count the row shows ("" for one message).
+                "members" => state.members.to_string(),
+                "draft" => state.draft.to_string(),
+                "count" => list
+                    .row_widget(position)
+                    .map(|row| row.count_text())
+                    .ok_or_else(|| format!("row {position} isn't bound"))?,
+                // The names show whole, the Draft marker or the count right after them.
+                "names-whole" => list
+                    .row_widget(position)
+                    .map(|row| row.names_whole().to_string())
+                    .ok_or_else(|| format!("row {position} isn't bound"))?,
+                "label" => list
+                    .row_widget(position)
+                    .and_then(|row| row.accessible_text())
+                    .ok_or_else(|| format!("row {position} isn't bound"))?,
+                // What a screen reader says starts so (the date at its end changes by day), or
+                // ends so (a scheduled send's draft says when it goes there).
+                "label-starts" | "label-ends" => {
+                    let label = list
+                        .row_widget(position)
+                        .and_then(|row| row.accessible_text())
+                        .ok_or_else(|| format!("row {position} isn't bound"))?;
+                    let says = if arg(1) == "label-starts" {
+                        label.starts_with(arg(2))
+                    } else {
+                        label.ends_with(arg(2))
+                    };
+                    return if says {
+                        Ok(())
+                    } else {
+                        Err(format!("row {position} says {label:?}"))
+                    };
+                }
+                "kind" => match row {
+                    ListRow::Message(_) => "message".to_owned(),
+                    ListRow::Conversation(_) => "conversation".to_owned(),
+                },
                 other => return Err(format!("no field {other}")),
             };
             equal(
@@ -940,16 +1084,19 @@ async fn check(harness: &Harness, assertion: &str, args: &[String]) -> StepResul
         "assert-list-all" => {
             let wanted = super::script::boolean(arg(1))?;
             let rows: Vec<_> = (0..model.total())
-                .filter_map(|position| model.row_at(position))
+                .filter_map(|position| model.list_row_at(position))
                 .collect();
             if rows.is_empty() {
                 return Err("no row is loaded".to_owned());
             }
-            let field = |row: &sealwax_domain::model::MessageSummary| match arg(0) {
-                "unread" => Ok(!row.flags.is_seen()),
-                "starred" => Ok(row.flags.is_flagged()),
-                "attachment" => Ok(row.has_attachments),
-                other => Err(format!("no field {other}")),
+            let field = |row: &ListRow| {
+                let state = row_state(row);
+                match arg(0) {
+                    "unread" => Ok(state.unread),
+                    "starred" => Ok(state.starred),
+                    "attachment" => Ok(state.attachment),
+                    other => Err(format!("no field {other}")),
+                }
             };
             for row in &rows {
                 if field(row)? != wanted {
@@ -1059,8 +1206,13 @@ async fn check(harness: &Harness, assertion: &str, args: &[String]) -> StepResul
             number(arg(0))?,
         ),
         "assert-list-empty" => {
-            let title = list.empty_state().map(|(title, _)| title);
-            equal("empty state", title.as_deref().unwrap_or("none"), arg(0))
+            let state = list.empty_state();
+            let title = state.as_ref().map(|(title, _)| title.as_str());
+            equal("empty state", title.unwrap_or("none"), arg(0))?;
+            match (args.get(1), state) {
+                (Some(line), Some((_, shown))) => equal("its line", shown.as_str(), line.as_str()),
+                _ => Ok(()),
+            }
         }
         "assert-list-search" => {
             equal("results", model.total(), number(arg(0))? as u32)?;
@@ -1111,6 +1263,16 @@ async fn check(harness: &Harness, assertion: &str, args: &[String]) -> StepResul
             .is_enabled();
             equal(name, enabled, super::script::boolean(arg(1))?)
         }
+        // Conversations moved so far: told GTK at once, or row by row.
+        "assert-list-moves" => {
+            let stats = model.stats();
+            let moves = match arg(0) {
+                "at-once" => stats.moves_at_once,
+                "by-rows" => stats.moves_by_rows,
+                other => return Err(format!("use at-once or by-rows, not {other}")),
+            };
+            equal(&format!("moves {}", arg(0)), moves, number(arg(1))? as u64)
+        }
         "assert-selection-reported" => {
             let reported = REPORTED.with(|reported| reported.borrow().clone());
             let reported = reported.map_or(0, |list| list.borrow().len());
@@ -1149,22 +1311,23 @@ async fn exact(harness: &Harness, list: &MessageList) -> StepResult {
             glib::timeout_future(Duration::from_millis(20)).await;
             continue;
         }
-        equal("rows", page.rows.len(), total as usize)?;
+        let rows = page.into_rows();
+        equal("rows", rows.len(), total as usize)?;
         let mut loaded = 0;
-        for (position, fresh) in page.rows.iter().enumerate() {
-            if let Some(row) = model.row_at(position as u32) {
+        for (position, fresh) in rows.iter().enumerate() {
+            if let Some(row) = model.list_row_at(position as u32) {
                 loaded += 1;
                 if row != *fresh {
                     return Err(format!(
                         "row {position} differs from the store's: {:?} vs {:?}",
-                        (row.id, row.flags, row.thread_count),
-                        (fresh.id, fresh.flags, fresh.thread_count)
+                        (row.key(), row.message(), row.date()),
+                        (fresh.key(), fresh.message(), fresh.date())
                     ));
                 }
             }
         }
         let sections = crate::list::sections::Bounds::from_dates(
-            page.rows.iter().map(|row| row.date),
+            rows.iter().map(ListRow::date),
             &model.thresholds(),
         );
         equal("section counts", model.section_counts(), sections.counts())?;

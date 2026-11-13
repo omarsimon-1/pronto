@@ -42,6 +42,7 @@ const EVENT_LEAVE: i64 = 1;
 const EVENT_POINTER_MOVE: i64 = 2;
 const EVENT_BUTTON_PRESS: i64 = 3;
 const EVENT_BUTTON_RELEASE: i64 = 4;
+const EVENT_SCROLL: i64 = 6;
 const EVENT_KEY_PRESS: i64 = 7;
 const EVENT_KEY_RELEASE: i64 = 8;
 const EVENT_GRAB_NOTIFY: i64 = 9;
@@ -155,6 +156,43 @@ pub fn click(x: f64, y: f64, state: u32, button: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// A button [`press`] holds down until its [`release`].
+#[derive(Clone, Copy, Debug)]
+pub struct Held {
+    at: [i64; 6],
+    state: u32,
+    button: u32,
+}
+
+/// Moves the pointer to `(x, y)` on Broadway's screen and presses `button` there, holding the
+/// modifiers in `state`, and keeps it down: a person's click, whose press and release GTK
+/// handles a few frames apart (its idles run and it paints between them), as [`click`]'s don't.
+pub fn press(x: f64, y: f64, state: u32, button: u32) -> io::Result<Held> {
+    let shared = shared()?;
+    let at = shared.move_to(x, y, state)?;
+    let held = BUTTON1 << (button.clamp(1, 5) - 1);
+    let mut words = vec![EVENT_BUTTON_PRESS];
+    words.extend(at);
+    words.extend([i64::from(state | held), i64::from(button)]);
+    shared.send(&words)?;
+    Ok(Held { at, state, button })
+}
+
+/// Releases the button `held` where it was pressed, as a pointer held still does.
+pub fn release(held: Held) -> io::Result<()> {
+    let mut words = vec![EVENT_BUTTON_RELEASE];
+    words.extend(held.at);
+    words.extend([i64::from(held.state), i64::from(held.button)]);
+    shared()?.send(&words)
+}
+
+/// Moves the events' clock on a second, so the next click never makes a double click with
+/// the last ([`click`] does so itself).
+pub fn part_clicks() -> io::Result<()> {
+    shared()?.skew.fetch_add(1_000, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Two primary clicks at `(x, y)` close together: a double click.
 pub fn double_click(x: f64, y: f64) -> io::Result<()> {
     let shared = shared()?;
@@ -174,6 +212,17 @@ pub fn double_click(x: f64, y: f64) -> io::Result<()> {
 /// Moves the pointer to `(x, y)` on Broadway's screen, as hovering does.
 pub fn hover(x: f64, y: f64) -> io::Result<()> {
     shared()?.move_to(x, y, 0).map(|_| ())
+}
+
+/// Moves the pointer to `(x, y)` on Broadway's screen and turns the wheel one notch there,
+/// `down` or up: GDK's Broadway backend makes it a discrete scroll on the surface under it.
+pub fn wheel(x: f64, y: f64, down: bool) -> io::Result<()> {
+    let shared = shared()?;
+    let at = shared.move_to(x, y, 0)?;
+    let mut words = vec![EVENT_SCROLL];
+    words.extend(at);
+    words.extend([0, i64::from(down)]);
+    shared.send(&words)
 }
 
 /// Presses the primary button at `from`, moves the pointer to `to` in `steps` even steps with

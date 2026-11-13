@@ -58,7 +58,7 @@ impl Policy {
         self.messages.borrow().contains(&message) || self.sender_allowed(sender)
     }
 
-    /// The user allowed `message`'s remote images until Sealwax quits.
+    /// The user allowed `message`'s remote images until Pronto quits.
     pub fn allow_message(&self, message: MessageId) {
         self.messages.borrow_mut().insert(message);
     }
@@ -152,21 +152,24 @@ pub(super) fn load(inner: &Rc<Inner>) {
     });
 }
 
-/// The selected message of the shown conversation, once its card is built: its id, its sender
-/// (lower case) and whether its banner says its images are hidden.
+/// The message of the shown conversation the user is on (as [`Reader::message_in_hand`]: the
+/// one they moved to, else the selected one), once its card is built: its id, its sender (lower
+/// case) and whether its banner says its images are hidden.
 pub(super) fn shown(reader: &Reader) -> Option<(MessageId, String, bool)> {
+    let chosen = reader.chosen_message();
     let shown = reader.inner.shown.borrow();
     let page = shown.as_ref()?;
-    let card = page.selected_card()?;
+    let id = chosen.unwrap_or(page.selected);
+    let card = page.item(id)?.card.as_ref()?;
     let banner = card
         .widgets
         .banner
         .as_ref()
         .is_some_and(|banner| banner.root.parent().is_some());
-    Some((page.selected, card.sender.clone(), banner))
+    Some((id, card.sender.clone(), banner))
 }
 
-/// Images from the selected message's sender load from now on (`on`), or are hidden again.
+/// Images from that message's sender load from now on (`on`), or are hidden again.
 pub(super) fn set_always(reader: &Reader, on: bool) {
     if let Some((_, sender, _)) = shown(reader)
         && !sender.is_empty()
@@ -237,8 +240,8 @@ pub struct Banner {
 }
 
 pub fn banner(reader: &Reader, sender: &str) -> Banner {
+    // The gap is the banner's CSS border-spacing (GTK adds a Box's spacing to it).
     let root = gtk::Box::builder()
-        .spacing(12)
         .css_classes(["sw-banner", "sw-reader-banner"])
         .build();
     root.set_widget_name("reader-banner");

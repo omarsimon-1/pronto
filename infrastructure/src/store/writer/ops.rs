@@ -8,7 +8,6 @@ use super::overlay::{
     After, Pending, Refusals, Row, RowPlan, chain, change_from_code, defer_blob_deletions,
     rehome_chain, row, row_at, shown, shown_at,
 };
-use crate::store::StoreError;
 use crate::store::api::StoreVersion;
 use crate::store::ops_api::{
     BatchId, DueOps, Failure, Lost, NotApplied, OpAction, OpGroup, OpId, OpMessage, OpsDone,
@@ -19,6 +18,7 @@ use crate::store::overlay::{
     self, Action, BATCH_FOLDER_READ, BATCH_RULES, BATCH_TRIAGE, BATCH_UNDO, COPY, Change, EXPUNGE,
     FLAGS, HIDDEN, MOVE, READ_BELOW,
 };
+use crate::store::{StoreError, remind};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sealwax_domain::model::{AccountId, Flags, FolderId, FolderRole, MessageId};
 use sealwax_domain::triage::{self, FolderInfo, Plan, Unavailable};
@@ -167,6 +167,8 @@ impl Writer {
         let mut touched = Touched::default();
         let mut applied = 0u32;
         let mut folders_of: HashMap<AccountId, Vec<FolderInfo>> = HashMap::new();
+        // Conversations whose messages leave a folder, for Remind Me (`remind::triaged`).
+        let mut leaving = Vec::new();
         for ((account, folder), members) in groups {
             let folders = match folders_of.get(&account) {
                 Some(folders) => folders,
@@ -191,9 +193,16 @@ impl Writer {
                 }
             };
             let local = is_local(&tx, account)?;
+            let source = folders
+                .iter()
+                .find(|info| info.id == folder)
+                .map_or(FolderRole::Other, |info| info.role);
             for found in members {
                 applied += 1;
                 let prior = found.flags & !HIDDEN;
+                if plan.leaves_folder() {
+                    leaving.push((found.thread, folder, source, plan));
+                }
                 let change = match plan {
                     Plan::Flags { add, remove } => {
                         if (prior | add.bits()) & !remove.bits() == prior {
@@ -226,8 +235,9 @@ impl Writer {
         }
         let accounts = touched.accounts.iter().copied().collect();
         let version = match batch {
-            Some(_) => {
+            Some(batch) => {
                 let plans = touched.plans(&tx)?;
+                remind::triaged(&tx, batch, &leaving)?;
                 prune(&tx)?;
                 defer_blob_deletions(&tx, &plans)?;
                 self.state.commit_rows(tx, &plans, BTreeSet::new())?.version
@@ -443,6 +453,7 @@ impl Writer {
             });
         }
         tx.execute("UPDATE op_batches SET undone = 1 WHERE id = ?1", [batch.0])?;
+        remind::undone(&tx, batch.0)?;
         let ops = batch_ops(&tx, batch)?;
         let mut lost: BTreeMap<Lost, u32> = BTreeMap::new();
         let (mut restored, mut reverted) = (0u32, 0u32);
@@ -503,7 +514,14 @@ impl Writer {
         }
         let accounts = touched.accounts.iter().copied().collect();
         let plans = touched.plans(&tx)?;
+        // A Reminders folder made for this batch alone, still unknown to the server, goes with
+        // it (the fork's Remind Me).
+        let dropped = remind::drop_unused_folders(&tx)?;
+        self.state.folders_made |= !dropped.is_empty();
         let version = self.state.commit_rows(tx, &plans, folders)?.version;
+        for folder in &dropped {
+            self.state.accounts.remove(folder);
+        }
         Ok(Undone {
             version,
             restored,
@@ -1004,6 +1022,18 @@ pub(crate) fn queue_in(
     kind: i64,
     changes: Vec<(Row, Change)>,
 ) -> rusqlite::Result<(Vec<RowPlan>, BTreeSet<AccountId>)> {
+    let (_, plans, accounts) = queue_batch(tx, kind, changes, 0)?;
+    Ok((plans, accounts))
+}
+
+/// [`queue_in`] due at `not_before` (Unix ms, an undo window's end), replying with the batch
+/// too, `None` when no op was written: the fork's Remind Me queues its moves with it.
+pub(crate) fn queue_batch(
+    tx: &Connection,
+    kind: i64,
+    changes: Vec<(Row, Change)>,
+    not_before: i64,
+) -> rusqlite::Result<(Option<i64>, Vec<RowPlan>, BTreeSet<AccountId>)> {
     let mut touched = Touched::default();
     let mut batch = None;
     let mut seen = BTreeSet::new();
@@ -1033,13 +1063,13 @@ pub(crate) fn queue_in(
             change,
             prior_folder: folded.at,
             prior_flags: prior,
-            not_before: 0,
+            not_before,
         };
         touched.add(tx, batch, found, op, local)?;
     }
     let accounts = touched.accounts.clone();
     let plans = touched.plans(tx)?;
-    Ok((plans, accounts))
+    Ok((batch, plans, accounts))
 }
 
 /// An op of a batch, as Undo reads it.
@@ -1350,7 +1380,7 @@ fn account_folders(tx: &Connection, account: AccountId) -> rusqlite::Result<Vec<
 
 /// A local account has no server holding its folders: one with no key (fixtures and
 /// self-tests) or a POP3 account (M8), whose folders are local.
-fn is_local(tx: &Connection, account: AccountId) -> rusqlite::Result<bool> {
+pub(crate) fn is_local(tx: &Connection, account: AccountId) -> rusqlite::Result<bool> {
     tx.prepare_cached(
         "SELECT key IS NULL OR EXISTS(SELECT 1 FROM pop3_accounts WHERE account_id = accounts.id) \
          FROM accounts WHERE id = ?1",
@@ -1358,21 +1388,25 @@ fn is_local(tx: &Connection, account: AccountId) -> rusqlite::Result<bool> {
     .query_row([account.0], |row| row.get(0))
 }
 
-fn new_batch(tx: &Connection, kind: i64) -> rusqlite::Result<i64> {
+pub(crate) fn new_batch(tx: &Connection, kind: i64) -> rusqlite::Result<i64> {
     tx.prepare_cached("INSERT INTO op_batches(kind) VALUES (?1) RETURNING id")?
         .query_row([kind], |row| row.get(0))
 }
 
-/// Drops batches with nothing pending beyond the newest [`KEEP_BATCHES`], and empty ones.
-fn prune(tx: &Connection) -> rusqlite::Result<()> {
+/// Drops batches with nothing pending beyond the newest [`KEEP_BATCHES`], and empty ones, and
+/// the ended reminders whose Undo went with them (the fork's Remind Me). An empty batch that
+/// ended a reminder stays like any other until then: removing a reminder that came back already
+/// moves nothing, and its Undo restores it (phase C).
+pub(crate) fn prune(tx: &Connection) -> rusqlite::Result<()> {
     tx.prepare_cached(
         "DELETE FROM op_batches WHERE NOT EXISTS \
            (SELECT 1 FROM ops WHERE batch = op_batches.id AND done = 0) \
          AND (id <= coalesce((SELECT id FROM op_batches ORDER BY id DESC LIMIT 1 OFFSET ?1), 0) \
-           OR NOT EXISTS (SELECT 1 FROM ops WHERE batch = op_batches.id))",
+           OR (NOT EXISTS (SELECT 1 FROM ops WHERE batch = op_batches.id) \
+             AND NOT EXISTS (SELECT 1 FROM fork_reminders WHERE ended = op_batches.id)))",
     )?
     .execute([KEEP_BATCHES])?;
-    Ok(())
+    remind::prune(tx)
 }
 
 fn count(n: usize) -> u32 {

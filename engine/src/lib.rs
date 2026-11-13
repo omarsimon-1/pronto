@@ -14,6 +14,7 @@ pub mod net;
 pub mod oauth;
 pub mod pop3;
 pub mod secrets;
+pub use imap::sent_sample;
 pub mod service;
 pub mod smtp;
 pub mod updates;

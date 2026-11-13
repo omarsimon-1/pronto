@@ -17,7 +17,7 @@ use sealwax_domain::model::{Account, AccountId, Folder, FolderId, FolderRole as 
 use sealwax_infrastructure::blobs::BlobStore;
 use sealwax_infrastructure::store::{
     ChangeEvent, FolderCounts, OpenView, Store, StoreOptions, StoreVersion, Versioned, ViewFilter,
-    ViewOpened, ViewScope, ViewSpec,
+    ViewGrouping, ViewOpened, ViewScope, ViewSpec,
 };
 use sealwax_infrastructure::xdg::SealwaxDirs;
 use std::cell::{Cell, Ref, RefCell};
@@ -153,8 +153,29 @@ pub fn sidebar_model(
                     .iter()
                     .filter(|folder| folder.account == account.id)
                     .collect();
-                let (role_folders, more) =
+                let (mut role_folders, mut more) =
                     folder_tree(&own, account.key.as_ref().and_then(|key| folded.get(key)));
+                // Remind Me's folder sits under the Inbox, without a count (phase C): a
+                // top-level one, or where every folder is under the Inbox (`INBOX.Reminders`,
+                // the final review) the Inbox's own.
+                let reminders =
+                    crate::remind::reminders_folder(account.id, folders).map(folder_key);
+                let taken = reminders.as_ref().and_then(|key| {
+                    if let Some(at) = more.iter().position(|folder| &folder.key == key) {
+                        return Some(more.remove(at));
+                    }
+                    role_folders.iter_mut().find_map(|parent| {
+                        let at = parent.children.iter().position(|child| &child.key == key)?;
+                        let child = parent.children.remove(at);
+                        parent.folded &= !parent.children.is_empty();
+                        Some(child)
+                    })
+                });
+                let shown = taken.is_some();
+                if let Some(mut folder) = taken {
+                    folder.count = 0;
+                    role_folders.push(folder);
+                }
                 SidebarAccount {
                     key: account_key(account),
                     name: account.name.clone(),
@@ -174,6 +195,7 @@ pub fn sidebar_model(
                         .unwrap_or(AccountStatus::Synced),
                     folders: role_folders,
                     more,
+                    reminders: reminders.filter(|_| shown),
                 }
             })
             .collect(),
@@ -305,7 +327,14 @@ struct Opened {
 /// Opens the blob store and the store, subscribes to change events, reads the accounts and
 /// folders, and opens the view a new window shows first (the one `layout.toml` remembers, else
 /// its first account's Inbox) with today's sections. Runs on the open thread; it may block.
-fn open_store(store_file: &Path, blobs_dir: &Path, layout_file: &Path) -> Result<Opened, String> {
+fn open_store(
+    store_file: &Path,
+    blobs_dir: &Path,
+    layout_file: &Path,
+    config_file: &Path,
+    grouping: ViewGrouping,
+    splits: Option<bool>,
+) -> Result<Opened, String> {
     let started = Instant::now();
     let blobs = BlobStore::open(blobs_dir).map_err(|error| format!("blob store: {error}"))?;
     let options = StoreOptions {
@@ -322,7 +351,14 @@ fn open_store(store_file: &Path, blobs_dir: &Path, layout_file: &Path) -> Result
         .folders()
         .recv_blocking()
         .map_err(|error| error.to_string())?;
-    let view = sealwax_infrastructure::layout::read(layout_file).view;
+    let layout = sealwax_infrastructure::layout::read(layout_file);
+    let view = layout.view;
+    // The list's rows as the window will ask for them: layout.toml's choice, else the default.
+    let grouping = match layout.conversations {
+        Some(true) => ViewGrouping::Conversations,
+        Some(false) => ViewGrouping::Messages,
+        None => grouping,
+    };
     let mut model = sidebar_model(
         &accounts.value,
         &folders.value,
@@ -341,11 +377,29 @@ fn open_store(store_file: &Path, blobs_dir: &Path, layout_file: &Path) -> Result
     let thresholds = glib::DateTime::now_local()
         .ok()
         .and_then(|now| Thresholds::at(&now).ok());
+    // An Inbox opens on the Split Inbox's Important side while the splits show: layout.toml's
+    // toggle, else the harness's default, else config.toml's `[inbox] split` (phase C).
+    let splits = layout.split.or(splits).unwrap_or_else(|| {
+        sealwax_infrastructure::settings_files::read_optional(config_file)
+            .ok()
+            .flatten()
+            .and_then(|text| sealwax_domain::config::Config::parse(&text).ok())
+            .is_none_or(|config| config.inbox.split)
+    });
+    let inbox = |scope: ViewScope| match scope {
+        ViewScope::UnifiedInbox => true,
+        ViewScope::Folder(id) => folders
+            .value
+            .iter()
+            .any(|folder| folder.id == id && folder.role == StoreRole::Inbox),
+    };
     let first = match (scope, thresholds) {
         (Some(scope), Some(thresholds)) => {
             let spec = ViewSpec {
                 scope,
                 filter: ViewFilter::All,
+                grouping,
+                split: (splits && inbox(scope)).then_some(sealwax_domain::split::Split::Important),
             };
             store
                 .open_view(OpenView {
@@ -405,6 +459,13 @@ pub struct Mailbox {
     folder_listeners: RefCell<Vec<Listener>>,
     ready: Rc<Latch>,
     first_view: RefCell<Option<FirstView>>,
+    /// The list's grouping while layout.toml doesn't say, for the view read ahead.
+    default_grouping: Cell<ViewGrouping>,
+    /// Whether the Inbox shows the Split Inbox's sides while layout.toml doesn't say, where
+    /// config.toml mustn't decide (the self-test harness's: off), for the view read ahead.
+    default_splits: Cell<Option<bool>>,
+    /// Whether the window's first view was the one read ahead, once it asked (the self-test).
+    first_view_adopted: Cell<Option<bool>>,
 }
 
 impl Mailbox {
@@ -425,11 +486,21 @@ impl Mailbox {
         let store_file = dirs.store_file();
         let blobs_dir = dirs.blobs_dir();
         let layout_file = dirs.layout_file();
+        let config_file = dirs.config_file();
+        let grouping = self.default_grouping.get();
+        let splits = self.default_splits.get();
         let (sender, receiver) = async_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("sealwax-mailbox-open".into())
             .spawn(move || {
-                let _ = sender.send_blocking(open_store(&store_file, &blobs_dir, &layout_file));
+                let _ = sender.send_blocking(open_store(
+                    &store_file,
+                    &blobs_dir,
+                    &layout_file,
+                    &config_file,
+                    grouping,
+                    splits,
+                ));
             });
         if let Err(error) = spawned {
             self.fail(format!("cannot start the store thread: {error}"));
@@ -495,11 +566,31 @@ impl Mailbox {
         self.notify_folders();
     }
 
+    /// The list's grouping while layout.toml doesn't say (the app's: conversations; the
+    /// self-test harness's: messages), for the view read ahead when the store opens.
+    pub fn set_default_grouping(&self, grouping: ViewGrouping) {
+        self.default_grouping.set(grouping);
+    }
+
+    /// Whether the Inbox shows the Split Inbox's sides while layout.toml doesn't say, over
+    /// config.toml's (the self-test harness's: off), for the view read ahead.
+    pub fn set_default_splits(&self, splits: Option<bool>) {
+        self.default_splits.set(splits);
+    }
+
     /// The view the open thread read ahead for the first window, when it is `spec` with these
     /// sections; only once.
     pub fn take_first_view(&self, spec: ViewSpec, thresholds: Thresholds) -> Option<ViewOpened> {
         let first = self.first_view.take()?;
-        (first.spec == spec && first.thresholds == thresholds).then_some(first.opened)
+        let adopted = first.spec == spec && first.thresholds == thresholds;
+        self.first_view_adopted.set(Some(adopted));
+        adopted.then_some(first.opened)
+    }
+
+    /// Whether the window's first view was the one read ahead (`None`: none was read ahead, or
+    /// the window hasn't asked yet).
+    pub fn first_view_adopted(&self) -> Option<bool> {
+        self.first_view_adopted.get()
     }
 
     fn fail(&self, message: String) {
@@ -851,7 +942,8 @@ mod tests {
             account: AccountKey("home".into()),
             name: name.into(),
         };
-        assert_eq!(opens_on(None), Some(folder_key(FolderId(1))));
+        // Two accounts and no view to go back to: All Inboxes (phase C).
+        assert_eq!(opens_on(None), Some(ALL_INBOXES.to_owned()));
         assert_eq!(
             opens_on(Some(View::AllInboxes)),
             Some(ALL_INBOXES.to_owned())
@@ -860,16 +952,16 @@ mod tests {
             opens_on(Some(home("Kunder/Acme"))),
             Some(folder_key(FolderId(3)))
         );
-        // Gone: a deleted folder, or an account no longer listed, opens the first Inbox.
+        // Gone: a deleted folder, or an account no longer listed, opens as if none was left.
         assert_eq!(
             opens_on(Some(home("Kunder/Gone"))),
-            Some(folder_key(FolderId(1)))
+            Some(ALL_INBOXES.to_owned())
         );
         let gone = View::Folder {
             account: AccountKey("gone".into()),
             name: "INBOX".into(),
         };
-        assert_eq!(opens_on(Some(gone)), Some(folder_key(FolderId(1))));
+        assert_eq!(opens_on(Some(gone)), Some(ALL_INBOXES.to_owned()));
     }
 
     #[test]
@@ -929,7 +1021,77 @@ mod tests {
         assert_eq!(personal.more[0].name, "Lister");
         assert_eq!(model.accounts[1].more[0].role, None);
         assert_eq!(model.all_inboxes_unread(), 16);
-        assert_eq!(model.default_selection().as_deref(), Some("folder-1"));
+        // Two accounts: a new window opens on All Inboxes (phase C's first view).
+        assert_eq!(model.default_selection().as_deref(), Some(ALL_INBOXES));
+    }
+
+    #[test]
+    fn the_reminders_folder_sits_under_the_inbox() {
+        let accounts = vec![Account {
+            id: AccountId(1),
+            name: "Work".into(),
+            address: "work@example.test".into(),
+            key: Some(AccountKey("work".into())),
+        }];
+        let folders = vec![
+            folder(1, 1, "INBOX", StoreRole::Inbox, 2),
+            folder(2, 1, "Sent", StoreRole::Sent, 0),
+            folder(3, 1, "Reminders", StoreRole::Other, 4),
+            folder(4, 1, "Lister", StoreRole::Other, 1),
+        ];
+        let model = sidebar_model(
+            &accounts,
+            &folders,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let work = &model.accounts[0];
+        assert_eq!(work.reminders.as_deref(), Some("folder-3"));
+        let order: Vec<&str> = work
+            .role_folders()
+            .iter()
+            .map(|folder| folder.key.as_str())
+            .collect();
+        assert_eq!(order, ["folder-1", "folder-3", "folder-2"]);
+        // No count: what waits isn't mail to read now.
+        assert_eq!(work.folders[2].count, 0);
+        assert_eq!(work.more.len(), 1);
+        assert_eq!(work.more[0].name, "Lister");
+        // Where every folder is under the Inbox, its Reminders folder is the Inbox's own: it
+        // leaves the Inbox's subfolders for its own row.
+        let dotted = |id, name: &str, role, unread| Folder {
+            delimiter: Some('.'),
+            ..folder(id, 1, name, role, unread)
+        };
+        let folders = vec![
+            dotted(1, "INBOX", StoreRole::Inbox, 2),
+            dotted(2, "INBOX.Sent", StoreRole::Sent, 0),
+            dotted(3, "INBOX.Reminders", StoreRole::Other, 4),
+            dotted(4, "INBOX.Lister", StoreRole::Other, 1),
+        ];
+        let model = sidebar_model(
+            &accounts,
+            &folders,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let work = &model.accounts[0];
+        assert_eq!(work.reminders.as_deref(), Some("folder-3"));
+        let order: Vec<(&str, u32)> = work
+            .role_folders()
+            .iter()
+            .map(|folder| (folder.name.as_str(), folder.count))
+            .collect();
+        assert_eq!(order[1], ("Reminders", 0));
+        let inbox = work.inbox().unwrap();
+        assert!(inbox.children.iter().all(|child| child.key != "folder-3"));
+        assert!(inbox.children.iter().any(|child| child.name == "Lister"));
     }
 
     #[test]

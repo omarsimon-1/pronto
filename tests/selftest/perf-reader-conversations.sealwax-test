@@ -1,0 +1,25 @@
+# perf-reader with one row a conversation (the Superhuman pass, phase B;
+# docs/superhuman/conversations.md): each step goes to the next conversation, opened at its
+# anchor. What follows is perf-reader's own comment.
+#
+# Reader speed (docs/superhuman/reader.md; not run by CI, like every perf-* script): j, k and
+# archive on the selected message, each timed from the key to the frame that shows the next
+# conversation, on a 2,000-message fictional store at the owner's 1440x900, three panes. Each
+# round prints when the reader was asked, read, prepared and ready, and whether the conversation
+# came laid out ahead. Build sealwax-fixtures next to the binary, then, with a release build:
+#   cargo build --release -p pronto -p sealwax-fixtures
+#   tools/headless.sh 25 target/release/pronto --self-test tests/selftest/perf-reader-conversations.sealwax-test
+
+desktop tiling
+fixtures --count 2000 --seed 7 --folders spread
+resize 1440 900
+list-wait
+grouping conversations
+list-select 0
+wait-until assert-reader-selected
+focus list
+measure-leave j 60
+measure-leave k 30
+measure-leave e 20
+perf-memory "end"
+perf-report

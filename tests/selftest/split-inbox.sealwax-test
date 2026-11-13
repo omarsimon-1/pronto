@@ -1,0 +1,306 @@
+# The Split Inbox's tabs (the fork's phase C, docs/superhuman/split.md "UI"), at the app's own
+# defaults (Focused, one row a conversation) with the sides on: Important and Other in the
+# header with their totals, a tab list for a screen reader; Tab and Shift+Tab switch sides with
+# the cursor on the new side's top row, `g i`, `g o` and a click find a side as it was left;
+# Unread combines with the side and its pill stays after the tabs; search ignores the sides
+# and leaving it comes back to the side; each side's Inbox Zero says what the other holds; a
+# sender's side moves its conversation at once, with a toast and Undo; Split's reading pane;
+# Ctrl+Tab leaves the list; message rows; the toggle. Every message is fictional.
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/split-inbox.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+mail-add Personal:inbox 18m "Lunch on Friday?" "from=Kari Nordmann" "text=Want to try the new ramen place by the station?"
+mail-add Personal:inbox 2h "Contract renewal: signed copy" read starred "from=Marius Dahl" "text=Signed and scanned, attached."
+mail-add Personal:inbox 3h "Issue 212: Rust in the kernel" "from=The Weekly Byte" "text=This week: Rust in the kernel." list=weekly.example.test
+mail-add Personal:inbox 5h "Your receipt from the climbing gym" read "from=Receipts" "text=Thanks for your visit."
+mail-add Personal:inbox 26h "Photos from the weekend" read attachment "from=Lena Holm" "text=A few favourites from the hike."
+mail-add Personal:inbox 29h "Check-in is open for your flight" read "from=Notifications" "text=Check in now."
+mail-add Personal:inbox 6d "Board games on Friday" read "from=Tomas Berg" "text=Bring Wingspan if you can."
+# A fresh view of the Inbox, all of it there when it first fills.
+folder archive Personal
+list-wait
+folder inbox Personal
+list-wait
+
+# One Inbox until the sides are on (the harness's default; the app's is on).
+assert-split-side none
+assert-split-tabs hidden
+assert-list-count 7
+assert-shown list-title true
+split-inbox on
+assert-split-side important
+assert-split-tabs totals
+assert-split-totals 4 3
+assert-list-count 4
+assert-list-row 0 subject "Lunch on Friday?"
+assert-shown list-title false
+assert-shown list-subtitle false
+assert-action-state win.split-inbox true
+
+# A tab list to a screen reader, named for its Inbox: each tab's side and total, the side
+# shown selected. One account: the header names none (the tabs need the room).
+assert-accessible-role list-split-tabs tab-list
+assert-accessible-name list-split-tabs "Inbox, Personal"
+assert-shown list-split-place false
+assert-accessible-role list-split-important tab
+assert-accessible-name list-split-important "Important, 4 conversations"
+assert-accessible-name list-split-other "Other, 3 conversations"
+assert-accessible-state list-split-important selected true
+assert-accessible-state list-split-other selected false
+assert-accessible
+
+# Tab: Other, its cursor on its top row; a screen reader hears where it is.
+focus list
+list-select 2
+assert-list-selected 2
+assert-announced none
+key Tab
+assert-split-side other
+assert-list-count 3
+assert-list-selected 0
+assert-list-row 0 subject "Issue 212: Rust in the kernel"
+assert-announced "Other, 3 conversations"
+assert-accessible-state list-split-other selected true
+assert-accessible-state list-split-important selected false
+assert-focus list
+key j
+assert-list-selected 1
+# Shift+Tab: Important again, at its top row; two Tabs wrap round to it.
+key <Shift>Tab
+assert-split-side important
+assert-list-selected 0
+key Tab
+key Tab
+assert-split-side important
+assert-list-selected 0
+list-select 3
+# g o finds Other as it was left (Tab left it at its top row); g i finds Important at its
+# fourth row, and g o Other at its second.
+key g
+key o
+assert-split-side other
+assert-list-selected 0
+key j
+key g
+key i
+assert-split-side important
+assert-list-selected 3
+key g
+key o
+assert-split-side other
+assert-list-selected 1
+assert-list-row 1 subject "Your receipt from the climbing gym"
+# A click on a tab: the side as it was left, the keyboard focus still in the list.
+click list-split-important
+assert-split-side important
+assert-list-selected 3
+assert-focus list
+click list-split-other
+assert-split-side other
+assert-list-selected 1
+click list-split-important
+assert-split-side important
+assert-list-selected 3
+# From another folder g o, and Go to Important, open the Inbox on that side as it was left,
+# in one view (not the side shown last, then that one).
+folder archive Personal
+list-wait
+focus list
+mark-list-opens
+key g
+key o
+assert-split-side other
+assert-list-selected 1
+assert-list-opens 1
+assert-list-focus list
+folder archive Personal
+list-wait
+mark-list-opens
+action win.go-to-important
+assert-split-side important
+assert-list-selected 3
+assert-list-opens 1
+# Switching is the other side's view, opened ahead: well under 50 ms.
+measure-split Tab 6 50
+assert-split-side important
+# In the select mode (its bar hides the tabs) Tab moves the focus on, as before the sides: the
+# side and the rows chosen stay.
+list-select 1
+key x
+assert-select-mode true
+assert-action-enabled win.next-split false
+key Tab
+assert-split-side important
+assert-select-mode true
+focus list
+key Escape
+assert-select-mode false
+assert-action-enabled win.next-split true
+
+# Unread narrows the side shown; the totals stay the sides'. The pill names the filter after
+# the tabs, never "All".
+key <Shift>u
+assert-list-filter unread
+assert-list-count 1
+assert-list-row 0 subject "Lunch on Friday?"
+assert-split-totals 4 3
+assert-shown list-split-filter true
+assert-shown list-filter false
+assert-label list-split-filter-name Unread
+key Tab
+assert-split-side other
+assert-list-count 1
+assert-list-row 0 subject "Issue 212: Rust in the kernel"
+key <Shift>u
+assert-list-filter all
+assert-shown list-split-filter false
+assert-list-count 3
+key <Shift>Tab
+
+# Search ignores the sides (the receipt is Other's) and hides the tabs; leaving it comes back
+# to the side.
+key slash
+type "receipt"
+search-wait
+assert-list-count 1
+assert-list-row 0 subject "Your receipt from the climbing gym"
+assert-split-tabs hidden
+search-escape
+assert-split-side important
+assert-split-tabs totals
+assert-list-count 4
+
+# Each side's Inbox Zero says what the other one holds.
+key Tab
+assert-split-side other
+focus list
+key e
+key e
+key e
+wait-until assert-list-count 0
+assert-list-empty "Inbox Zero"
+assert-zero-other "Important has 4 conversations"
+assert-split-totals 4 0
+assert-accessible-name list-split-other "Other, no conversations"
+list-clock 2026-10-29T12:00:00
+assert-accessible-name inbox-zero-area "Inbox Zero. Thursday, October 29. Important has 4 conversations. Press c to write."
+list-clock real
+key Tab
+assert-split-side important
+assert-list-count 4
+key Tab
+assert-split-side other
+key z
+wait-until assert-list-count 1
+key <Shift>Tab
+assert-split-side important
+
+# Always Other for Kari: her conversation leaves Important at once and the cursor moves on, a
+# toast says so with Undo; Undo brings her back.
+focus list
+list-select 0
+assert-list-row 0 subject "Lunch on Friday?"
+assert-action-enabled win.reset-sender-split false
+action win.always-other
+wait-until assert-list-count 3
+assert-list-row 0 subject "Contract renewal: signed copy"
+assert-list-selected 0
+assert-toast "Mail from karinordmann@example.test now goes to Other"
+assert-split-choice karinordmann@example.test other
+assert-split-totals 3 2
+assert-action-enabled win.undo true
+toast-undo
+wait-until assert-list-count 4
+assert-split-choice karinordmann@example.test none
+assert-split-totals 4 1
+# From the palette, on the one conversation Undo brought back to Other: Always Important for
+# the notifications robot, then Reset Sender Split.
+key Tab
+assert-split-side other
+list-select 0
+assert-list-row 0 subject "Check-in is open for your flight"
+key <Control>k
+wait-until assert-palette open true
+type "always important"
+assert-palette first "Always Important: notifications@example.test"
+key Return
+wait-until assert-list-count 0
+assert-split-choice notifications@example.test important
+key <Shift>Tab
+assert-split-side important
+wait-until assert-list-count 5
+list-select 3
+assert-list-row 3 subject "Check-in is open for your flight"
+assert-action-enabled win.reset-sender-split true
+action win.reset-sender-split
+wait-until assert-list-count 4
+assert-split-choice notifications@example.test none
+
+# Split (the reading pane): Tab shows nothing until a row is picked, the focus on the top row.
+view-mode split
+focus list
+list-select 1
+key Tab
+assert-split-side other
+assert-list-selection none
+assert-focus-row 0
+key j
+assert-list-selected 0
+key <Shift>Tab
+assert-split-side important
+# Ctrl+Tab leaves the list, where Tab switches the sides.
+focus list
+key <Control>Tab
+assert-list-focus elsewhere
+view-mode focused
+
+# Message rows: the sides count messages.
+grouping messages
+assert-split-side important
+assert-split-totals 4 1
+assert-accessible-name list-split-important "Important, 4 messages"
+grouping conversations
+
+# Split Inbox off (the palette's toggle): one Inbox again, the title back; Tab moves the focus.
+# The conversation selected stays so, and the reader's "n of N" counts the rows shown.
+focus list
+list-select 3
+assert-list-row 3 subject "Board games on Friday"
+assert-label reader-position "4 of 4"
+action win.split-inbox
+assert-action-state win.split-inbox false
+assert-split-side none
+assert-split-tabs hidden
+assert-shown list-title true
+assert-list-count 5
+assert-list-selected 4
+assert-label reader-position "5 of 5"
+action win.split-inbox
+assert-split-side important
+assert-list-count 4
+assert-list-selected 3
+assert-label reader-position "4 of 4"
+
+# Several accounts: the tabs say whose Inbox they are, after them and to a screen reader, as
+# the view name's subtitle did; All Inboxes sums the sides.
+mail-account Work
+mail-add Work:inbox 1h "Standup notes" "from=Ingrid Solberg" "text=Notes from today."
+mail-add Work:inbox 4h "Your build failed" "from=CI Notifications" "text=Pipeline 42 failed." list=ci.example.test
+folder inbox Work
+list-wait
+assert-split-side important
+wait-until assert-split-totals 1 1
+assert-accessible-name list-split-tabs "Inbox, Work"
+assert-label list-split-place "· Work"
+assert-shown list-split-place true
+assert-split-tabs totals
+folder all-inboxes
+list-wait
+wait-until assert-split-totals 5 2
+assert-accessible-name list-split-tabs "All Inboxes"
+assert-label list-split-place "· All Inboxes"
+assert-shown list-split-place true

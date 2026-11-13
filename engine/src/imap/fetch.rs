@@ -12,8 +12,11 @@ use sealwax_infrastructure::store::{BodyState, NewMessage};
 pub const PREVIEW_BYTES: u32 = 1024;
 
 /// The header fields mail-parser reads into `Headers`, plus what decoding the preview needs.
+/// LIST-UNSUBSCRIBE, PRECEDENCE and AUTO-SUBMITTED (with LIST-ID) are the Split Inbox's header
+/// facts (the fork's Superhuman pass, docs/superhuman/split.md).
 const FIELDS: &str = "DATE FROM SENDER TO CC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO \
-    REFERENCES THREAD-INDEX LIST-ID MIME-VERSION CONTENT-TYPE CONTENT-TRANSFER-ENCODING";
+    REFERENCES THREAD-INDEX LIST-ID LIST-UNSUBSCRIBE PRECEDENCE AUTO-SUBMITTED MIME-VERSION \
+    CONTENT-TYPE CONTENT-TRANSFER-ENCODING";
 
 /// The FETCH items of the first sync.
 pub(crate) fn items() -> String {

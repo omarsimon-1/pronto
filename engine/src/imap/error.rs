@@ -45,7 +45,7 @@ pub enum ImapError {
     StartTls,
     #[error("the server refused the login")]
     Rejected(LoginFailure),
-    #[error("the server offers no authentication mechanism Sealwax can use")]
+    #[error("the server offers no authentication mechanism Pronto can use")]
     NoMechanism {
         /// It offers XOAUTH2 or OAUTHBEARER.
         oauth: bool,

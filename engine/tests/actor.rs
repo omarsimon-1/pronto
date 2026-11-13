@@ -82,7 +82,7 @@ impl Running {
             .unwrap(),
         );
         let engine = Engine::start(EngineConfig {
-            application: "io.github.pixdevsapps.Sealwax.Test".into(),
+            application: "io.github.omarsimon1.Pronto.Test".into(),
             store: store.clone(),
             blobs,
             paths: AccountPaths::new(&dirs),
@@ -90,6 +90,7 @@ impl Running {
             secrets: SecretBackend::Memory,
             detect: DetectOptions::default(),
             microsoft_client_id: None,
+            google_client: None,
             sign_in: SignInOptions::default(),
             sync,
         })
@@ -979,4 +980,403 @@ async fn check_mail_runs_an_account_pass_now() {
         "an account pass lists the folders"
     );
     assert_eq!(logins(&fake), before, "no connection was made again");
+}
+
+/// `FetchBodies` for one message, and its answer.
+async fn fetch_body(run: &mut Running, message: MessageId) -> Result<(), BodyError> {
+    run.send(Command::FetchBodies {
+        messages: vec![message],
+    });
+    run.event(WAIT, |event| match event {
+        Event::BodyFetched {
+            message: id,
+            result,
+        } if *id == message => Some(*result),
+        _ => None,
+    })
+    .await
+}
+
+/// The fork's Superhuman pass: the body connection lingers, kept warm with a NOOP whenever it
+/// would need one before its next use, so a second open logs in nowhere and waits for no NOOP;
+/// once the linger is over it logs out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_body_connection_stays_warm_between_opens() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut sync = config();
+    sync.reuse_check = Duration::from_millis(200);
+    sync.body_linger = Duration::from_secs(2);
+    let mut run = running(&fake, sync);
+    let account = run.add(&fake, 1, "warm").await;
+    let inbox = run.folder(account, "INBOX").await;
+    within(WAIT, || async { fake.world().count("IDLE") >= 1 }).await;
+    let ids: Vec<MessageId> = run
+        .store
+        .folder_messages(inbox)
+        .recv()
+        .await
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(fetch_body(&mut run, ids[0]).await, Ok(()));
+    let connections = fake.world().connections.len();
+    let noops = fake.world().count("NOOP");
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let kept = fake.world().count("NOOP") - noops;
+    assert!(kept >= 3, "{kept} NOOPs kept it warm in a second");
+    let noops = fake.world().count("NOOP");
+    let started = Instant::now();
+    assert_eq!(fetch_body(&mut run, ids[1]).await, Ok(()));
+    println!("a second open, warm: {:?}", started.elapsed());
+    assert_eq!(
+        fake.world().connections.len(),
+        connections,
+        "no new connection"
+    );
+    assert!(
+        fake.world().count("NOOP") <= noops + 1,
+        "no NOOP stood before the FETCH"
+    );
+    let logouts = fake.world().count("LOGOUT");
+    assert!(
+        within(Duration::from_secs(5), || async {
+            fake.world().count("LOGOUT") > logouts
+        })
+        .await
+        .is_some(),
+        "logged out once the linger was over"
+    );
+}
+
+/// The body connection lingers for minutes since the fork's Superhuman pass, but not past its
+/// account: removing it logs the connection out at once (the actor's connections are dropped
+/// without a LOGOUT, so the one LOGOUT is the body connection's).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removed_accounts_body_connection_logs_out_at_once() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut sync = config();
+    sync.body_linger = Duration::from_secs(600);
+    let mut run = running(&fake, sync);
+    let account = run.add(&fake, 1, "removed").await;
+    let inbox = run.folder(account, "INBOX").await;
+    let first = run.store.folder_messages(inbox).recv().await.unwrap()[0].id;
+    assert_eq!(fetch_body(&mut run, first).await, Ok(()));
+    let key = run
+        .store
+        .accounts()
+        .recv()
+        .await
+        .unwrap()
+        .value
+        .into_iter()
+        .find(|listed| listed.id == account)
+        .and_then(|listed| listed.key)
+        .unwrap();
+    let logouts = fake.world().count("LOGOUT");
+    run.send(Command::RemoveAccount { request: 2, key });
+    let removed = run
+        .event(WAIT, |event| match event {
+            Event::AccountRemoved { request: 2, result } => Some(result.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(removed, Ok(()));
+    assert!(
+        within(Duration::from_secs(5), || async {
+            fake.world().count("LOGOUT") > logouts
+        })
+        .await
+        .is_some(),
+        "the body connection logged out"
+    );
+}
+
+/// The fork's Superhuman pass: the prefetch takes the whole Inbox whatever its age (the old
+/// policy, 14 days, left the older ones to download when opened), and settings that arrive
+/// after the first pass plan it at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_prefetch_takes_the_whole_inbox_when_the_settings_come() {
+    let fake = Fake::start(Flavor::Qresync).await;
+    {
+        let mut world = fake.world();
+        world.create("INBOX", &[]);
+        world.append_many("INBOX", 6, |n| [1, 3, 20, 60, 200, 400][n]);
+    }
+    let mut run = running(&fake, config());
+    let account = run.add(&fake, 1, "prefetch").await;
+    within(WAIT, || async { fake.world().count("IDLE") >= 1 }).await;
+    assert_eq!(run.store.body_usage().recv().await.unwrap().bodies, 0);
+    let _ = account;
+    run.send(Command::Storage {
+        storage: Storage {
+            cache_size: None,
+            prefetch_days: 14,
+        },
+    });
+    assert!(
+        within(Duration::from_secs(5), || async {
+            run.store.body_usage().recv().await.unwrap().bodies == 6
+        })
+        .await
+        .is_some(),
+        "every Inbox message, up to 400 days old"
+    );
+}
+
+/// An account with the prefetch on, idling on INBOX once the first pass's prefetch took the
+/// Inbox on the body connection and that connection retired (logged out after its linger).
+async fn idling_prefetched(run: &mut Running, fake: &Fake, name: &str) -> FolderId {
+    run.send(Command::Storage {
+        storage: Storage {
+            cache_size: None,
+            prefetch_days: 14,
+        },
+    });
+    let account = run.add(fake, 1, name).await;
+    let inbox = run.folder(account, "INBOX").await;
+    within(WAIT, || async { fake.world().count("IDLE") >= 1 }).await;
+    assert!(
+        within(WAIT, || async {
+            run.store.body_usage().recv().await.unwrap().bodies == 20
+                && fake.world().count("LOGOUT") >= 1
+        })
+        .await
+        .is_some(),
+        "prefetched, and the body connection logged out"
+    );
+    inbox
+}
+
+/// The message at `uid` of `folder`, once stored.
+async fn stored_id(run: &Running, folder: FolderId, uid: u32) -> Option<MessageId> {
+    run.store
+        .folder_messages(folder)
+        .recv()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.uid == uid)
+        .map(|message| message.id)
+}
+
+/// Whether the message at `uid` of `folder` is stored with its body.
+async fn readable(run: &Running, folder: FolderId, uid: u32) -> bool {
+    match stored_id(run, folder, uid).await {
+        Some(id) => run.store.raw_message(id).recv().await.unwrap().is_some(),
+        None => false,
+    }
+}
+
+/// The fork's Superhuman pass: new mail's body comes on the IDLE connection whose pass stored
+/// it, before it idles again, so the message opens at once and no body connection logs in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_mail_comes_with_its_body_through_idle() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut run = running(&fake, config());
+    let inbox = idling_prefetched(&mut run, &fake, "inline").await;
+    let connections = fake.world().connections.len();
+    let started = Instant::now();
+    let uid = fake.world().append("INBOX", 0, &[]);
+    let stored = within(Duration::from_secs(5), || readable(&run, inbox, uid)).await;
+    assert!(stored.is_some(), "the new message's body is stored");
+    println!("new mail readable {:?} after it arrived", started.elapsed());
+    assert_eq!(
+        fake.world().connections.len(),
+        connections,
+        "no connection logged in for it"
+    );
+    let message = stored_id(&run, inbox, uid).await.unwrap();
+    assert_eq!(
+        fetch_body(&mut run, message).await,
+        Ok(()),
+        "answered at once"
+    );
+    assert_eq!(fake.world().connections.len(), connections);
+}
+
+/// Mail that comes while the IDLE connection fetches new mail's body is announced in that
+/// FETCH's response (an EXISTS before its data): the connection passes again rather than NOOP
+/// and IDLE, which would never hear of it, so it is stored at once, with its body, not at the
+/// account pass's INBOX backstop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mail_that_comes_during_the_inline_body_fetch_is_stored_at_once() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut run = running(&fake, config());
+    let inbox = idling_prefetched(&mut run, &fake, "burst").await;
+    let second = Arc::new(std::sync::Mutex::new(None::<u32>));
+    {
+        let second = second.clone();
+        fake.world().on("BODY.PEEK[]", move |world| {
+            *second.lock().unwrap() = Some(world.append("INBOX", 0, &[]));
+        });
+    }
+    let first = fake.world().append("INBOX", 0, &[]);
+    let both = within(Duration::from_secs(5), || async {
+        let second = *second.lock().unwrap();
+        readable(&run, inbox, first).await
+            && match second {
+                Some(uid) => readable(&run, inbox, uid).await,
+                None => false,
+            }
+    })
+    .await;
+    let commands: Vec<String> = fake
+        .world()
+        .commands
+        .iter()
+        .rev()
+        .take(12)
+        .cloned()
+        .collect();
+    assert!(
+        both.is_some(),
+        "both stored with their bodies; the last commands, newest first: {commands:?}"
+    );
+}
+
+/// A reconnect (a resume, the network back) while the IDLE connection fetches new mail's
+/// body hands the message to the body worker: its body is still downloaded, and the reader's
+/// request for it is answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_during_the_inline_body_fetch_hands_the_body_on() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut run = running(&fake, config());
+    let inbox = idling_prefetched(&mut run, &fake, "cut").await;
+    let before = fake.world().count("BODY.PEEK[]");
+    fake.world().hold("BODY.PEEK[]");
+    let uid = fake.world().append("INBOX", 0, &[]);
+    assert!(
+        within(WAIT, || async {
+            fake.world().count("BODY.PEEK[]") > before
+                && stored_id(&run, inbox, uid).await.is_some()
+        })
+        .await
+        .is_some(),
+        "stored, and its body asked for on the IDLE connection, which went silent"
+    );
+    run.send(Command::Reconnect);
+    assert!(
+        within(WAIT, || readable(&run, inbox, uid)).await.is_some(),
+        "the body worker downloaded it"
+    );
+    let message = stored_id(&run, inbox, uid).await.unwrap();
+    assert_eq!(fetch_body(&mut run, message).await, Ok(()));
+}
+
+/// The reader asks for new mail's body while the IDLE connection fetches it, and a reconnect
+/// cuts that fetch: the request is answered all the same, by the body worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reader_waiting_on_the_inline_body_fetch_is_answered_after_a_reconnect() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut run = running(&fake, config());
+    let inbox = idling_prefetched(&mut run, &fake, "waiting").await;
+    let before = fake.world().count("BODY.PEEK[]");
+    fake.world().hold("BODY.PEEK[]");
+    let uid = fake.world().append("INBOX", 0, &[]);
+    assert!(
+        within(WAIT, || async {
+            fake.world().count("BODY.PEEK[]") > before
+                && stored_id(&run, inbox, uid).await.is_some()
+        })
+        .await
+        .is_some()
+    );
+    let message = stored_id(&run, inbox, uid).await.unwrap();
+    run.send(Command::FetchBodies {
+        messages: vec![message],
+    });
+    run.send(Command::Reconnect);
+    let answer = run
+        .event(WAIT, |event| match event {
+            Event::BodyFetched {
+                message: id,
+                result,
+            } if *id == message => Some(*result),
+            _ => None,
+        })
+        .await;
+    assert_eq!(answer, Ok(()));
+    assert!(readable(&run, inbox, uid).await);
+}
+
+/// The IDLE connection's inline body fetch stalls (the server stops answering inside its
+/// FETCH): within `inline_bodies` the body connection takes the message over, and the reader
+/// waiting for it is answered, with no Reconnect from anyone (it waited for the read timeout,
+/// a minute, before).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_inline_body_fetch_hands_the_body_on_in_time() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut run = running(
+        &fake,
+        SyncConfig {
+            inline_bodies: Duration::from_millis(500),
+            ..config()
+        },
+    );
+    let inbox = idling_prefetched(&mut run, &fake, "stalled").await;
+    let before = fake.world().count("BODY.PEEK[]");
+    fake.world().hold("BODY.PEEK[]");
+    let uid = fake.world().append("INBOX", 0, &[]);
+    assert!(
+        within(WAIT, || async {
+            fake.world().count("BODY.PEEK[]") > before
+                && stored_id(&run, inbox, uid).await.is_some()
+        })
+        .await
+        .is_some()
+    );
+    let message = stored_id(&run, inbox, uid).await.unwrap();
+    let asked = Instant::now();
+    run.send(Command::FetchBodies {
+        messages: vec![message],
+    });
+    let answer = run
+        .event(WAIT, |event| match event {
+            Event::BodyFetched {
+                message: id,
+                result,
+            } if *id == message => Some(*result),
+            _ => None,
+        })
+        .await;
+    assert_eq!(answer, Ok(()));
+    assert!(readable(&run, inbox, uid).await);
+    assert!(
+        asked.elapsed() < Duration::from_secs(10),
+        "answered after {:?}",
+        asked.elapsed()
+    );
+}
+
+/// A connection that worked and is then lost (here its inline body fetch stalls, again and
+/// again) connects again at once each time: losing a healthy IDLE connection starts the backoff
+/// afresh. Counted on, the second loss in a session already waited `backoff_min`, and every
+/// later one longer, up to `backoff_max` (five minutes) for the rest of the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_healthy_idle_connection_lost_connects_again_at_once() {
+    let fake = fake(Flavor::Qresync).await;
+    let mut run = running(
+        &fake,
+        SyncConfig {
+            inline_bodies: Duration::from_millis(500),
+            backoff_min: Duration::from_secs(60),
+            backoff_max: Duration::from_secs(120),
+            ..config()
+        },
+    );
+    idling_prefetched(&mut run, &fake, "healthy").await;
+    for round in 1..=3 {
+        let idles = fake.world().count("IDLE");
+        fake.world().hold("BODY.PEEK[]");
+        fake.world().append("INBOX", 0, &[]);
+        assert!(
+            within(Duration::from_secs(8), || async {
+                fake.world().count("IDLE") > idles
+            })
+            .await
+            .is_some(),
+            "loss {round}: idling again within 8 s"
+        );
+    }
 }

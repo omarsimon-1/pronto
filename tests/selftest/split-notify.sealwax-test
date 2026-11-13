@@ -1,0 +1,60 @@
+# New mail and the Split Inbox (the fork's phase C, docs/superhuman/split.md "UI"): mail the
+# Split Inbox puts in Other comes quietly while the sides show, unless `[notifications] other =
+# true`; a reply in an Important conversation notifies whoever sent it; with the sides off,
+# every Inbox's new mail notifies as before. A click on a notification shows the side that holds
+# its conversation. Every name and subject is fictional.
+# Run: tools/headless.sh 62 target/debug/pronto --self-test tests/selftest/split-notify.sealwax-test
+
+desktop tiling
+resize 1440 900
+engine-attach
+notify-server
+mail-account Personal
+grouping conversations
+split-inbox on
+folder archive Personal
+assert-notify-settings on sender quiet
+
+# Kari, a person, notifies; the receipts robot and a list's newsletter come quietly.
+notify-mail k Personal:inbox "Lunch on Friday?" "from=Kari Nordmann" ago=5
+notify-mail r Personal:inbox "Your receipt" "from=Receipts" ago=4
+notify-arrive k r
+wait-until assert-notify-count 1
+assert-notify 1 summary "Kari Nordmann"
+assert-notified k alone
+assert-notified r none
+
+# A robot's reply in Kari's conversation: the conversation is Important, so it notifies.
+notify-mail k2 Personal:inbox "Re: Lunch on Friday?" "from=Notifications" ago=3 reply=k
+notify-arrive k2
+wait-until assert-notify-count 2
+assert-notify 2 replaces 1
+assert-notified k2 alone
+
+# `[notifications] other = true`: Other's mail notifies too.
+write-file $TMP/config/pronto/config.toml "[notifications]\nother = true\n"
+wait-until assert-notify-settings on sender other
+notify-mail r2 Personal:inbox "Another receipt" "from=Receipts" ago=2
+notify-arrive r2
+wait-until assert-notify-count 3
+assert-notify 3 summary "Receipts"
+assert-notified r2 alone
+
+# Quiet again, and with the sides off every Inbox's mail notifies as before.
+write-file $TMP/config/pronto/config.toml "[notifications]\nother = false\n"
+wait-until assert-notify-settings on sender quiet
+split-inbox off
+notify-mail r3 Personal:inbox "A third receipt" "from=Receipts" ago=1
+notify-arrive r3
+wait-until assert-notify-count 4
+assert-notified r3 alone
+split-inbox on
+
+# A click on Kari's notification while the list shows Other: the Inbox's Important side, her
+# conversation's row, opened at the new message.
+folder inbox Personal
+split-side other
+assert-split-side other
+notify-click 2 default
+wait-until assert-notify-opened k2 had-window
+assert-split-side important

@@ -1,0 +1,81 @@
+# Remind Me end to end on the Docker mail testbed (phase C's third review): the real engine on
+# Dovecot's `ops` user, a server account as the owner's Gmail is. h and a typed time send
+# "Review trip" to Reminders (the folder created on the server, the moves after the undo
+# window); the Reminders view lists it once the server has it. At its time the engine brings it
+# back and the server moves it into the INBOX, and only then "Reminder: Review trip" notifies
+# (the app looked for its Inbox row once, at the wake, before those moves: it never notified on
+# a server account); a click opens it on top of the Inbox with the reminder's clock. About three
+# minutes, most of it waiting for the time.
+#
+# Not in CI: it needs the testbed up and seeded, and the user's mailbox prepared first:
+#   python3 tools/testbed/remind_mailbox.py fill dovecot
+#   tools/headless.sh 26 target/debug/pronto --self-test tests/selftest/testbed-remind.sealwax-test
+#   python3 tools/testbed/remind_mailbox.py show dovecot    (then `clean` leaves it empty)
+# `ops` is the engine's ops_testbed and remind_testbed suites' user too: one at a time. Only the
+# testbed CA is trusted, secrets stay in memory, and nothing leaves 127.0.0.1. Every message is
+# synthetic.
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+engine-start $DIR/../../tools/testbed/certs/ca.pem
+notify-server
+triage-mark-read-on-open false
+setup-click add-account
+setup-type setup-address ops@example.test
+setup-type setup-name Ops
+setup-type setup-label Ops
+setup-click setup-manual-link
+setup-type setup-imap-host 127.0.0.1
+setup-type setup-imap-port 14993
+setup-type setup-smtp-host 127.0.0.1
+setup-choose setup-smtp-security starttls
+setup-type setup-smtp-port 17025
+setup-type setup-manual-username ops
+setup-type setup-password testbed-password
+setup-key enter
+wait-until assert-setup open false
+wait-until assert-account-status ops@example.test synced
+triage-undo-window 2001
+folder inbox Ops
+list-wait
+wait-until assert-list-count 2
+assert-list-row 0 subject "Review invoice"
+assert-list-row 1 subject "Review trip"
+assert-reminder "Review trip" none
+
+# h, two minutes: it leaves the Inbox at once, and the Reminders view lists it once the moves
+# ran (the undo window, then the server).
+list-select 1
+focus list
+key h
+wait-until assert-picker shown true
+picker-type "in 2 minutes"
+picker-choose
+wait-until assert-list-count 1
+wait-until assert-reminder "Review trip" waiting
+sleep 4000
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+wait-until assert-list-count 1
+assert-list-row 0 subject "Review trip"
+
+# Its time, the window on the Archive: back on the server's INBOX, then the notification.
+folder Ops:Arkiv
+list-wait
+assert-notify-count 0
+sleep 112000
+wait-until assert-reminder "Review trip" reminded
+wait-until assert-notify-count 1
+assert-notify 1 summary "Reminder: Review trip"
+assert-notify 1 body "Tomas Berg"
+assert-conversations Ops:inbox "Review trip" "Review invoice"
+notify-click 1 default
+wait-until assert-pane reader
+key Escape
+wait-until assert-pane list
+wait-until assert-list-row 0 subject "Review trip"
+wait-until assert-row-reminder 0 true
+assert-notify-count 1

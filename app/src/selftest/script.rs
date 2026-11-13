@@ -38,11 +38,19 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("resize", 2, 2),
     ("action", 1, 1),
     ("color-scheme", 1, 1),
-    // A theme from tests/theme/ (or none) in the scratch Omarchy state; corners auto or px.
+    // A theme from tests/theme/ (or none) in the scratch Omarchy state; corners auto or px; a
+    // palette (adwaita, tokyo-night, omarchy, or config for config.toml's).
     ("theme", 1, 1),
+    ("palette", 1, 1),
+    // GTK's gtk-enable-animations (the harness starts with it off).
+    ("animations", 1, 1),
+    // The desktop's text scale, as GNOME's text-scaling-factor sets it (gtk-xft-dpi): 1 is
+    // 96 dpi; the owner's desktop is 0.9091.
+    ("text-scale", 1, 1),
     ("corners", 1, 1),
-    // A file under $TMP, such as $TMP/config/sealwax/keys.toml.
+    // A file under $TMP, such as $TMP/config/pronto/keys.toml.
     ("write-file", 2, 2),
+    // A sample model or none; or shown or hidden, as Toggle Sidebar does (layout.rs).
     ("sidebar", 1, 1),
     ("list", 1, 1),
     ("reader", 1, 1),
@@ -81,15 +89,22 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     // The first widget lies wholly right of the second (the setup assistant's scrollbar beside
     // its fields).
     ("assert-right-of", 2, 2),
+    // Two widgets' left or right edges line up, within a few px (the reader's bar over the
+    // thread's column).
+    ("assert-aligned", 3, 3),
     ("assert-sensitive", 2, 2),
     ("assert-label", 2, 2),
     ("assert-tooltip", 2, 2),
+    // The icon the widget (or its first image) shows, by name (`starred-symbolic`).
+    ("assert-icon", 2, 2),
     // The look against the applied theme: text|background colour by role, the contrast of
     // its text on its background, its corner radius in px, its font (chrome|reading).
     ("assert-color", 3, 3),
     ("assert-contrast", 2, 2),
     ("assert-radius", 2, 2),
     ("assert-font", 2, 2),
+    // Whether the theme turned motion off: reduced or full.
+    ("assert-motion", 1, 1),
     ("assert-window", 1, 1),
     ("assert-window-controls", 1, 1),
     ("assert-labelled", 0, 0),
@@ -103,8 +118,8 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("assert-running", 2, 2),
     ("assert-file-contains", 2, 2),
     ("assert-file-lacks", 2, 2),
-    // Every web process Sealwax started is in WebKit's sandbox (M9).
-    ("assert-web-sandbox", 0, 0),
+    // Every web process Pronto started is in WebKit's sandbox (M9).
+    ("assert-web-sandbox", 0, 1),
 ];
 
 fn arity(command: &str) -> Option<(usize, usize)> {
@@ -116,6 +131,7 @@ fn arity(command: &str) -> Option<(usize, usize)> {
         .chain(super::conversation::COMMANDS)
         .chain(super::files::COMMANDS)
         .chain(super::folders::COMMANDS)
+        .chain(super::layout::COMMANDS)
         .chain(super::mail::COMMANDS)
         .chain(super::perf::COMMANDS)
         .chain(super::reader::COMMANDS)
@@ -126,7 +142,12 @@ fn arity(command: &str) -> Option<(usize, usize)> {
         .chain(super::search::COMMANDS)
         .chain(super::background::COMMANDS)
         .chain(super::setup::COMMANDS)
+        .chain(super::split::COMMANDS)
+        .chain(super::remind::COMMANDS)
+        .chain(super::contact::COMMANDS)
         .chain(super::triage::COMMANDS)
+        .chain(super::writing::COMMANDS)
+        .chain(super::ai::COMMANDS)
         .find(|(name, _, _)| *name == command)
         .map(|&(_, min, max)| (min, max))
 }

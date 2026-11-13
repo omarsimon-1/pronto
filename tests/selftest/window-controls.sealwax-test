@@ -1,26 +1,42 @@
 # Outside Hyprland (DESIGN.md "Layout"): no title bar either, but the pane bars carry the window
 # controls where the panes meet the window's edges, and drag the window. On Hyprland there are
 # none (window.sealwax-test). Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/window-controls.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/window-controls.sealwax-test
 
 desktop other
 resize 1440 900
 assert-window-controls 2
 sidebar sample
 list sample
+# Nothing selected yet: the reader's bar stays without its toolbar, with the end controls, and
+# drags the window.
+assert-reader-page empty
+assert-shown reader-toolbar false
+assert-window-controls 2
+screenshot $DIR/../../.local/selftest/controls-1440-no-message.png
+sidebar hidden
+assert-window-controls 2
+sidebar shown
 reader sample
 assert-layout wide
 assert-window-controls 2
 assert-labelled
 screenshot $DIR/../../.local/selftest/controls-1440.png
 
-# The rail has no room for the start controls; the reader keeps the end ones.
+# Below 1280 px the sidebar isn't beside the list: the list's bar takes the start controls,
+# the reader's the end ones; the sidebar over the list takes the start ones it covers.
 resize 1100 900
-assert-layout rail
-assert-window-controls 1
+assert-layout medium
+assert-window-controls 2
 screenshot $DIR/../../.local/selftest/controls-1100.png
+sidebar shown
+assert-sidebar overlay
+assert-window-controls 2
+screenshot $DIR/../../.local/selftest/controls-1100-sidebar.png
+action nav.pane::list
+assert-sidebar hidden
 
-# One pane at a time: every page carries both.
+# One pane at a time: every page carries both, but the start ones the sidebar over it covers.
 resize 800 900
 assert-layout narrow
 assert-window-controls 2
@@ -31,3 +47,10 @@ action nav.pane::reader
 assert-window-controls 2
 assert-labelled
 screenshot $DIR/../../.local/selftest/controls-800-reader.png
+
+# Focused, nothing selected: the list alone carries both.
+resize 1440 900
+view-mode focused
+reader none
+assert-pane list
+assert-window-controls 2

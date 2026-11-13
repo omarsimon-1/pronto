@@ -2,12 +2,12 @@
 # heading's menu (at the account's top) and New Subfolder from the palette (under the folder
 # shown), Rename Folder from the folder row's menu, Delete Folder of the folder shown. A typed
 # name is checked before anything is sent and the dialog says why one is refused (a sibling's,
-# the delimiter, a name Sealwax hides); Create and Rename can't be chosen meanwhile, nor while
+# the delimiter, a name Pronto hides); Create and Rename can't be chosen meanwhile, nor while
 # the account is offline. Delete asks first, Cancel the default, with what goes. The engine's
 # answer comes as a toast, a server's refusal in its words; a deleted folder that was shown
 # leaves the list at its account's Inbox. A folded folder stays folded when it is renamed (the
 # user's word, 2026-10-09: the sidebar as they left it). Every name and message is fictional.
-# Run: tools/headless.sh 81 target/debug/sealwax --self-test tests/selftest/folders-dialogs.sealwax-test
+# Run: tools/headless.sh 81 target/debug/pronto --self-test tests/selftest/folders-dialogs.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -42,7 +42,7 @@ assert-response new-folder create disabled
 setup-type folder-name Reiser/2026
 assert-label folder-name-problem "A folder name can't contain “/”: it separates folders on this account."
 setup-type folder-name "Sync Issues"
-assert-label folder-name-problem "Sealwax hides folders with this name: other mail programs keep their own things in them."
+assert-label folder-name-problem "Pronto hides folders with this name: other mail programs keep their own things in them."
 setup-type folder-name "50%"
 assert-label folder-name-problem "A folder name can't contain “*” or “%”."
 setup-type folder-name ""
@@ -89,7 +89,7 @@ setup-dismiss-toasts
 # Kunder is folded first, and its fold follows the new name.
 action nav.more::account-1
 folder-arrow Work:Kunder
-wait-until assert-file-contains $TMP/state/sealwax/layout.toml "[folded]\nwork = [\"Kunder\"]\n"
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "[folded]\nwork = [\"Kunder\"]\n"
 sidebar-menu Work:Kunder
 sidebar-menu-click folder-menu-rename
 wait-until assert-dialog "Rename “Kunder”"
@@ -107,7 +107,7 @@ engine-expect rename-folder folder=7 name=Klienter
 engine-reply folder-changed ok
 assert-toast "Renamed “Kunder” to “Klienter”"
 wait-until assert-folder-stored Work:Klienter/Acme true
-wait-until assert-file-contains $TMP/state/sealwax/layout.toml "[folded]\nwork = [\"Klienter\"]\n"
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "[folded]\nwork = [\"Klienter\"]\n"
 wait-until assert-folder-expanded Work:Klienter false
 assert-label list-title Klienter
 assert-list-count 1
@@ -185,4 +185,4 @@ wait-until assert-dialog "Delete “Reiser & ferie” and everything in it?"
 setup-respond delete-folder delete
 engine-expect delete-folder
 engine-reply folder-changed lost
-assert-toast "Couldn't delete “Reiser & ferie”: the connection was lost; Sealwax reads the folders again when it reconnects"
+assert-toast "Couldn't delete “Reiser & ferie”: the connection was lost; Pronto reads the folders again when it reconnects"

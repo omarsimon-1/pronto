@@ -12,14 +12,14 @@
 //! | `composer-backend store\|stand-in` | The backend new composers use |
 //! | `composer-store-message plans\|elsewhere inbox\|drafts` | Stores that fictional message whole in the first account's folder of that role, under its name |
 //! | `composer-open new\|reply\|reply-all\|forward\|server-draft [NAME]` | Opens a composer for that request; NAME a stored message (message 1 without) |
-//! | `composer-open mailto URI`, `quick-reply TEXT`, `quick-reply-to NAME TEXT`, `draft N\|last` | The same with what the request carries (`last`: the draft `composer-close` closed last) |
+//! | `composer-open mailto URI`, `quick-reply TEXT`, `quick-reply-to NAME TEXT`, `draft N\|last`, `reply-draft NAME` | The same with what the request carries (`last`: the draft `composer-close` closed last; `reply-draft`: the newest saved inline reply to NAME) |
 //! | `composer-wait` | Waits until the newest composer's body is loaded |
 //! | `composer-pick N` | Later commands act on composer N (0 the oldest); the newest by default |
 //! | `composer-insert TEXT` | Types TEXT at the caret through the helper (`insertText`) |
 //! | `composer-type TEXT` | Types TEXT as key presses, a character at a time |
 //! | `composer-key KEY [COUNT]` | Presses KEY (a GTK accelerator) COUNT times |
 //! | `composer-focus body\|to\|cc\|bcc\|subject` | Puts the keyboard focus there (the body: until its page has the focus and has drawn two frames) |
-//! | `composer-body HTML` | Replaces the body (as a paste of the editor's own content would) |
+//! | `composer-body HTML` | Replaces the body as the card's draft is set (its quoted history folds when the draft answers a message) |
 //! | `composer-caret start\|end\|TEXT` | Puts the caret there (before TEXT) |
 //! | `composer-select TEXT` | Selects TEXT in the body |
 //! | `composer-click NAME` | Clicks the button NAME (`composer-bold`, `composer-send`, a chip's remove…) |
@@ -45,13 +45,17 @@
 //! | `composer-measure-attach PATH` | Attaches PATH and reports how long the GTK thread went without a turn |
 //! | `composer-typing N` | Types N characters as key presses and reports key → change (Broadway's; informational) |
 //! | `composer-screenshot PATH` | Renders the main window, the card in it, to PATH |
+//! | `composer-prewarm BOOL` | Whether spare editors are made (on by default); off, the one waiting goes |
+//! | `composer-send-checks BOOL` | Whether Send asks first about a missing subject or attachment (off in a script until asked for: its dialog would wait for an answer) |
+//! | `composer-fail-saves BOOL` | The store backend's saves fail from now on (as when the store does), or work again |
+//! | `measure-compose ACTION COUNT [BOUND] [spare]` | `win.ACTION` COUNT times, each timed to the card's body ready to type in, the card closed after; `spare`: each round waits for the prewarmed spare editor first; fails over BOUND ms |
 //! | `assert-composer count N` | Open composers |
 //! | `assert-composer state open\|minimized\|expanded` | The card's state in the dock |
 //! | `assert-composer bounds X,Y,W,H` | The card's rectangle in the dock, in px |
 //! | `assert-composer backdrop BOOL` | The backdrop of an expanded card shows |
-//! | `assert-composer loaded\|spell BOOL` | The body is loaded; spell checking is on |
+//! | `assert-composer loaded\|spell\|spare BOOL` | The body is loaded; spell checking is on; a spare editor waits, its page ready |
 //! | `assert-composer labelled` | Every control of the card has an accessible name, and icon-only ones a tooltip |
-//! | `assert-composer theme` | The body's background is the theme's |
+//! | `assert-composer theme` | The body's background is the theme's raised surface (the card's) |
 //! | `assert-composer eval SCRIPT VALUE` | SCRIPT, run in the helper's world, gives VALUE |
 //! | `assert-composer stored ID FIELD TEXT` | The stand-in's draft ID holds TEXT in FIELD |
 //! | `assert-composer db current\|last\|N FIELD TEXT` | The store's draft holds TEXT in FIELD: `to`, `cc`, `bcc`, `subject`, `from`, `html`, `in-reply-to`, `references`, `message-id`, `parts`, `inline`, `attached`, `open`, `sending`, `account` (its name) |
@@ -144,6 +148,10 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("composer-measure-attach", 1, 1),
     ("composer-typing", 1, 1),
     ("composer-screenshot", 1, 1),
+    ("measure-compose", 2, 4),
+    ("composer-prewarm", 1, 1),
+    ("composer-send-checks", 1, 1),
+    ("composer-fail-saves", 1, 1),
     ("assert-composer", 1, 4),
 ];
 
@@ -181,6 +189,73 @@ thread_local! {
 
 pub fn handles(command: &str) -> bool {
     COMMANDS.iter().any(|(name, _, _)| *name == command)
+}
+
+/// `measure-compose ACTION COUNT [BOUND] [spare]`: activates the window's `win.ACTION`
+/// (`compose`, `forward`…) COUNT times, each timed from the command to the card's body ready to
+/// type in (the editor page loaded and the draft in it: [`Composer::timing`]), then closes the
+/// card; with `spare` each round first waits for the prewarmed spare editor. Fails when the
+/// worst is over BOUND ms.
+async fn measure_compose(
+    harness: &Harness,
+    action: &str,
+    count: usize,
+    bound: Option<usize>,
+    spare: bool,
+) -> StepResult {
+    let window = harness.window()?;
+    let engine = composer::editor::EditorEngine::shared(&harness.state.config().dirs.cache);
+    let mut times = Vec::new();
+    for round in 0..count {
+        if spare {
+            let started = Instant::now();
+            while engine.spare() != Some(true) && started.elapsed() < WAIT {
+                glib::timeout_future(Duration::from_millis(5)).await;
+            }
+            if engine.spare() != Some(true) {
+                return Err(format!("round {round}: no spare editor got ready"));
+            }
+        }
+        let before = composer::composers().len();
+        let asked = Instant::now();
+        WidgetExt::activate_action(window.window(), &format!("win.{action}"), None)
+            .map_err(|_| format!("no action win.{action}"))?;
+        let card = composer::composers()
+            .get(before)
+            .cloned()
+            .ok_or_else(|| format!("round {round}: win.{action} opened no card"))?;
+        while card.timing().1.is_none() && asked.elapsed() < WAIT {
+            glib::timeout_future(Duration::from_millis(1)).await;
+        }
+        let (opened, ready) = card.timing();
+        let ready = ready.ok_or_else(|| format!("round {round}: the body never got ready"))?;
+        let ms = ready.duration_since(asked).as_secs_f64() * 1000.0;
+        println!(
+            "  # round {round}: win.{action} → the body ready in {ms:.1} ms ({:.1} ms after the \
+             card opened)",
+            ready.duration_since(opened).as_secs_f64() * 1000.0
+        );
+        times.push(ms);
+        card.close();
+        settle(harness).await;
+        let started = Instant::now();
+        while composer::composers().len() > before && started.elapsed() < WAIT {
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+    }
+    let worst = times.iter().copied().fold(0.0_f64, f64::max);
+    let mut sorted = times.clone();
+    sorted.sort_by(f64::total_cmp);
+    println!(
+        "  # win.{action}: median {:.1} ms, worst {worst:.1} ms",
+        sorted.get(sorted.len() / 2).copied().unwrap_or_default()
+    );
+    match bound {
+        Some(bound) if worst > bound as f64 => Err(format!(
+            "a card took {worst:.1} ms to be ready, over {bound} ms"
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn composer() -> Result<Composer, String> {
@@ -226,11 +301,15 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
                     message: MessageId(1),
                     text: text.to_owned(),
                     kind: ReplyKind::Reply,
+                    recipients: None,
+                    signature: None,
                 },
                 ("quick-reply-to", Some(name), Some(text)) => ComposeRequest::QuickReply {
                     message: message_named(name)?,
                     text: text.to_owned(),
                     kind: ReplyKind::Reply,
+                    recipients: None,
+                    signature: None,
                 },
                 ("mailto", Some(uri), None) => ComposeRequest::Mailto(
                     sealwax_domain::mailto::parse(uri).map_err(|error| error.to_string())?,
@@ -241,6 +320,21 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
                         .ok_or("no composer was closed yet")?,
                 ),
                 ("draft", Some(id), None) => ComposeRequest::Draft(DraftId(number(id)? as i64)),
+                ("reply-draft", Some(name), None) => {
+                    let message = message_named(name)?;
+                    let pending = harness
+                        .state
+                        .mailbox()
+                        .store()
+                        .ok_or("the store is not open")?
+                        .reply_draft(message);
+                    let stored = pending
+                        .recv()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .ok_or("no saved inline reply to this message")?;
+                    ComposeRequest::Draft(stored.id)
+                }
                 _ => return Err("composer-open: unknown request".to_owned()),
             };
             PICKED.with(|picked| picked.set(None));
@@ -310,7 +404,7 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
         }
         "composer-body" => {
             let composer = composer()?;
-            composer.editor().set_content(arg(0)).await;
+            composer.set_body(arg(0)).await;
             settle(harness).await;
             Ok(())
         }
@@ -364,6 +458,26 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
             super::triage::click_at(harness, &widget, at).await?;
             settle(harness).await;
             Ok(())
+        }
+        "composer-prewarm" => {
+            composer::set_prewarm(&harness.state, boolean(arg(0))?);
+            settle(harness).await;
+            Ok(())
+        }
+        "composer-send-checks" => {
+            composer::set_send_checks(boolean(arg(0))?);
+            Ok(())
+        }
+        "composer-fail-saves" => {
+            composer::store_backend()
+                .ok_or("the store backend isn't set")?
+                .set_failing(boolean(arg(0))?);
+            Ok(())
+        }
+        "measure-compose" => {
+            let bound = args.get(2).map(|ms| number(ms)).transpose()?;
+            let spare = args.get(3).map(String::as_str) == Some("spare");
+            measure_compose(harness, arg(0), number(arg(1))?, bound, spare).await
         }
         "composer-action" => {
             let composer = composer()?;
@@ -971,6 +1085,14 @@ async fn check(harness: &Harness, args: &[String]) -> StepResult {
     if what == "count" {
         return equal("composers", composer::composers().len(), number(arg(1))?);
     }
+    if what == "spare" {
+        let engine = composer::editor::EditorEngine::shared(&harness.state.config().dirs.cache);
+        return equal(
+            "a spare editor ready",
+            engine.spare() == Some(true),
+            boolean(arg(1))?,
+        );
+    }
     if what == "backdrop" {
         let dock = harness.window()?.dock().clone();
         return equal(
@@ -1031,13 +1153,14 @@ async fn check(harness: &Harness, args: &[String]) -> StepResult {
                 .theme();
             let background =
                 webkit6::prelude::WebViewExt::background_color(composer.editor().view());
-            let wanted = theme.palette.background;
+            // The card's raised surface (the fork's phase B), the window's before.
+            let wanted = theme.ui.composer;
             let got = (
                 (background.red() * 255.0).round() as u8,
                 (background.green() * 255.0).round() as u8,
                 (background.blue() * 255.0).round() as u8,
             );
-            println!("  # the body's background {got:?}, the theme's {wanted}");
+            println!("  # the body's background {got:?}, the theme's raised surface {wanted}");
             equal("the body's background", got, (wanted.r, wanted.g, wanted.b))?;
             let page = composer
                 .editor()

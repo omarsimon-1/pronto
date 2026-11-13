@@ -1,0 +1,144 @@
+# The command palette and the pickers over a draft (the fork's phase B): either one opened while
+# the other shows takes its place, and the keyboard focus goes back to the draft, never to the
+# list hidden behind the open conversation (its single-letter commands would run there: `a` made
+# a reply Reply All). Ctrl+K over Send Later's time picker opens the palette, Escape gives the
+# focus back to the draft and what is typed next goes in; F1 over the snippet picker the same;
+# Ctrl+; over the palette, or over the time picker, opens the snippet picker for the draft. In the
+# inline reply, then in a card, where the palette opened over a picker lists the card's commands.
+# The stand-in backend; every name, address and text is fictional.
+# Run: tools/headless.sh 67 target/debug/pronto --self-test tests/selftest/picker-palette.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+composer-backend stand-in
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+write-file $TMP/config/pronto/snippets.toml "[[snippet]]\nname = \"Thanks\"\nbody = \"Thanks! {cursor}\"\n"
+folder inbox Personal
+list-wait
+focus list
+wait-until assert-snippets 1
+
+# The inline reply: Ctrl+K over the time picker. The palette stays open, the picker gone.
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+type "Hei."
+key <Control><Shift>l
+wait-until assert-picker shown true
+assert-picker name time-picker
+key <Control>k
+assert-palette open true
+assert-picker shown false
+assert-focus palette-search
+sleep 300
+assert-palette open true
+assert-picker shown false
+assert-focus palette-search
+# Escape: back in the reply, which takes what is typed (`r` and `a` are no list commands here).
+key Escape
+assert-palette open false
+assert-quick-reply focused true
+type " Ses ra."
+assert-quick-reply text "Hei. Ses ra."
+assert-quick-reply kind reply
+
+# F1 over the snippet picker: the same.
+key <Control>semicolon
+wait-until assert-picker shown true
+assert-picker name snippet-picker
+key F1
+assert-palette open true
+assert-picker shown false
+sleep 300
+assert-palette open true
+assert-focus palette-search
+key Escape
+assert-palette open false
+assert-quick-reply focused true
+
+# Ctrl+; over the palette opens the snippet picker, for the reply.
+key <Control>k
+assert-palette open true
+key <Control>semicolon
+wait-until assert-picker shown true
+assert-picker name snippet-picker
+assert-palette open false
+sleep 300
+assert-picker shown true
+assert-focus picker-search
+picker-choose Thanks
+assert-picker shown false
+wait-until assert-quick-reply text "Hei. Ses ra.Thanks! "
+assert-quick-reply focused true
+
+# Ctrl+; over the time picker: the snippet picker in its place; Escape, back in the reply.
+key <Control><Shift>l
+wait-until assert-picker name time-picker
+key <Control>semicolon
+wait-until assert-picker name snippet-picker
+sleep 300
+assert-picker shown true
+key Escape
+assert-picker shown false
+assert-quick-reply focused true
+assert-quick-reply text "Hei. Ses ra.Thanks! "
+assert-quick-reply kind reply
+assert-quick-sends 0
+
+# A card: the palette over its time picker lists the card's commands; Escape, back in its body.
+composer-open new
+composer-wait
+composer-focus to
+composer-type "kari@example.com,"
+composer-focus body
+composer-type "Agenda."
+key <Control><Shift>l
+wait-until assert-picker shown true
+assert-picker name time-picker
+key <Control>k
+assert-palette open true
+assert-picker shown false
+type "send later"
+assert-palette selected "Send Later…"
+sleep 300
+assert-palette open true
+key Escape
+assert-palette open false
+assert-composer focus body
+composer-type " Ok."
+# WebKit applies typed keys after GTK has seen them (composer-editing does the same).
+wait-until assert-composer html-has "Agenda. Ok."
+# The palette's Send Later… opens the time picker over the card; Escape, back in its body. (In
+# the card's body Ctrl+K inserts a link, Superhuman-style: F1 opens the palette there.)
+key F1
+assert-palette open true
+type "send later"
+key Return
+wait-until assert-picker shown true
+assert-picker name time-picker
+assert-palette open false
+key Escape
+assert-picker shown false
+assert-composer focus body
+# Ctrl+; over the palette: the snippet goes in at the card's caret.
+key F1
+assert-palette open true
+key <Control>semicolon
+wait-until assert-picker name snippet-picker
+assert-palette open false
+picker-choose Thanks
+wait-until assert-composer html-has "Agenda. Ok.Thanks!"
+assert-composer focus body
+assert-composer count 1
+composer-close
+wait-until assert-composer count 0
+assert-labelled

@@ -1,22 +1,24 @@
 //! The folder sidebar (DESIGN.md "Components"): the compose button; "All Inboxes"; each account
 //! with its status and its role folders (Inbox, Drafts, Sent, Archive, Junk, Trash) with their
-//! counts, and its other folders under a collapsible "More"; and a footer with the accounts'
-//! state and `config.toml`. Folders under a folder the sidebar shows are indented under it, a
-//! level a step, and a folder with subfolders folds them away (M9, ADR-020), its count adding
-//! their unread mail while they are folded. Between 900 and 1280 px it becomes a rail of icons
-//! with unread badges and the other accounts (DESIGN.md "Layout", the mock's medium window).
-//! The main menu is in the list's bar.
+//! counts, and its other folders under a collapsible "More"; and a footer with `config.toml`
+//! and, while an account needs the user, the accounts' state. Folders under a folder the sidebar
+//! shows are indented under it, a level a step, and a folder with subfolders folds them away
+//! (M9, ADR-020), its count adding their unread mail while they are folded. The main menu is in
+//! the list's bar.
+//!
+//! Quiet since the Superhuman pass (2026-10-28): an account's state is a dot, with words only
+//! when it needs the user (the accessible label always says it); new counts change the rows in
+//! place, and an unchanged model changes nothing (the 900–1280 px rail of icons went: the
+//! sidebar now lies over the list there).
 //!
 //! It shows a plain-data [`SidebarModel`], which the store fills (ML-023). Picking a folder
 //! activates `nav.folder` with the folder's key; the window answers with
 //! [`Sidebar::set_selected`]. For the self-test, rows are named `folder:<key>` (their counts
 //! `count:<key>`, their fold arrows `folder-arrow:<key>`), account headings `heading:<account>`
 //! (their dots `status:<account>`, their names `account-name:<account>`, their words
-//! `status-text:<account>`), rail buttons `rail:<key>` (their badges `badge:<key>`) and
-//! `rail-account:<account>` (their dots `rail-status:<account>`), and the `config.toml` buttons
-//! `config` and `rail-config`.
+//! `status-text:<account>`), and the `config.toml` button `config`.
 
-use super::panes::{PaneBar, classed, icon, icon_button, named};
+use super::panes::{PaneBar, classed, icon, named};
 use super::tooltips::Tooltips;
 use super::{COMPOSE_ACTION, OPEN_CONFIG_ACTION};
 use gtk4 as gtk;
@@ -34,8 +36,12 @@ pub const ALL_INBOXES: &str = "all-inboxes";
 
 const ALL_INBOXES_ICONS: &[&str] = &["mail-unread-symbolic"];
 const FOLDER_ICONS: &[&str] = &["folder-symbolic"];
-const COMPOSE_ICONS: &[&str] = &["mail-message-new-symbolic", "document-edit-symbolic"];
-const CONFIG_ICONS: &[&str] = &["preferences-other-symbolic", "emblem-system-symbolic"];
+pub const COMPOSE_ICONS: &[&str] = &["mail-message-new-symbolic", "document-edit-symbolic"];
+const CONFIG_ICONS: &[&str] = &[
+    "preferences-system-symbolic",
+    "emblem-system-symbolic",
+    "preferences-other-symbolic",
+];
 
 /// The special folders every account shows, in display order (DESIGN.md "Components").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -65,7 +71,9 @@ impl FolderRole {
             Self::Inbox => &["mail-inbox-symbolic", "mail-unread-symbolic"],
             Self::Drafts => &["mail-drafts-symbolic", "document-edit-symbolic"],
             Self::Sent => &["mail-send-symbolic"],
-            Self::Archive => &["mail-archive-symbolic", "folder-documents-symbolic"],
+            // An archive box (Yaru's own, else the package's box): Adwaita has no
+            // `mail-archive-symbolic`, and its blank page read as a document (the visual QA).
+            Self::Archive => &["mail-archive-symbolic", "package-x-generic-symbolic"],
             Self::Junk => &["mail-mark-junk-symbolic"],
             Self::Trash => &["user-trash-symbolic"],
         }
@@ -90,7 +98,7 @@ pub enum AccountStatus {
     Syncing,
     Offline,
     NeedsSignIn,
-    /// The server's certificate no longer verifies; Sealwax stopped connecting (ML-048).
+    /// The server's certificate no longer verifies; Pronto stopped connecting (ML-048).
     CertificateChanged,
     /// The server says the mailbox is full; reading still syncs (ML-048).
     QuotaFull,
@@ -109,9 +117,9 @@ impl AccountStatus {
     }
 
     /// The status dot's colour (`style.css`): accent when synced, plain while syncing, warning
-    /// while Sealwax keeps trying or still syncs (offline, mailbox full), error when it stopped
+    /// while Pronto keeps trying or still syncs (offline, mailbox full), error when it stopped
     /// until the user acts (sign-in, certificate).
-    fn class(self) -> Option<&'static str> {
+    pub fn class(self) -> Option<&'static str> {
         match self {
             Self::Synced => Some("sw-synced"),
             Self::Syncing => None,
@@ -122,12 +130,33 @@ impl AccountStatus {
         }
     }
 
-    /// The states the rail marks on an account: the mock's rail shows none for synced or
-    /// syncing accounts.
-    fn needs_attention(self) -> bool {
+    /// The states that need the user, which the sidebar says in words and the list bar's
+    /// sidebar button points out: none for synced or syncing accounts.
+    pub fn needs_attention(self) -> bool {
         !matches!(self, Self::Synced | Self::Syncing)
     }
+
+    /// The most serious first: what stopped Pronto until the user acts, then what it keeps
+    /// trying.
+    fn severity(self) -> u8 {
+        match self {
+            Self::CertificateChanged => 4,
+            Self::NeedsSignIn => 3,
+            Self::QuotaFull => 2,
+            Self::Offline => 1,
+            Self::Synced | Self::Syncing => 0,
+        }
+    }
 }
+
+/// Every status dot class, for a dot that changes state.
+pub const STATUS_CLASSES: [&str; 5] = [
+    "sw-synced",
+    "sw-offline",
+    "sw-attention",
+    "sw-certificate",
+    "sw-quota",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarFolder {
@@ -227,12 +256,12 @@ impl SidebarFolder {
 pub struct SidebarAccount {
     pub key: String,
     pub name: String,
-    /// Its colour (`accounts.toml`): the heading's name and synced dot, the rail's initial.
+    /// Its colour (`accounts.toml`): the heading's name and synced dot.
     pub color: Option<AccountColor>,
     /// Its folders are folded away under its heading (the window's remembered layout).
     pub collapsed: bool,
     /// Whether its "More" was left open (the remembered layout); `None` for an account the
-    /// layout can't name (no key), whose "More" keeps its state only while Sealwax runs.
+    /// layout can't name (no key), whose "More" keeps its state only while Pronto runs.
     pub more_open: Option<bool>,
     pub status: AccountStatus,
     /// Its role folders, each with the folders under it; shown in [`FolderRole`] order.
@@ -240,6 +269,9 @@ pub struct SidebarAccount {
     /// Every other folder under no folder the sidebar shows, with the folders under it, under
     /// "More".
     pub more: Vec<SidebarFolder>,
+    /// The key of its Reminders folder (Remind Me, phase C), which `folders` holds: right under
+    /// the Inbox, with a clock.
+    pub reminders: Option<String>,
 }
 
 impl SidebarAccount {
@@ -249,10 +281,17 @@ impl SidebarAccount {
             .find(|folder| folder.role == Some(FolderRole::Inbox))
     }
 
-    /// The role folders in display order; folders without a role come last.
+    /// The role folders in display order, the Reminders folder right after the Inbox; folders
+    /// without a role come last.
     pub fn role_folders(&self) -> Vec<&SidebarFolder> {
         let mut folders: Vec<&SidebarFolder> = self.folders.iter().collect();
-        folders.sort_by_key(|folder| folder.role.map_or(usize::MAX, |role| role as usize));
+        folders.sort_by_key(|folder| {
+            if self.reminders.as_ref() == Some(&folder.key) {
+                (FolderRole::Inbox as usize, 1)
+            } else {
+                (folder.role.map_or(usize::MAX, |role| role as usize), 0)
+            }
+        });
         folders
     }
 
@@ -304,26 +343,86 @@ impl SidebarModel {
         (key == ALL_INBOXES && !self.accounts.is_empty()) || self.find(key).is_some()
     }
 
-    /// What a new window shows: the view the last one showed, else the first account's Inbox.
+    /// What a new window shows: the view the last one showed, else All Inboxes with several
+    /// accounts, else the account's Inbox (phase C: one or the other by the accounts alone,
+    /// never by how the reads were batched).
     pub fn default_selection(&self) -> Option<String> {
         if let Some(preferred) = self.preferred.as_ref().filter(|key| self.contains(key)) {
             return Some(preferred.clone());
         }
-        let first = self.accounts.first()?;
+        let [only] = self.accounts.as_slice() else {
+            return (!self.accounts.is_empty()).then(|| ALL_INBOXES.to_owned());
+        };
         Some(
-            first
-                .inbox()
-                .or_else(|| first.folders.first())
+            only.inbox()
+                .or_else(|| only.folders.first())
                 .map_or_else(|| ALL_INBOXES.to_owned(), |folder| folder.key.clone()),
         )
     }
 
-    /// The account whose folders the rail shows: the selected folder's, else the first.
-    fn current_account(&self, key: &str) -> Option<&SidebarAccount> {
-        self.accounts
+    /// What the window picks itself while the view it shows, `stand_in`, stands in for one
+    /// still to come ([`SidebarModel::awaits_inbox`]): [`SidebarModel::default_selection`], the
+    /// view the window remembered from `stand_in` itself left out.
+    pub fn own_selection(&self, stand_in: &str) -> Option<String> {
+        if self.preferred.as_deref() == Some(stand_in) {
+            let model = SidebarModel {
+                preferred: None,
+                ..self.clone()
+            };
+            return model.default_selection();
+        }
+        self.default_selection()
+    }
+
+    /// Whether `selected` stands in for a view still to come: nothing while there is no
+    /// account, or All Inboxes while the one account has no folders yet (they come a server
+    /// round trip after it).
+    pub fn awaits_inbox(&self, selected: &str) -> bool {
+        match self.accounts.as_slice() {
+            [] => true,
+            [only] => selected == ALL_INBOXES && only.folders.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// The most serious state an account is in that needs the user, and in words ("Work:
+    /// offline"), for the hidden sidebar's button; `None` while every account is synced or
+    /// syncing.
+    pub fn attention(&self) -> Option<(AccountStatus, String)> {
+        let worst = self
+            .accounts
             .iter()
-            .find(|account| account.contains(key))
-            .or_else(|| self.accounts.first())
+            .filter(|account| account.status.needs_attention())
+            .max_by_key(|account| account.status.severity())?;
+        let others = self
+            .accounts
+            .iter()
+            .filter(|account| account.status.needs_attention())
+            .count()
+            - 1;
+        let mut words = format!("{}: {}", worst.name, worst.status.label());
+        match others {
+            0 => {}
+            1 => words.push_str(", and 1 other account needs attention"),
+            count => words.push_str(&format!(", and {count} other accounts need attention")),
+        }
+        Some((worst.status, words))
+    }
+
+    /// The model with every count at nought: two models with the same shape show the same rows.
+    fn shape(&self) -> SidebarModel {
+        fn zero(folders: &mut [SidebarFolder]) {
+            for folder in folders {
+                folder.count = 0;
+                zero(&mut folder.children);
+            }
+        }
+        let mut shape = self.clone();
+        for account in &mut shape.accounts {
+            zero(&mut account.folders);
+            zero(&mut account.more);
+        }
+        shape
     }
 
     /// The footer: "2 accounts · all synced".
@@ -375,6 +474,35 @@ impl SidebarModel {
         };
         Some((folder.title().to_owned(), subtitle))
     }
+
+    /// The list pane's title and subtitle for `key` while the list shows conversations: the
+    /// conversations it holds, once known, before the account ("Inbox", "21 · Personal"; the
+    /// folders' unread counts are messages, which the sidebar keeps). None is no count: Inbox
+    /// Zero says it (phase C, the visual QA: "Inbox 0 · Home" over "Inbox Zero").
+    pub fn heading_counted(
+        &self,
+        key: &str,
+        conversations: Option<u32>,
+    ) -> Option<(String, String)> {
+        let (title, place) = if key == ALL_INBOXES {
+            if self.accounts.is_empty() {
+                return None;
+            }
+            let accounts = match self.accounts.len() {
+                1 => "1 account".to_owned(),
+                count => format!("{count} accounts"),
+            };
+            ("All Inboxes".to_owned(), accounts)
+        } else {
+            let (account, folder) = self.find(key)?;
+            (folder.title().to_owned(), account.name.clone())
+        };
+        let subtitle = match conversations {
+            Some(count) if count > 0 => format!("{count} · {place}"),
+            _ => place,
+        };
+        Some((title, subtitle))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -394,6 +522,8 @@ struct Row {
     arrow: Option<gtk::Image>,
     /// The folders above this one in the tree, the nearest first.
     ancestors: Vec<String>,
+    /// A folder's count, or a folded heading's; hidden at nought. New counts change it in place.
+    count: Option<gtk::Label>,
 }
 
 pub struct Sidebar {
@@ -401,13 +531,11 @@ pub struct Sidebar {
     pub root: adw::ToolbarView,
     pub bar: PaneBar,
     pub compose: gtk::Button,
-    /// "New message", hidden in the rail.
-    pub compose_label: gtk::Label,
-    /// `full` or `rail`.
-    pub stack: gtk::Stack,
     list: gtk::ListBox,
     rows: RefCell<Vec<Row>>,
-    rail_items: gtk::Box,
+    /// The accounts' state, shown only while an account needs the user; the footer's
+    /// `config.toml` button stays, the folder list's Tab neighbour.
+    footer: gtk::Box,
     summary: gtk::Label,
     model: RefCell<SidebarModel>,
     selected: RefCell<String>,
@@ -454,9 +582,14 @@ type CollapseChanged = Rc<dyn Fn(&str, bool)>;
 impl Sidebar {
     /// `tooltips` names the keys of the buttons that run a registry command.
     pub fn new(tiling: bool, tooltips: &Tooltips) -> Rc<Self> {
-        let (compose, compose_label) = compose_button("New message");
+        // Quiet, the width of its words, in a 48 px row level with the list's header (phase B:
+        // the saturated full-width button was the loudest thing on screen, and the header has
+        // a compose icon of its own).
+        let (compose, _) = compose_button("New message");
         let compose = named(compose, "compose");
-        compose.set_hexpand(true);
+        compose.add_css_class("sw-quiet-compose");
+        compose.set_halign(gtk::Align::Start);
+        compose.set_valign(gtk::Align::Center);
         tooltips.add(&compose, "New message", ActionId::Compose);
         let bar = PaneBar::new(tiling, None, &["sw-sidebar-bar"]);
         bar.content.append(&compose);
@@ -483,12 +616,14 @@ impl Sidebar {
             ),
             "sidebar-summary",
         );
+        // The accounts' state, when one needs the user, over Preferences: a labelled row like
+        // the folders' (phase B: a lone unlabelled icon was the footer).
         let footer = classed(
-            gtk::Box::new(gtk::Orientation::Horizontal, 0),
-            &["sw-sidebar-footer"],
+            gtk::Box::new(gtk::Orientation::Vertical, 0),
+            &["sw-sidebar-footer", "sw-quiet"],
         );
         footer.append(&summary);
-        let config = named(config_button(tooltips, "sw-icon-button"), "config");
+        let config = named(config_button(tooltips), "config");
         footer.append(&config);
         let full = classed(
             gtk::Box::new(gtk::Orientation::Vertical, 0),
@@ -503,48 +638,9 @@ impl Sidebar {
         );
         full.append(&footer);
 
-        let rail_items = classed(
-            gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .halign(gtk::Align::Center)
-                .build(),
-            &["sw-rail-items"],
-        );
-        let rail_footer = classed(
-            gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .halign(gtk::Align::Center)
-                .build(),
-            &["sw-rail-footer"],
-        );
-        rail_footer.append(&named(
-            config_button(tooltips, "sw-rail-button"),
-            "rail-config",
-        ));
-        let rail = named(
-            classed(gtk::Box::new(gtk::Orientation::Vertical, 0), &["sw-rail"]),
-            "rail",
-        );
-        rail.append(
-            &gtk::ScrolledWindow::builder()
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .vexpand(true)
-                .child(&rail_items)
-                .build(),
-        );
-        rail.append(&rail_footer);
-
-        let stack = gtk::Stack::builder()
-            .hhomogeneous(false)
-            .vexpand(true)
-            .build();
-        stack.add_named(&full, Some("full"));
-        stack.add_named(&rail, Some("rail"));
-        stack.set_visible_child_name("full");
-
         let root = named(
             classed(
-                adw::ToolbarView::builder().content(&stack).build(),
+                adw::ToolbarView::builder().content(&full).build(),
                 &["sw-sidebar"],
             ),
             "sidebar",
@@ -555,11 +651,9 @@ impl Sidebar {
             root,
             bar,
             compose,
-            compose_label,
-            stack,
             list,
             rows: RefCell::new(Vec::new()),
-            rail_items,
+            footer,
             summary,
             model: RefCell::new(SidebarModel::default()),
             selected: RefCell::new(String::new()),
@@ -689,8 +783,26 @@ impl Sidebar {
         self.model.borrow().heading(key)
     }
 
-    /// Shows `model` with `selected` picked.
+    pub fn heading_counted(
+        &self,
+        key: &str,
+        conversations: Option<u32>,
+    ) -> Option<(String, String)> {
+        self.model.borrow().heading_counted(key, conversations)
+    }
+
+    /// Shows `model` with `selected` picked. The same model changes nothing, and new counts
+    /// change the rows in place: the store sends a model on every count change.
     pub fn set_model(&self, model: SidebarModel, selected: &str) {
+        let same_place = *self.selected.borrow() == selected;
+        if same_place && *self.model.borrow() == model {
+            return;
+        }
+        if same_place && self.model.borrow().shape() == model.shape() {
+            self.model.replace(model);
+            self.update_counts();
+            return;
+        }
         {
             let mut expanded = self.expanded.borrow_mut();
             expanded.retain(|account| model.accounts.iter().any(|a| &a.key == account));
@@ -732,13 +844,6 @@ impl Sidebar {
 
     /// Marks `key` as the folder shown; a folder under a closed "More" opens it.
     pub fn set_selected(&self, key: &str) {
-        let account_changed = {
-            let model = self.model.borrow();
-            let before = model
-                .current_account(&self.selected.borrow())
-                .map(|a| a.key.clone());
-            before != model.current_account(key).map(|a| a.key.clone())
-        };
         let changed = *self.selected.borrow() != key;
         self.selected.replace(key.to_owned());
         let unfolded = changed && self.unfold_above(key);
@@ -747,9 +852,28 @@ impl Sidebar {
         } else {
             self.sync_selection();
         }
-        if account_changed {
-            self.rebuild_rail();
-        }
+    }
+
+    /// The message list's keys (`keys`, the List scope's) work in the sidebar too, after its
+    /// rows' and buttons' own (the arrows; Enter and Space stay theirs alone); Tab stays the
+    /// focus's. `j`, `e`, `r`
+    /// and the rest did nothing while the keyboard focus rested on a folder.
+    pub fn attach_keys(&self, keys: &crate::actions::ScopedShortcuts) {
+        keys.attach_beside(&self.root);
+    }
+
+    /// The keyboard focus to the folder shown's row (Next Pane and Previous Pane, phase C), else
+    /// to the folder list's first row that takes it; false when none does.
+    pub fn focus_current(&self) -> bool {
+        let selected = RowKind::Folder(self.selected.borrow().clone());
+        let current = self
+            .rows
+            .borrow()
+            .iter()
+            .find(|row| row.kind == selected)
+            .map(|row| row.widget.clone());
+        current.is_some_and(|row| row.is_mapped() && row.grab_focus())
+            || (self.list.is_mapped() && self.list.child_focus(gtk::DirectionType::TabForward))
     }
 
     /// Opens the folded folders above the folder `key`, so it shows; true when one was folded.
@@ -1111,6 +1235,17 @@ impl Sidebar {
             ));
             content.append(&button);
         }
+        // A key typed in the menu stays there: the message list's one-key commands, which work
+        // in the sidebar ([`Sidebar::attach_keys`]), don't act from a folder's menu.
+        let typed = gtk::EventControllerKey::new();
+        typed.connect_key_pressed(|_, key, _, state| {
+            if one_key_command(key, state) {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        content.add_controller(typed);
         popover.set_parent(row);
         // The focus goes back where it was (the list, or the row for Menu and Shift+F10), once
         // the sidebar has been rebuilt for the new counts.
@@ -1394,8 +1529,68 @@ impl Sidebar {
 
     fn rebuild(&self) {
         self.rebuild_list();
-        self.rebuild_rail();
-        self.summary.set_text(&self.model.borrow().summary());
+        self.update_footer();
+    }
+
+    /// The footer's words always (the self-test reads them), shown only while an account needs
+    /// the user; without them the footer is a quiet `config.toml` button.
+    fn update_footer(&self) {
+        let model = self.model.borrow();
+        self.summary.set_text(&model.summary());
+        let attention = model
+            .accounts
+            .iter()
+            .any(|account| account.status.needs_attention());
+        self.summary.set_visible(attention);
+        if attention {
+            self.footer.remove_css_class("sw-quiet");
+        } else {
+            self.footer.add_css_class("sw-quiet");
+        }
+    }
+
+    /// The model's counts on the rows built for a model of the same shape: each folder's count
+    /// and accessible label, and a folded account's count on its heading.
+    fn update_counts(&self) {
+        let model = self.model.borrow();
+        let all = all_inboxes(&model);
+        let collapsed = self.collapsed.borrow();
+        let folded = self.folded.borrow();
+        for row in self.rows.borrow().iter() {
+            match &row.kind {
+                RowKind::Folder(key) => {
+                    let folder = if key == ALL_INBOXES {
+                        Some(&all)
+                    } else {
+                        model.find(key).map(|(_, folder)| folder)
+                    };
+                    let Some(folder) = folder else {
+                        continue;
+                    };
+                    let is_folded = row.arrow.is_some() && folded.contains(key);
+                    set_count(row.count.as_ref(), folder.shown_count(is_folded));
+                    row.widget
+                        .update_property(&[gtk::accessible::Property::Label(
+                            &folder.accessible_label(is_folded),
+                        )]);
+                }
+                RowKind::Header(key) => {
+                    let Some(account) = model.accounts.iter().find(|account| &account.key == key)
+                    else {
+                        continue;
+                    };
+                    let away = collapsed.contains(key);
+                    set_count(row.count.as_ref(), if away { account.unread() } else { 0 });
+                    row.widget
+                        .update_property(&[gtk::accessible::Property::Label(&heading_label(
+                            account, away,
+                        ))]);
+                }
+                RowKind::More(_) => {}
+            }
+        }
+        drop((folded, collapsed, model));
+        self.update_footer();
     }
 
     fn rebuild_list(&self) {
@@ -1424,6 +1619,22 @@ impl Sidebar {
                 continue;
             }
             for folder in account.role_folders() {
+                if account.reminders.as_ref() == Some(&folder.key) && folder.children.is_empty() {
+                    // Remind Me's view: its own clock, and no count (phase C).
+                    let place = Place {
+                        level: 0,
+                        parent: false,
+                        folded: false,
+                    };
+                    rows.push(folder_row(
+                        folder,
+                        &crate::list::row::REMIND_ICONS,
+                        "sw-role-reminders",
+                        false,
+                        Some(place),
+                    ));
+                    continue;
+                }
                 tree_rows(&mut rows, folder, None, &[], &folded);
             }
             if account.more.is_empty() {
@@ -1494,49 +1705,9 @@ impl Sidebar {
             }
         }
     }
-
-    /// All Inboxes, the shown account's role folders with unread badges, and the other accounts
-    /// (the mock's medium window).
-    fn rebuild_rail(&self) {
-        while let Some(child) = self.rail_items.first_child() {
-            self.rail_items.remove(&child);
-        }
-        let model = self.model.borrow();
-        let selected = self.selected.borrow();
-        let Some(current) = model.current_account(&selected) else {
-            return;
-        };
-        self.rail_items.append(&rail_folder(
-            &all_inboxes(&model),
-            ALL_INBOXES_ICONS,
-            "All Inboxes",
-            false,
-        ));
-        self.rail_items.append(&rail_separator());
-        for folder in current.role_folders() {
-            self.rail_items.append(&rail_folder(
-                folder,
-                folder.role.map_or(FOLDER_ICONS, FolderRole::icons),
-                &format!("{} · {}", folder.title(), current.name),
-                folder.count_stands_out(),
-            ));
-        }
-        let others: Vec<&SidebarAccount> = model
-            .accounts
-            .iter()
-            .filter(|account| account.key != current.key)
-            .collect();
-        if !others.is_empty() {
-            self.rail_items.append(&rail_separator());
-        }
-        for account in others {
-            self.rail_items.append(&rail_account(account));
-        }
-    }
 }
 
-/// The compose button: the accent fill with an icon and `label`, bound to the registry's
-/// Compose (insensitive until the composer exists, M6). The label is hidden in the rail.
+/// Which way the focus leaves the folder list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Forward,
@@ -1558,6 +1729,22 @@ fn tab_direction(key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> Option<Ta
     }
 }
 
+/// Whether a key pressed with `state` could be one of the message list's one-key commands: a
+/// character other than Space, or Delete, without Ctrl or Alt. Enter, Space, Escape, Tab and
+/// the arrows are a menu's own.
+fn one_key_command(key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::{Key, ModifierType};
+    if state.intersects(ModifierType::CONTROL_MASK | ModifierType::ALT_MASK) {
+        return false;
+    }
+    matches!(key, Key::Delete | Key::KP_Delete)
+        || key
+            .to_unicode()
+            .is_some_and(|typed| !typed.is_control() && typed != ' ')
+}
+
+/// The compose button: the accent fill with an icon and `label`, bound to the registry's
+/// Compose (insensitive until the composer exists, M6).
 pub(super) fn compose_button(label: &str) -> (gtk::Button, gtk::Label) {
     let text = gtk::Label::new(Some(label));
     let content = gtk::Box::builder().halign(gtk::Align::Center).build();
@@ -1574,11 +1761,21 @@ pub(super) fn compose_button(label: &str) -> (gtk::Button, gtk::Label) {
     (button, text)
 }
 
-fn config_button(tooltips: &Tooltips, class: &str) -> gtk::Button {
-    let button = icon_button(CONFIG_ICONS, "Open config.toml");
-    button.remove_css_class("sw-icon-button");
-    button.add_css_class(class);
-    button.set_action_name(Some(OPEN_CONFIG_ACTION));
+/// Preferences: the icon and the word, opening `config.toml` (the tooltip says so).
+fn config_button(tooltips: &Tooltips) -> gtk::Button {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    content.append(&icon(CONFIG_ICONS));
+    content.append(&gtk::Label::new(Some("Preferences")));
+    let button = classed(
+        gtk::Button::builder()
+            .child(&content)
+            .action_name(OPEN_CONFIG_ACTION)
+            .build(),
+        &["sw-sidebar-config"],
+    );
+    button.update_property(&[gtk::accessible::Property::Label(
+        ActionId::Preferences.title(),
+    )]);
     tooltips.add(&button, "Open config.toml", ActionId::Preferences);
     button
 }
@@ -1596,12 +1793,24 @@ fn all_inboxes(model: &SidebarModel) -> SidebarFolder {
     }
 }
 
+/// A count, hidden at nought, so new counts only change its text.
 fn count_label(count: u32, stands_out: bool) -> gtk::Label {
-    let label = classed(gtk::Label::new(Some(&count.to_string())), &["sw-count"]);
+    let label = classed(gtk::Label::new(None), &["sw-count"]);
     if stands_out {
         label.add_css_class("sw-unread");
     }
+    set_count(Some(&label), count);
     label
+}
+
+fn set_count(label: Option<&gtk::Label>, count: u32) {
+    if let Some(label) = label {
+        let text = count.to_string();
+        if label.label() != text {
+            label.set_label(&text);
+        }
+        label.set_visible(count > 0);
+    }
 }
 
 /// How far each level of the folder tree is indented, in px.
@@ -1697,13 +1906,11 @@ fn folder_row(
             .build(),
     );
     let folded = place.is_some_and(|place| place.parent && place.folded);
-    let count = folder.shown_count(folded);
-    if count > 0 {
-        content.append(&named(
-            count_label(count, stands_out),
-            &format!("count:{}", folder.key),
-        ));
-    }
+    let count = named(
+        count_label(folder.shown_count(folded), stands_out),
+        &format!("count:{}", folder.key),
+    );
+    content.append(&count);
     let arrow = place.filter(|place| place.parent).map(|_| {
         let arrow = named(
             classed(gtk::Image::new(), &["sw-folder-arrow"]),
@@ -1731,6 +1938,7 @@ fn folder_row(
         more_of: None,
         arrow,
         ancestors: Vec::new(),
+        count: Some(count),
     };
     if let Some(place) = place.filter(|place| place.parent) {
         set_expanded(&row, !place.folded);
@@ -1762,8 +1970,9 @@ fn color_account(widget: &impl IsA<gtk::Widget>, color: Option<AccountColor>) {
 }
 
 /// The account's heading: its status dot, its name (upper-cased by `style.css`), its unread
-/// count while its folders are folded away, its status in words and the arrow that folds and
-/// opens it, the dot and the name in the account's colour.
+/// count while its folders are folded away, its status in words while it needs the user, and
+/// the arrow that folds and opens it, the dot and the name in the account's colour. The
+/// accessible label always says the state.
 fn header_row(account: &SidebarAccount, collapsed: bool) -> Row {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     color_account(&content, account.color);
@@ -1783,16 +1992,17 @@ fn header_row(account: &SidebarAccount, collapsed: bool) -> Row {
         ),
         &format!("account-name:{}", account.key),
     ));
-    let unread = account.unread();
-    if collapsed && unread > 0 {
-        content.append(&named(
-            count_label(unread, true),
-            &format!("heading-count:{}", account.key),
-        ));
-    }
+    let count = named(
+        count_label(if collapsed { account.unread() } else { 0 }, true),
+        &format!("heading-count:{}", account.key),
+    );
+    content.append(&count);
     content.append(&named(
         classed(
-            gtk::Label::new(Some(account.status.label())),
+            gtk::Label::builder()
+                .label(account.status.label())
+                .visible(account.status.needs_attention())
+                .build(),
             &["sw-account-status"],
         ),
         &format!("status-text:{}", account.key),
@@ -1812,20 +2022,29 @@ fn header_row(account: &SidebarAccount, collapsed: bool) -> Row {
         ),
         &format!("heading:{}", account.key),
     );
-    let mut label = format!("{}, {}", account.name, account.status.label());
-    if collapsed && unread > 0 {
-        label.push_str(&format!(", {unread} unread"));
-    }
-    widget.update_property(&[gtk::accessible::Property::Label(&label)]);
+    widget.update_property(&[gtk::accessible::Property::Label(&heading_label(
+        account, collapsed,
+    ))]);
     let row = Row {
         widget,
         kind: RowKind::Header(account.key.clone()),
         more_of: None,
         arrow: Some(arrow),
         ancestors: Vec::new(),
+        count: Some(count),
     };
     set_expanded(&row, !collapsed);
     row
+}
+
+/// "Work, synced"; folded with unread mail, "Work, synced, 3 unread".
+fn heading_label(account: &SidebarAccount, collapsed: bool) -> String {
+    let mut label = format!("{}, {}", account.name, account.status.label());
+    let unread = account.unread();
+    if collapsed && unread > 0 {
+        label.push_str(&format!(", {unread} unread"));
+    }
+    label
 }
 
 fn more_row(account: &SidebarAccount, open: bool) -> Row {
@@ -1856,6 +2075,7 @@ fn more_row(account: &SidebarAccount, open: bool) -> Row {
         more_of: None,
         arrow: Some(arrow),
         ancestors: Vec::new(),
+        count: None,
     };
     set_expanded(&row, open);
     row
@@ -1873,117 +2093,31 @@ fn set_expanded(row: &Row, open: bool) {
         .update_state(&[gtk::accessible::State::Expanded(Some(open))]);
 }
 
-/// A rail button for a folder: its icon, and an accent badge at the top-right corner when its
-/// count stands out (the mock badges only unread mail; the tooltip has every count).
-fn rail_folder(
-    folder: &SidebarFolder,
-    icons: &[&str],
-    name: &str,
-    stands_out: bool,
-) -> gtk::ToggleButton {
-    let overlay = gtk::Overlay::builder().child(&icon(icons)).build();
-    if folder.count > 0 && stands_out {
-        overlay.add_overlay(&named(
-            classed(
-                gtk::Label::builder()
-                    .label(folder.count.to_string())
-                    .halign(gtk::Align::End)
-                    .valign(gtk::Align::Start)
-                    .build(),
-                &["sw-rail-badge"],
-            ),
-            &format!("badge:{}", folder.key),
-        ));
-    }
-    let label = match folder.count_text() {
-        Some(count) => format!("{name}, {count}"),
-        None => name.to_owned(),
-    };
-    let button = named(
-        classed(
-            gtk::ToggleButton::builder()
-                .child(&overlay)
-                .action_name("nav.folder")
-                .action_target(&folder.key.to_variant())
-                .tooltip_text(&label)
-                .build(),
-            &["sw-rail-button"],
-        ),
-        &format!("rail:{}", folder.key),
-    );
-    button.update_property(&[gtk::accessible::Property::Label(&label)]);
-    button
-}
-
-/// Another account: its initial and its unread count in the accent, as in the mock ("W4"), and
-/// a status dot only when it needs the user (offline or signed out).
-fn rail_account(account: &SidebarAccount) -> gtk::Button {
-    let initial: String = account
-        .name
-        .chars()
-        .next()
-        .map(|first| first.to_uppercase().collect())
-        .unwrap_or_default();
-    let content = gtk::Box::builder()
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .build();
-    color_account(&content, account.color);
-    content.append(&classed(
-        gtk::Label::new(Some(&initial)),
-        &["sw-rail-initial"],
-    ));
-    let unread = account.unread();
-    if unread > 0 {
-        content.append(&count_label(unread, true));
-    }
-    let overlay = gtk::Overlay::builder().child(&content).build();
-    if account.status.needs_attention() {
-        let dot = named(
-            status_dot(account.status),
-            &format!("rail-status:{}", account.key),
-        );
-        dot.set_halign(gtk::Align::End);
-        dot.set_valign(gtk::Align::End);
-        overlay.add_overlay(&dot);
-    }
-    let mut label = format!("{}, {}", account.name, account.status.label());
-    if unread > 0 {
-        label.push_str(&format!(", {unread} unread"));
-    }
-    let target = account
-        .inbox()
-        .or_else(|| account.folders.first())
-        .map_or_else(|| ALL_INBOXES.to_owned(), |folder| folder.key.clone());
-    let button = named(
-        classed(
-            gtk::Button::builder()
-                .child(&overlay)
-                .action_name("nav.folder")
-                .action_target(&target.to_variant())
-                .tooltip_text(&label)
-                .build(),
-            &["sw-rail-button", "sw-rail-account"],
-        ),
-        &format!("rail-account:{}", account.key),
-    );
-    button.update_property(&[gtk::accessible::Property::Label(&label)]);
-    button
-}
-
-fn rail_separator() -> gtk::Separator {
-    classed(
-        gtk::Separator::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .halign(gtk::Align::Center)
-            .build(),
-        &["sw-rail-separator"],
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_keeps_the_one_key_commands() {
+        use gtk::gdk::{Key, ModifierType};
+        let plain = ModifierType::empty();
+        for key in [Key::e, Key::numbersign, Key::J, Key::Delete] {
+            assert!(one_key_command(key, plain), "{key:?}");
+        }
+        assert!(one_key_command(Key::D, ModifierType::SHIFT_MASK));
+        // The menu's own keys, and the keys that work anywhere, go on.
+        for key in [
+            Key::Return,
+            Key::space,
+            Key::Escape,
+            Key::Tab,
+            Key::Down,
+            Key::F6,
+        ] {
+            assert!(!one_key_command(key, plain), "{key:?}");
+        }
+        assert!(!one_key_command(Key::r, ModifierType::CONTROL_MASK));
+    }
 
     fn folder(key: &str, name: &str, role: Option<FolderRole>, count: u32) -> SidebarFolder {
         SidebarFolder {
@@ -2014,6 +2148,7 @@ mod tests {
                         folder("a/sent", "Sendt", Some(FolderRole::Sent), 0),
                     ],
                     more: vec![folder("a/receipts", "Receipts", None, 3)],
+                    reminders: None,
                 },
                 SidebarAccount {
                     key: "b".to_owned(),
@@ -2024,6 +2159,7 @@ mod tests {
                     status: AccountStatus::Syncing,
                     folders: vec![folder("b/inbox", "INBOX", Some(FolderRole::Inbox), 4)],
                     more: vec![],
+                    reminders: None,
                 },
             ],
         }
@@ -2063,19 +2199,50 @@ mod tests {
         );
         assert_eq!(model.heading("nope"), None);
         assert_eq!(SidebarModel::default().heading(ALL_INBOXES), None);
+        // With conversation rows: how many it holds, but no "0" over Inbox Zero (phase C).
+        assert_eq!(
+            model.heading_counted("a/inbox", Some(21)),
+            Some(("Inbox".into(), "21 · Personal".into()))
+        );
+        assert_eq!(
+            model.heading_counted("a/inbox", Some(0)),
+            Some(("Inbox".into(), "Personal".into()))
+        );
+        assert_eq!(
+            model.heading_counted(ALL_INBOXES, None),
+            Some(("All Inboxes".into(), "2 accounts".into()))
+        );
     }
 
     #[test]
     fn selection_defaults_and_validity() {
-        let model = model();
-        assert_eq!(model.default_selection().as_deref(), Some("a/inbox"));
+        let mut model = model();
+        // Several accounts: All Inboxes (phase C); one: its Inbox.
+        assert_eq!(model.default_selection().as_deref(), Some(ALL_INBOXES));
         assert!(model.contains(ALL_INBOXES) && model.contains("a/receipts"));
         assert!(!model.contains("c/inbox"));
         let empty = SidebarModel::default();
         assert_eq!(empty.default_selection(), None);
         assert!(!empty.contains(ALL_INBOXES));
-        assert_eq!(model.current_account("b/inbox").unwrap().name, "Work");
-        assert_eq!(model.current_account(ALL_INBOXES).unwrap().name, "Personal");
+        assert!(empty.awaits_inbox(""));
+        model.accounts.truncate(1);
+        assert_eq!(model.default_selection().as_deref(), Some("a/inbox"));
+        assert!(!model.awaits_inbox("a/inbox"));
+        // The one account before its folders came: All Inboxes, standing in for its Inbox.
+        let folders = std::mem::take(&mut model.accounts[0].folders);
+        assert_eq!(model.default_selection().as_deref(), Some(ALL_INBOXES));
+        assert!(model.awaits_inbox(ALL_INBOXES));
+        model.accounts[0].folders = folders;
+        assert!(!model.awaits_inbox(ALL_INBOXES));
+        // A view the last window showed wins, but not the stand-in the window remembered.
+        model.preferred = Some("a/receipts".into());
+        assert_eq!(model.default_selection().as_deref(), Some("a/receipts"));
+        model.preferred = Some(ALL_INBOXES.into());
+        assert_eq!(model.own_selection(ALL_INBOXES).as_deref(), Some("a/inbox"));
+        assert_eq!(
+            model.own_selection("a/receipts").as_deref(),
+            Some(ALL_INBOXES)
+        );
     }
 
     #[test]
@@ -2099,7 +2266,7 @@ mod tests {
     }
 
     #[test]
-    fn every_state_has_words_and_the_rail_marks_those_that_need_the_user() {
+    fn every_state_has_words_and_only_problems_need_the_user() {
         let states = [
             (AccountStatus::Synced, "synced", Some("sw-synced"), false),
             (AccountStatus::Syncing, "syncing…", None, false),
@@ -2128,6 +2295,62 @@ mod tests {
             assert_eq!(status.class(), class);
             assert_eq!(status.needs_attention(), marked, "{words}");
         }
+    }
+
+    #[test]
+    fn attention_names_the_most_serious_state_and_counts_the_others() {
+        let mut model = model();
+        assert_eq!(model.attention(), None, "synced and syncing need nobody");
+        model.accounts[1].status = AccountStatus::Offline;
+        assert_eq!(
+            model.attention(),
+            Some((AccountStatus::Offline, "Work: offline".to_owned()))
+        );
+        model.accounts[0].status = AccountStatus::NeedsSignIn;
+        assert_eq!(
+            model.attention(),
+            Some((
+                AccountStatus::NeedsSignIn,
+                "Personal: needs sign-in, and 1 other account needs attention".to_owned()
+            ))
+        );
+        model.accounts[1].status = AccountStatus::CertificateChanged;
+        assert_eq!(
+            model.attention().map(|(status, _)| status),
+            Some(AccountStatus::CertificateChanged)
+        );
+        for status in [
+            AccountStatus::Offline,
+            AccountStatus::NeedsSignIn,
+            AccountStatus::CertificateChanged,
+            AccountStatus::QuotaFull,
+        ] {
+            assert!(
+                status
+                    .class()
+                    .is_some_and(|class| STATUS_CLASSES.contains(&class))
+            );
+        }
+    }
+
+    #[test]
+    fn counts_alone_keep_the_shape() {
+        let model = model();
+        let mut counted = model.clone();
+        counted.accounts[0].folders[1].count = 3;
+        counted.accounts[0].more[0].count = 9;
+        assert_ne!(counted, model);
+        assert_eq!(counted.shape(), model.shape());
+        let mut renamed = model.clone();
+        renamed.accounts[0].more[0].name = "Kvitteringer".into();
+        assert_ne!(renamed.shape(), model.shape());
+        let mut offline = model.clone();
+        offline.accounts[1].status = AccountStatus::Offline;
+        assert_ne!(
+            offline.shape(),
+            model.shape(),
+            "a new state rebuilds its heading"
+        );
     }
 
     #[test]

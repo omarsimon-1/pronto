@@ -1,5 +1,5 @@
 //! The user guide's keyboard shortcut table (`docs/USER_GUIDE.md`, between the keymap markers)
-//! is the registry's default keymap, so the guide can't drift from the keys Sealwax installs: a
+//! is the registry's default keymap, so the guide can't drift from the keys Pronto installs: a
 //! command, title or key changed in `domain::actions` fails here until the guide's table is
 //! replaced with `keymap::markdown_table()`.
 

@@ -1,5 +1,5 @@
 //! The accounts' rules on disk (ADR-020): one Sieve script per account in
-//! `$XDG_CONFIG_HOME/sealwax/rules/<account key>.sieve`. A missing file is no rules. Writes
+//! `$XDG_CONFIG_HOME/pronto/rules/<account key>.sieve`. A missing file is no rules. Writes
 //! replace the file atomically, 0600 in a 0700 folder, and keep a symbolic link (as
 //! `accounts.toml`'s do); reads take at most 1 MiB of UTF-8 text, the most a script may be.
 
@@ -15,7 +15,7 @@ pub const RULES_DIR: &str = "rules";
 pub const EXTENSION: &str = "sieve";
 
 /// The account's script in `dir` (`SealwaxDirs::rules_dir`), or `None` for a key that can't
-/// name a file (never one Sealwax made).
+/// name a file (never one Pronto made).
 pub fn path(dir: &Path, key: &AccountKey) -> Option<PathBuf> {
     is_valid_key(&key.0).then(|| dir.join(format!("{}.{EXTENSION}", key.0)))
 }
@@ -86,7 +86,7 @@ mod tests {
         let script = "require \"fileinto\";\nif header :contains \"list-id\" \"rust\" { fileinto \"Rust\"; }\n";
         write(&dir, &work, script).unwrap();
         let path = path(&dir, &work).unwrap();
-        assert!(path.ends_with("config/sealwax/rules/work.sieve"));
+        assert!(path.ends_with("config/pronto/rules/work.sieve"));
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
         assert_eq!(read(&dir, &work).unwrap().as_deref(), Some(script));

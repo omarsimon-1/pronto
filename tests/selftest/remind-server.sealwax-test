@@ -1,0 +1,133 @@
+# Remind Me on a server account (the third review of phase C), as on the owner's Gmail: the
+# store's moves wait for the undo window and the server, so right after h the Reminders view
+# says the reminder is on its way there, and at the wake the conversation's messages stay
+# hidden in Reminders until the server has moved them back. A stand-in server
+# (remind-server-account, remind-server-run: UIDPLUS, as Gmail and the testbed's servers have)
+# carries out the account's queued ops when the script says. The notification "Reminder: …"
+# comes once the conversation is back in the Inbox, not before (it never came: the app looked
+# for its Inbox row once, at the wake), named by the conversation's subject and its newest
+# writer (not the answer's "Re: …"), and a click opens it there with its clock. Every name and
+# subject is fictional.
+# Run: tools/headless.sh 64 target/debug/pronto --self-test tests/selftest/remind-server.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+engine-attach
+notify-server
+triage-mark-read-on-open false
+remind-server-account Ops
+folder inbox Ops
+list-wait
+mail-add Ops:inbox yesterday "Review trip" read from=Kari
+remind-reply "Review trip" "Tomas Berg"
+mail-add Ops:inbox today "Review invoice" read from=Henrik
+wait-until assert-list-count 2
+assert-list-row 0 subject "Review trip"
+assert-list-row 0 members 2
+assert-reminder "Review trip" none
+assert-reminder "Review invoice" none
+
+# h: the conversation leaves the Inbox at once; its moves wait for the undo window and the
+# server, and meanwhile the Reminders view says it is on its way rather than "No reminders …
+# press h" (the third review).
+triage-undo-window 1001
+list-select 1
+assert-list-row 1 subject "Review invoice"
+focus list
+key h
+wait-until assert-picker shown true
+picker-choose "Someday"
+wait-until assert-list-count 1
+wait-until assert-toast "Reminder set for someday"
+assert-reminder "Review invoice" waiting
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+assert-list-count 0
+assert-empty-icon alarm-symbolic
+wait-until assert-empty-text "On the way" "Your reminder shows here once the mail server has moved it."
+sleep 1200
+remind-server-run Ops
+wait-until assert-list-count 1
+assert-list-row 0 subject "Review invoice"
+assert-list-row 0 time "SOMEDAY"
+
+# Its time: the store brings it back at the wake, but its messages wait hidden in Reminders
+# until the server moves them back, so no Inbox has it yet and nothing notifies; once the
+# moves land, "Reminder: Review trip" does, from Tomas Berg's answer, its newest message (the
+# window shows the Archive, not that Inbox).
+folder inbox Ops
+wait-until assert-list-count 1
+assert-list-row 0 subject "Review trip"
+remind "Review trip" +1h
+wait-until assert-list-count 0
+remind-server-run Ops
+assert-conversations Ops:Reminders "Review trip" "Review invoice"
+folder archive Ops
+list-wait
+wake-reminders +2h
+assert-reminder "Review trip" reminded
+assert-conversations Ops:inbox
+sleep 500
+assert-notify-count 0
+remind-server-run Ops
+assert-conversations Ops:inbox "Review trip"
+assert-conversations Ops:Reminders "Review invoice"
+wait-until assert-notify-count 1
+assert-notify 1 summary "Reminder: Review trip"
+assert-notify 1 body "Tomas Berg"
+
+# A click opens it in the Inbox, back on top with its clock and both messages; Done ends it.
+notify-click 1 default
+wait-until assert-pane reader
+key Escape
+wait-until assert-pane list
+wait-until assert-list-row 0 subject "Review trip"
+assert-list-row 0 members 2
+wait-until assert-row-reminder 0 true
+list-select 0
+action win.archive
+wait-until assert-reminder "Review trip" none
+assert-notify-count 1
+
+# When Pronto starts again (remind-new-session: the session begins anew, its first read).
+# One the engine brought back in an earlier session whose moves back never landed (offline at
+# its time, then quit) hasn't notified anywhere: it notifies once they land. One back in the
+# Inbox already did (or was seen), and stays quiet. One the engine's start brings back before
+# the first read notifies once its moves land, as at runtime.
+mail-add Ops:inbox today "Ferry tickets" read from=Leah
+mail-add Ops:inbox today "Garden party" read from=Ingrid
+remind-server-run Ops
+folder inbox Ops
+wait-until assert-list-count 2
+remind "Ferry tickets" +3h
+remind "Garden party" +7h
+remind-server-run Ops
+wait-until assert-list-count 0
+folder archive Ops
+list-wait
+wake-reminders +4h
+assert-reminder "Ferry tickets" reminded
+remind-new-session +5h
+sleep 300
+assert-notify-count 1
+remind-server-run Ops
+assert-conversations Ops:inbox "Ferry tickets"
+wait-until assert-notify-count 2
+assert-notify 2 summary "Reminder: Ferry tickets"
+assert-notify 2 body "Leah"
+remind-new-session +6h
+sleep 300
+assert-notify-count 2
+wake-reminders +8h
+assert-reminder "Garden party" reminded
+remind-new-session +450m
+sleep 300
+assert-notify-count 2
+remind-server-run Ops
+assert-conversations Ops:inbox "Garden party" "Ferry tickets"
+wait-until assert-notify-count 3
+assert-notify 3 summary "Reminder: Garden party"
+assert-notify 3 body "Ingrid"

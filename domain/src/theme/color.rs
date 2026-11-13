@@ -112,6 +112,39 @@ impl Rgb {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    /// OKLab lightness (0–1), then `a` and `b`: the inverse of [`Rgb::from_oklch`]'s steps.
+    pub fn to_oklab(self) -> [f64; 3] {
+        let linear = |channel: u8| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let [r, g, b] = [linear(self.r), linear(self.g), linear(self.b)];
+        let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+        let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+        let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+        [
+            0.210_454_255_3 * l + 0.793_617_785 * m - 0.004_072_046_8 * s,
+            1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s,
+            0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s,
+        ]
+    }
+
+    /// How far apart two colours look: their distance in OKLab (ΔEok), where about 0.02 is the
+    /// smallest difference the eye notices (CSS Color 4's gamut mapping takes it as the JND).
+    /// Unlike [`Rgb::contrast`] it sees a change of hue, such as a tint toward the accent.
+    pub fn distance(self, other: Self) -> f64 {
+        let (a, b) = (self.to_oklab(), other.to_oklab());
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
     /// Hue in degrees, then saturation and lightness from 0 to 1.
     pub fn to_hsl(self) -> (f64, f64, f64) {
         let [r, g, b] = [self.r, self.g, self.b].map(|channel| f64::from(channel) / 255.0);
@@ -419,6 +452,23 @@ mod tests {
             Some(Rgb::from_hex(0x426d91))
         );
         assert_eq!(Rgb::from_oklch(0.9, 0.3, 30.0), None, "outside sRGB");
+    }
+
+    #[test]
+    fn oklab_inverts_oklch_and_measures_distance() {
+        for (lightness, chroma, hue) in [(0.74, 0.065, 145.0), (0.52, 0.075, 245.0)] {
+            let color = Rgb::from_oklch(lightness, chroma, hue).unwrap();
+            let [l, a, b] = color.to_oklab();
+            // 8-bit channels move a colour by about 0.002 in OKLab.
+            assert!((l - lightness).abs() < 0.005, "{color}: {l}");
+            assert!((a.hypot(b) - chroma).abs() < 0.005, "{color}: {a} {b}");
+        }
+        let [l, a, b] = Rgb::WHITE.to_oklab();
+        assert!((l - 1.0).abs() < 1e-6 && a.abs() < 1e-6 && b.abs() < 1e-6);
+        assert!((Rgb::BLACK.distance(Rgb::WHITE) - 1.0).abs() < 1e-6);
+        let grey = Rgb::from_hex(0x28282c);
+        assert_eq!(grey.distance(grey), 0.0);
+        assert!((grey.distance(Rgb::WHITE) - Rgb::WHITE.distance(grey)).abs() < 1e-12);
     }
 
     #[test]

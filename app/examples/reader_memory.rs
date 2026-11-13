@@ -22,8 +22,8 @@
 //! M5 measurement):
 //!
 //! ```sh
-//! cargo build --release -p sealwax --example reader_memory
-//! SEALWAX_HEADLESS_TIMEOUT=600 tools/headless.sh 31 target/release/examples/reader_memory
+//! cargo build --release -p pronto --example reader_memory
+//! PRONTO_HEADLESS_TIMEOUT=600 tools/headless.sh 31 target/release/examples/reader_memory
 //! target/release/examples/reader_memory --live --judge   # live session, authorized runs only
 //! ```
 //!
@@ -51,8 +51,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-/// The bars (TESTING.md "Performance targets"), in bytes.
-const TREE_BAR: f64 = 300e6;
+/// The bars (TESTING.md "Performance targets"), in bytes. The fork's Superhuman pass raised the
+/// tree's from 300 MB to 450 MB for the conversations laid out ahead (docs/superhuman/reader.md).
+const TREE_BAR: f64 = 450e6;
 const GROWTH_BAR: f64 = 20e6;
 const MIB: f64 = 1_048_576.0;
 /// Messages opened before the growth's baseline, and after it.
@@ -65,6 +66,9 @@ struct Args {
     judge: bool,
     /// Messages opened after the warm-up; the PSS is printed every `OPENED` of them.
     opens: usize,
+    /// After each open the next and previous messages are laid out ahead, as the app's list has
+    /// the reader do (`Reader::prefetch`).
+    prefetch: bool,
 }
 
 fn args() -> Result<Args, String> {
@@ -72,11 +76,13 @@ fn args() -> Result<Args, String> {
         live: false,
         judge: false,
         opens: OPENED,
+        prefetch: false,
     };
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--live" => args.live = true,
             "--judge" => args.judge = true,
+            "--prefetch" => args.prefetch = true,
             other => match other.strip_prefix("--opens=").map(str::parse) {
                 Some(Ok(opens)) if opens >= OPENED => args.opens = opens,
                 _ => return Err(format!("unknown argument {other}")),
@@ -406,13 +412,14 @@ fn main() -> glib::ExitCode {
         }
     };
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.ReaderMemory")
+        .application_id("io.github.omarsimon1.Pronto.ReaderMemory")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let failures: Rc<RefCell<Option<Vec<String>>>> = Rc::default();
     let scratch = Rc::new(scratch);
     let filled = Rc::new(filled);
     let judge = args.judge;
+    let prefetch = args.prefetch;
     app.connect_activate(glib::clone!(
         #[strong]
         failures,
@@ -427,7 +434,7 @@ fn main() -> glib::ExitCode {
             let _input = input.clone();
             glib::spawn_future_local(async move {
                 let _keep = &theme;
-                let result = run(&reader, &window, &filled, broadway, judge).await;
+                let result = run(&reader, &window, &filled, broadway, (judge, prefetch)).await;
                 failures.replace(Some(result.unwrap_or_else(|error| vec![error])));
                 app.quit();
             });
@@ -488,7 +495,7 @@ async fn run(
     window: &sealwax_app::window::Window,
     filled: &Filled,
     broadway: bool,
-    judge: bool,
+    (judge, prefetch): (bool, bool),
 ) -> Result<Vec<String>, String> {
     let mut failures = Vec::new();
     let reports = support::shown_reports(reader);
@@ -500,7 +507,7 @@ async fn run(
     };
     support::sleep(1500).await;
     println!(
-        "MEMORY ENV build={} backend={} window={}x{} cap={MAX_LIVE_VIEWS}",
+        "MEMORY ENV build={} backend={} window={}x{} cap={MAX_LIVE_VIEWS} prefetch={prefetch}",
         if cfg!(debug_assertions) {
             "debug"
         } else {
@@ -510,6 +517,27 @@ async fn run(
         size.0,
         size.1
     );
+    // Opens one message; with `prefetch`, the reader then lays out its neighbours in `ids`.
+    let open_at = |ids: &[MessageId], index: usize| {
+        let ids = ids.to_vec();
+        let reports = reports.clone();
+        async move {
+            let id = ids[index];
+            support::show(reader, &reports, id).await?;
+            if prefetch {
+                let around: Vec<MessageId> = [
+                    ids.get(index + 1),
+                    index.checked_sub(1).and_then(|at| ids.get(at)),
+                ]
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect();
+                reader.prefetch(&around);
+            }
+            Ok::<(), String>(())
+        }
+    };
     report("start", &measure(true));
 
     let shown = support::show(reader, &reports, filled.conversation).await?;
@@ -567,23 +595,29 @@ async fn run(
     let scrolled = measure(true);
     report("scrolled", &scrolled);
 
-    for id in filled.singles.iter().take(WARM_UP) {
-        support::show(reader, &reports, *id).await?;
+    let singles = &filled.singles;
+    for index in 0..WARM_UP.min(singles.len()) {
+        open_at(singles, index).await?;
     }
     support::sleep(1000).await;
     let baseline = measure(true);
     report("baseline (after the warm-up)", &baseline);
     let started = Instant::now();
-    for id in filled.singles.iter().skip(WARM_UP).take(OPENED) {
-        support::show(reader, &reports, *id).await?;
+    for index in WARM_UP..(WARM_UP + OPENED).min(singles.len()) {
+        open_at(singles, index).await?;
+        if prefetch {
+            // The pace of a reader moving on: time for the neighbours to be laid out.
+            support::sleep(150).await;
+            peak = peak.max(total(&measure(false), |p| p.pss));
+        }
     }
     let opening = started.elapsed();
     support::sleep(1000).await;
     let after = measure(true);
     report("after 200 opened", &after);
-    for (index, id) in filled.singles.iter().skip(WARM_UP + OPENED).enumerate() {
-        support::show(reader, &reports, *id).await?;
-        let opened = OPENED + index + 1;
+    for index in (WARM_UP + OPENED)..singles.len() {
+        open_at(singles, index).await?;
+        let opened = OPENED + index + 1 - (WARM_UP + OPENED);
         if opened.is_multiple_of(OPENED) {
             support::sleep(1000).await;
             report(&format!("after {opened} opened"), &measure(true));
@@ -623,8 +657,9 @@ async fn run(
         ] {
             if value > TREE_BAR {
                 failures.push(format!(
-                    "tree Pss {label} {:.1} MB over 300 MB",
-                    value / 1e6
+                    "tree Pss {label} {:.1} MB over {:.0} MB",
+                    value / 1e6,
+                    TREE_BAR / 1e6
                 ));
             }
         }

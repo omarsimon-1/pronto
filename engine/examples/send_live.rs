@@ -13,7 +13,7 @@
 //! ```
 //!
 //! Nothing is stored: the tokens stay in memory and no keyring item is written. The client ID
-//! comes from `SEALWAX_MICROSOFT_CLIENT_ID`, else from `config.toml`'s `[oauth.microsoft]
+//! comes from `PRONTO_MICROSOFT_CLIENT_ID`, else from `config.toml`'s `[oauth.microsoft]
 //! client_id` (read, never written). The runner prints outcomes, codes, timings and lengths only:
 //! never a token, the address, the username, the page's URL or the server's text. With the debug
 //! filter above, the engine logs each refusal's length ("smtp refusal of the message read").
@@ -38,18 +38,19 @@ const NOT_OWNED: &str = "sendas-check@example.com";
 type Error = Box<dyn std::error::Error>;
 
 fn client_id() -> Result<String, Error> {
-    if let Ok(id) = std::env::var("SEALWAX_MICROSOFT_CLIENT_ID")
+    if let Ok(id) = std::env::var("PRONTO_MICROSOFT_CLIENT_ID")
         && !id.trim().is_empty()
     {
-        println!("client id: from SEALWAX_MICROSOFT_CLIENT_ID");
+        println!("client id: from PRONTO_MICROSOFT_CLIENT_ID");
         return Ok(id.trim().to_owned());
     }
     let text = std::fs::read_to_string(SealwaxDirs::from_env().config_file())?;
     let config = Config::parse(&text).map_err(|_| "config.toml has mistakes")?;
-    let id =
-        config.oauth.microsoft.client_id.ok_or(
-            "no client id: set SEALWAX_MICROSOFT_CLIENT_ID or [oauth.microsoft] client_id",
-        )?;
+    let id = config
+        .oauth
+        .microsoft
+        .client_id
+        .ok_or("no client id: set PRONTO_MICROSOFT_CLIENT_ID or [oauth.microsoft] client_id")?;
     println!("client id: from config.toml");
     Ok(id)
 }
@@ -71,15 +72,15 @@ fn smtp() -> Result<Endpoint, Error> {
     })
 }
 
-/// A short plain message from `from` to `to`, built by Sealwax's MIME builder.
+/// A short plain message from `from` to `to`, built by Pronto's MIME builder.
 fn message(from: &str, to: &str, subject: &str) -> Result<(Vec<u8>, String), Error> {
     let mut random = [0; 16];
     getrandom::fill(&mut random)?;
     let draft = Draft {
-        from: Address::new("Sealwax live check", from),
+        from: Address::new("Pronto live check", from),
         to: vec![Address::new("", to)],
         subject: subject.to_owned(),
-        html: "<p>A test from Sealwax's send_live runner (the patched lettre). \
+        html: "<p>A test from Pronto's send_live runner (the patched lettre). \
                It can be deleted.</p>"
             .to_owned(),
         message_id: ids::message_id(from, random).ok_or("no Message-ID")?,
@@ -166,7 +167,7 @@ async fn main() -> Result<(), Error> {
         submitter.extensions().size.is_some()
     );
 
-    let (bytes, from) = message(&address, &address, "Sealwax live check: a normal send")?;
+    let (bytes, from) = message(&address, &address, "Pronto live check: a normal send")?;
     let (result, seconds) = send(&mut submitter, &from, &to, &bytes).await;
     println!(
         "1. from the signed-in address ({} bytes): {} in {seconds:.1} s",
@@ -183,7 +184,7 @@ async fn main() -> Result<(), Error> {
             .await
             .map_err(|error| format!("SMTP login failed: {error:?}"))?;
     }
-    let (bytes, from) = message(NOT_OWNED, &address, "Sealwax live check: a From not owned")?;
+    let (bytes, from) = message(NOT_OWNED, &address, "Pronto live check: a From not owned")?;
     let (result, seconds) = send(&mut submitter, &from, &to, &bytes).await;
     println!(
         "2. from an address the mailbox doesn't own ({} bytes): {} in {seconds:.1} s",

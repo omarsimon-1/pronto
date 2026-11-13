@@ -16,7 +16,8 @@ const DEFAULT_LIFETIME: Duration = Duration::from_secs(600);
 /// What the token endpoint issued. Its debug form shows no token.
 pub struct Tokens {
     pub access: Zeroizing<String>,
-    /// Microsoft rotates it on every refresh (S5): the new one replaces the stored one.
+    /// Microsoft rotates it on every refresh (S5): the new one replaces the stored one. Google
+    /// sends none on a refresh, and the stored one stays.
     pub refresh: Option<Zeroizing<String>>,
     pub lifetime: Duration,
     pub id_token: Option<Zeroizing<String>>,
@@ -89,8 +90,9 @@ impl Client {
         .await
     }
 
-    /// A new access token (and, from Microsoft, a new refresh token) for a refresh token. Sent
-    /// as S5 sent it, without `scope`, which keeps the grant's scopes.
+    /// A new access token (and, from Microsoft, a new refresh token; Google keeps the one it
+    /// issued) for a refresh token. Sent as S5 sent it, without `scope`, which keeps the grant's
+    /// scopes.
     pub async fn refresh(&self, refresh_token: &str) -> Result<Tokens, OAuthError> {
         self.request(
             Grant::Refresh,
@@ -103,12 +105,16 @@ impl Client {
         .await
     }
 
+    /// Posts `form` to the token endpoint, with `client_secret` when the client has one.
     async fn request(&self, grant: Grant, form: &[(&str, &str)]) -> Result<Tokens, OAuthError> {
-        let body = Zeroizing::new(
-            url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs(form)
-                .finish(),
-        );
+        let body = {
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            serializer.extend_pairs(form);
+            if let Some(secret) = &self.secret {
+                serializer.append_pair("client_secret", secret);
+            }
+            Zeroizing::new(serializer.finish())
+        };
         let mut response = self
             .http
             .post(self.provider.token.clone())

@@ -606,13 +606,15 @@ pub fn messages(now: i64) -> Vec<(&'static str, Vec<u8>)> {
 
 /// The files-and-remote-content samples (M5: ML-058, ML-061, ML-063), beside [`NAMES`]:
 /// attachments the desktop must never open, one whose content is a script though its name
-/// says text, a second message from the remote sample's sender, and a message with
-/// attachments that the self-test stores as its text parts, as a large one is.
-pub const FILES_NAMES: [&str; 4] = [
+/// says text, a second message from the remote sample's sender, a message with attachments
+/// that the self-test stores as its text parts, as a large one is, and an animated message
+/// whose inline image, stored that way too, makes it taller when it comes.
+pub const FILES_NAMES: [&str; 5] = [
     "files-danger",
     "files-sniffed",
     "files-remote-again",
     "files-large",
+    "files-late-image",
 ];
 
 /// A files sample by name, dated `date`; also any of [`NAMES`].
@@ -710,6 +712,26 @@ pub fn files_draft(name: &str, date: i64) -> Option<Draft> {
                     filler(b"Minutes\n", 12_000),
                 ),
             ];
+            draft
+        }
+        "files-late-image" => {
+            let mut draft = Draft::new(
+                ("Fjord Cycling Club", "rides@fjordcycling.example.test"),
+                "Sunday ride: the route map",
+                date,
+                "files-late-image",
+            );
+            // The pulsing line keeps WebKit making frames; the map has no size of its own
+            // until it is in, so the body grows by its height (120 × 40 shown 480 wide).
+            draft.html = Some(
+                "<style>@keyframes pulse{from{opacity:1}to{opacity:.2}}\
+                 .live{animation:pulse .3s linear infinite alternate}</style>\
+                 <p class=\"live\">Sign-up is open until Saturday.</p>\
+                 <p><img src=\"cid:map@fjordcycling.example.test\" alt=\"\" \
+                 style=\"width:480px\"></p><p>— Kari, ride captain</p>"
+                    .into(),
+            );
+            draft.inline = vec![logo("map@fjordcycling.example.test")];
             draft
         }
         _ => return None,

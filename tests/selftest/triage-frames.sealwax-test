@@ -8,7 +8,7 @@
 # draws on the GPU and its frames measured under 16.7 ms at p95). First a 400-message fixture
 # store, a local account whose ops apply in the queueing transaction; then an account with a key,
 # whose ops only write their overlay and wait for a server (no engine runs them here).
-# Run: tools/headless.sh 23 target/debug/sealwax --self-test tests/selftest/triage-frames.sealwax-test
+# Run: tools/headless.sh 23 target/debug/pronto --self-test tests/selftest/triage-frames.sealwax-test
 
 desktop tiling
 fixtures --count 400 --seed 13 --folders spread
@@ -25,7 +25,8 @@ measure-triage numbersign 10
 measure-triage exclam 10
 key <Shift>j 2
 measure-triage s 10
-measure-triage <Shift>u 1
+measure-triage u 2
+action win.mark-unread
 measure-triage <Shift>i 1
 measure-triage e 5
 

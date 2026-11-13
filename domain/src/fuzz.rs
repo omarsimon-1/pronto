@@ -1,5 +1,5 @@
 //! Entry points for the fuzz targets in `fuzz/` (ML-093, docs/m9/security.md). Each takes
-//! arbitrary bytes, runs one parser of untrusted input the way Sealwax does, and checks what its
+//! arbitrary bytes, runs one parser of untrusted input the way Pronto does, and checks what its
 //! documentation promises; a failed check panics like a crash. The tests at the bottom run every
 //! entry point over the checked-in corpus (`fuzz/corpus/<target>/`), so a crash once found stays
 //! fixed. Built only for tests and with the `fuzz` feature.
@@ -147,7 +147,7 @@ fn answers(data: &[u8]) {
     }
 }
 
-/// The header fields Sealwax writes.
+/// The header fields Pronto writes.
 const SENT_HEADERS: [&str; 11] = [
     "From",
     "To",
@@ -535,7 +535,7 @@ pub fn config(data: &[u8]) {
     ));
 }
 
-/// A theme's `colors.toml` values (`key = value` lines) through the palette Sealwax derives.
+/// A theme's `colors.toml` values (`key = value` lines) through the palette Pronto derives.
 pub fn theme(data: &[u8]) {
     let text = String::from_utf8_lossy(data);
     let raw: BTreeMap<String, String> = text

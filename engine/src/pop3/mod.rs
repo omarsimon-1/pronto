@@ -80,7 +80,7 @@ pub enum Pop3Error {
     Rejected(LoginFailure),
     #[error("the server can't open the maildrop now ({0:?})")]
     Busy(Busy),
-    #[error("the server offers no authentication Sealwax can use over TLS")]
+    #[error("the server offers no authentication Pronto can use over TLS")]
     NoMechanism,
     #[error("the server offers no UIDL")]
     NoUidl,
@@ -92,7 +92,7 @@ pub enum Pop3Error {
     Timeout,
     #[error("protocol error: {0}")]
     Protocol(&'static str),
-    /// The message is larger than Sealwax downloads. When LIST's size said so, nothing was sent
+    /// The message is larger than Pronto downloads. When LIST's size said so, nothing was sent
     /// and the session goes on; when the data outgrew the limit, the session is closed.
     #[error("the message is too large ({0} octets)")]
     TooLarge(u64),
@@ -129,7 +129,7 @@ impl Pop3Error {
 /// A POP3 maildrop in the TRANSACTION state.
 pub trait Mailbox: Send {
     /// Every message with its UIDL and size (UIDL and LIST), in the server's order. A UIDL the
-    /// server gives to more than one message is left out with all of them: Sealwax could neither
+    /// server gives to more than one message is left out with all of them: Pronto could neither
     /// tell them apart nor delete one safely.
     fn listing(&mut self) -> impl Future<Output = Result<Vec<Listing>, Pop3Error>> + Send;
     /// The message's bytes (RETR), dot-unstuffed, line ends as the server sent them.

@@ -129,7 +129,8 @@ fn expected(
     let mut rows: Vec<(i64, MessageId)> = stored
         .iter()
         .filter(|(_, m)| {
-            folders.contains(&m.folder) && views::passes(filter, m.flags.bits(), m.has_attachments)
+            folders.contains(&m.folder)
+                && views::passes(filter, m.flags.bits(), m.has_attachments, fork::HIDDEN)
         })
         .map(|(id, m)| (m.date, *id))
         .collect();

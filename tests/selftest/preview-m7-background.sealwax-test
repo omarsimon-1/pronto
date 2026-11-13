@@ -1,10 +1,10 @@
-# Previews for the M7 gate, background mode (ML-084): the main menu with Start Sealwax at Login,
+# Previews for the M7 gate, background mode (ML-084): the main menu with Start Pronto at Login,
 # its question, and the menu with it on, in a dark and a light stock theme (matte-black with
 # square corners, catppuccin-latte rounded). The autostart entry goes to a sandboxed home, never
 # the user's. The one-time notice is a desktop notification, which the notification server
 # draws, so it isn't here. Every name and message is fictional.
 # Not run by CI: it writes into tools/progress/public/.
-# Run: tools/headless.sh 57 target/debug/sealwax --self-test tests/selftest/preview-m7-background.sealwax-test
+# Run: tools/headless.sh 57 target/debug/pronto --self-test tests/selftest/preview-m7-background.sealwax-test
 
 desktop tiling
 fixtures --count 200 --seed 13 --folders single
@@ -17,7 +17,7 @@ wait-until assert-reader-built true
 list-select 1
 wait-until assert-reader-selected
 
-# The menu: Start Sealwax at Login under the settings, off.
+# The menu: Start Pronto at Login under the settings, off.
 wait-until assert-autostart-toggle false
 background-menu
 screenshot $DIR/../../tools/progress/public/m7-background-menu-matte-black-square-2026-10-06.png

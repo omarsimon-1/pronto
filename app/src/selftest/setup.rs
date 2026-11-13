@@ -15,7 +15,7 @@
 //! | `engine-reply sign-in-open URL` | `SignInOpen` for the last command |
 //! | `engine-reply signed-in ok USERNAME`, `engine-reply signed-in [imap\|smtp] FAILURE` | `SignedIn` (IMAP when no protocol is named) |
 //! | `engine-reply added ok\|keyring\|settings-file\|store\|exists\|missing` | `AccountAdded`; `ok` first adds the account (its key is the address's local part) and its role folders to the app's store, as the engine would; `added ok file` also appends it to the scratch `accounts.toml` through the engine's writer and waits for the app to read it (M8) |
-//! | `engine-reply edited ok [file]\|settings-file\|missing` | `AccountEdited`; `ok file` first writes the label and colour of the last `EditAccount` to the scratch `accounts.toml` through the engine's writer, waits for the app to read them, and names the store's account by its title as the engine's reconcile would |
+//! | `engine-reply edited ok [file]\|settings-file\|missing` | `AccountEdited`; `ok file` first writes the label, colour and signature of the last `EditAccount` to the scratch `accounts.toml` through the engine's writer, waits for the app to read them, and names the store's account by its title as the engine's reconcile would |
 //! | `engine-reply removed ok\|keyring\|settings-file\|store\|missing` | `AccountRemoved`; `ok` first removes the account from the app's store |
 //! | `engine-reply sync-failed ADDRESS FAILURE`, `engine-reply sync-finished ADDRESS` | `AccountStatus` for the store's account with ADDRESS: the failure's state, or `Synced` |
 //! | `engine-reply status ADDRESS STATE` | `AccountStatus` for that account: `syncing`, `synced`, `offline`, `needs-sign-in`, `certificate`, `quota` (ML-048) |
@@ -41,7 +41,7 @@
 //! | `assert-setup banner-queue ENTRY,…\|none` | Everything the banner has, in order: `keyring`, `certificate:KEY`, `sign-in:KEY`, `password:KEY`, `quota:KEY`, `rules:KEY`, `offline`, `unreachable` |
 //! | `assert-opened last URL\|none`, `assert-opened count N` | The last link handed to the browser opener, and how many were |
 //! | `assert-toast TEXT` | The toast on screen says TEXT (`setup-dismiss-toasts` clears earlier ones) |
-//! | `assert-clipboard TEXT` | The text Sealwax last put on the clipboard is TEXT |
+//! | `assert-clipboard TEXT` | The text Pronto last put on the clipboard is TEXT |
 //! | `assert-text-contains NAME TEXT` | A label's, a button's or an alert dialog's text (its heading and body) contains TEXT |
 //! | `assert-field NAME TEXT` | A text field's text or a choice's item (never the password's) |
 //! | `assert-account-status ADDRESS synced\|syncing\|offline\|needs-sign-in\|certificate\|quota` | The sidebar's state of the account with ADDRESS |
@@ -132,8 +132,8 @@ struct Last {
     request: RequestId,
     settings: Option<AccountSettings>,
     key: Option<AccountKey>,
-    /// An `EditAccount`'s label and colour, for `key`.
-    look: Option<(Option<String>, Option<AccountColor>)>,
+    /// An `EditAccount`'s label, colour and signature, for `key`.
+    look: Option<(Option<String>, Option<AccountColor>, Option<String>)>,
     /// A `ChangeFolder`'s account and change.
     folder: Option<(AccountId, FolderChange)>,
 }
@@ -264,12 +264,16 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
         }
         "setup-type" => {
             let field = harness.widget(&args[0])?;
-            let editable = field
-                .dynamic_cast_ref::<gtk::Editable>()
-                .ok_or_else(|| format!("{} is not a text field", args[0]))?;
             // As a user would: into the field first, then the text.
             field.grab_focus();
-            editable.set_text(&args[1]);
+            if let Some(view) = field.downcast_ref::<gtk::TextView>() {
+                view.buffer().set_text(&args[1]);
+            } else {
+                field
+                    .dynamic_cast_ref::<gtk::Editable>()
+                    .ok_or_else(|| format!("{} is not a text field", args[0]))?
+                    .set_text(&args[1]);
+            }
             Ok(())
         }
         "setup-choose" => {
@@ -491,7 +495,7 @@ pub fn check(harness: &Harness, assertion: &str, args: &[String]) -> StepResult 
                 .content()
                 .and_then(|content| content.value(glib::Type::STRING).ok())
                 .and_then(|value| value.get::<String>().ok())
-                .ok_or("Sealwax put no text on the clipboard")?;
+                .ok_or("Pronto put no text on the clipboard")?;
             equal("clipboard", text.as_str(), args[0].as_str())
         }
         "assert-text-contains" => {
@@ -528,6 +532,11 @@ pub fn check(harness: &Harness, assertion: &str, args: &[String]) -> StepResult 
             }
             let value = if let Some(editable) = found.dynamic_cast_ref::<gtk::Editable>() {
                 editable.text().to_string()
+            } else if let Some(view) = found.downcast_ref::<gtk::TextView>() {
+                let buffer = view.buffer();
+                buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string()
             } else if let Some(dropdown) = found.downcast_ref::<gtk::DropDown>() {
                 dropdown
                     .selected_item()
@@ -598,6 +607,7 @@ fn auth_text(auth: AuthMethod) -> &'static str {
     match auth {
         AuthMethod::Password => "password",
         AuthMethod::OAuth(OAuthProvider::Microsoft) => "microsoft",
+        AuthMethod::OAuth(OAuthProvider::Google) => "google",
     }
 }
 
@@ -685,12 +695,17 @@ fn fields(
             key,
             label,
             color,
+            signature,
         } => (
             "edit-account",
             Some(*request),
             vec![
                 ("key", key.to_string()),
                 ("label", label.clone().unwrap_or_else(|| "none".to_owned())),
+                (
+                    "signature",
+                    signature.clone().unwrap_or_else(|| "none".to_owned()),
+                ),
                 (
                     "color",
                     color.map_or("none", |color| color.name()).to_owned(),
@@ -729,10 +744,29 @@ fn fields(
             None,
             vec![("set", client_id.is_some().to_string())],
         ),
+        Command::GoogleClient { client } => (
+            "google-client",
+            None,
+            vec![("set", client.is_some().to_string())],
+        ),
         Command::Accounts { accounts } => (
             "accounts",
             None,
             vec![("count", accounts.len().to_string())],
+        ),
+        Command::SampleSent {
+            request,
+            account,
+            options,
+            ..
+        } => (
+            "sample-sent",
+            Some(*request),
+            vec![
+                ("account", account.0.to_string()),
+                ("limit", options.limit.to_string()),
+                ("refresh", options.refresh.to_string()),
+            ],
         ),
         Command::FolderOpened { folder } => (
             "folder-opened",
@@ -849,6 +883,7 @@ fn fields(
             (kind, Some(*request), fields)
         }
         Command::CheckForUpdates { request } => ("check-for-updates", Some(*request), Vec::new()),
+        Command::RemindersChanged => ("reminders-changed", None, Vec::new()),
         Command::Shutdown => ("shutdown", None, Vec::new()),
     }
 }
@@ -933,7 +968,12 @@ async fn expect(harness: &Harness, args: &[String]) -> StepResult {
             _ => None,
         },
         look: match &command {
-            Command::EditAccount { label, color, .. } => Some((label.clone(), *color)),
+            Command::EditAccount {
+                label,
+                color,
+                signature,
+                ..
+            } => Some((label.clone(), *color, signature.clone())),
             _ => None,
         },
         folder: match &command {
@@ -1448,7 +1488,7 @@ async fn write_accounts_file(harness: &Harness, last: &Last) -> StepResult {
     Ok(())
 }
 
-/// What the engine does on `EditAccount` (`edited ok file`): the account's label and colour
+/// What the engine does on `EditAccount` (`edited ok file`): the account's label, colour and signature
 /// written through the same writer, the app's read of them, and the store's name as the
 /// engine's `reconcile` sets it once the app sends the file.
 async fn relabel_accounts_file(harness: &Harness, last: &Last) -> StepResult {
@@ -1456,7 +1496,7 @@ async fn relabel_accounts_file(harness: &Harness, last: &Last) -> StepResult {
         .key
         .clone()
         .ok_or("the last command named no account")?;
-    let (label, color) = last
+    let (label, color, signature) = last
         .look
         .clone()
         .ok_or("the last command was no EditAccount")?;
@@ -1465,8 +1505,14 @@ async fn relabel_accounts_file(harness: &Harness, last: &Last) -> StepResult {
         .preferences()
         .ok_or("the settings aren't read yet")?;
     let path = prefs.path(SettingsFile::Accounts);
-    if !sealwax_infrastructure::accounts::relabel(&path, &key, label.as_deref(), color)
-        .map_err(|error| format!("accounts.toml: {error}"))?
+    if !sealwax_infrastructure::accounts::relabel(
+        &path,
+        &key,
+        label.as_deref(),
+        color,
+        signature.as_deref(),
+    )
+    .map_err(|error| format!("accounts.toml: {error}"))?
     {
         return Err(format!("accounts.toml has no account {key}"));
     }
@@ -1476,7 +1522,9 @@ async fn relabel_accounts_file(harness: &Harness, last: &Last) -> StepResult {
             .accounts()
             .into_iter()
             .find(|settings| settings.key == key && settings.label == label);
-        if let Some(settings) = read.filter(|settings| settings.color == color) {
+        if let Some(settings) =
+            read.filter(|settings| settings.color == color && settings.signature == signature)
+        {
             break settings;
         }
         if started.elapsed() > WAIT_TIMEOUT {
@@ -1522,6 +1570,7 @@ async fn add_to_store(
             },
         );
     let account = reply.recv().await.map_err(|error| error.to_string())?.value;
+    super::mail::account_read(harness, account).await?;
     let inbox = match settings.receive {
         Receive::Imap => "INBOX",
         Receive::Pop3(_) => "Inbox",

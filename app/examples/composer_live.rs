@@ -11,7 +11,7 @@
 //! theme and scratch XDG folders, and ends by itself.
 //!
 //! ```sh
-//! cargo build --release -p sealwax --example composer_live
+//! cargo build --release -p pronto --example composer_live
 //! tools/headless.sh 45 target/release/examples/composer_live            # dry run
 //! target/release/examples/composer_live --live                          # authorized live run
 //! ```
@@ -280,7 +280,7 @@ async fn run(app: &adw::Application, args: Args, root: PathBuf) -> Result<String
     let (probe, paints) = PaintProbe::new(editor.view());
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Sealwax composer check")
+        .title("Pronto composer check")
         .default_width(1000)
         .default_height(820)
         .content(&probe)
@@ -322,7 +322,7 @@ async fn run(app: &adw::Application, args: Args, root: PathBuf) -> Result<String
     .unwrap();
     editor.view().grab_focus();
 
-    editor.set_content("<div><br></div>").await;
+    editor.set_content("<div><br></div>", false).await;
     caret_at_line(&editor, 0).await;
     let small = typing(&editor, &paints, args.small).await;
     writeln!(
@@ -341,7 +341,7 @@ async fn run(app: &adw::Application, args: Args, root: PathBuf) -> Result<String
     .unwrap();
 
     let quote = large_quote();
-    editor.set_content(&quote).await;
+    editor.set_content(&quote, false).await;
     support::sleep(800).await;
     caret_at_line(&editor, 1).await;
     let large = typing(&editor, &paints, args.large).await;
@@ -399,7 +399,7 @@ fn main() -> glib::ExitCode {
         }
     };
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.ComposerCheck")
+        .application_id("io.github.omarsimon1.Pronto.ComposerCheck")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let failed = Rc::new(std::cell::Cell::new(false));

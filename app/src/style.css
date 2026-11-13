@@ -1,16 +1,45 @@
-/* Sealwax's base styles (DESIGN.md). Every colour, size, radius and font is a variable from
-   the theme's generated stylesheet (app::theme); nothing here names a colour, a family or a
-   length of its own. Borders are omarchy-shell's control border width; the only numbers are
-   ratios (letter-spacing in em, multiples of a spacing token). Both stylesheets load at
+/* Sealwax's base styles (DESIGN.md). Every colour, size, radius, font, weight and duration is a
+   variable from the theme's generated stylesheet (app::theme); nothing here names a colour, a
+   family or a length of its own. Borders are omarchy-shell's control border width; the only
+   numbers are ratios (letter-spacing in em, multiples of a spacing token). Both stylesheets load at
    application priority, which wins over libadwaita whatever the selector, so rules here name
    Sealwax's own sw- classes or exactly the libadwaita parts they change.
    docs/m1/theme.md and docs/m1/polish.md list every class. */
 
-/* The chrome font and size (the Omarchy font, omarchy-shell's body size). */
+/* The chrome font, size and weight (Adwaita Sans by default, omarchy-shell's body size, a
+   regular weight a shade heavier than Pango's for HiDPI panels). */
 window,
 tooltip {
   font-family: var(--sw-font-chrome);
   font-size: var(--sw-text-body);
+  font-weight: var(--sw-weight-regular);
+}
+
+/* Opaque by default: every pane paints the theme's solid surfaces; nothing lets the desktop
+   show through (Hyprland's own opacity rule is the user's, INTEGRATIONS.md). */
+window.background {
+  background-color: var(--window-bg-color);
+}
+
+/* Motion (DESIGN.md): fills, borders and text colours fade in over --sw-motion when a control
+   is hovered, pressed, focused or chosen; nothing moves or resizes. The fade is set on the
+   state that is entered, so leaving it is instant and recycled list rows never fade while the
+   list scrolls. The theme drops every transition while the desktop asks for less motion. */
+button:hover,
+button:focus-visible,
+button:checked,
+menubutton > button:hover,
+.sw-sidebar-row:hover,
+row.sw-sidebar-heading:hover,
+list.sw-palette-list > row:selected,
+list.sw-search-suggestions-list > row:hover,
+.sw-collapsed-message:hover,
+.sw-attachment-card:hover,
+entry:focus-within,
+box.sw-quick-reply:focus-within,
+.sw-composer:focus-within {
+  transition: background-color var(--sw-motion) ease-out, color var(--sw-motion) ease-out,
+    border-color var(--sw-motion) ease-out, box-shadow var(--sw-motion) ease-out;
 }
 
 /* Tooltips name a command's keys; they take the popover surface, not libadwaita's black. */
@@ -96,7 +125,11 @@ selection {
 }
 
 .sw-strong {
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
+}
+
+.sw-medium {
+  font-weight: var(--sw-weight-medium);
 }
 
 .sw-secondary {
@@ -189,7 +222,7 @@ button.sw-primary {
   background: var(--accent-bg-color);
   color: var(--accent-fg-color);
   box-shadow: none;
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 button.sw-primary {
@@ -222,8 +255,9 @@ button.sw-primary:disabled {
 }
 
 /* The window's panes: the folders and the list on the sidebar surface with a border at
-   their end, the reader and the welcome page on the window's. One pane at a time (narrow,
-   the window's sw-one-pane) needs no borders. */
+   their end, the reader and the welcome page on the window's. One pane at a time (Focused, or
+   narrow: the window's sw-one-pane) the list needs no border, and takes the window's surface,
+   the reader's, so opening a conversation in its place changes nothing around it. */
 .sw-sidebar,
 .sw-list-pane {
   border-right: var(--sw-control-border-width) solid var(--sidebar-border-color);
@@ -231,9 +265,27 @@ button.sw-primary:disabled {
   color: var(--sidebar-fg-color);
 }
 
-window.sw-one-pane .sw-sidebar,
-window.sw-one-pane .sw-list-pane {
+window.sw-one-pane .sw-list-pane,
+window.sw-one-pane .sw-list-pane .sw-message-list {
   border-right: none;
+  background-color: var(--window-bg-color);
+  color: var(--window-fg-color);
+}
+
+/* There its rows take the roles made for the window's surface (the theme's `window_rows`):
+   fills mixed from the sidebar's colour made a hovered row as loud as the selected one on
+   Adwaita, and vanish on Tokyo Night, whose sidebar is darker than its window. */
+window.sw-one-pane .sw-list-pane .sw-message-list {
+  --sw-hover-secondary-fg-color: var(--sw-window-hover-secondary-fg-color);
+  --sw-selected-secondary-fg-color: var(--sw-window-selected-secondary-fg-color);
+  --sw-row-hover-bg-color: var(--sw-window-row-hover-bg-color);
+  --sw-row-selected-bg-color: var(--sw-window-row-selected-bg-color);
+  --sw-read-fg-color: var(--sw-window-read-fg-color);
+  --sw-tertiary-fg-color: var(--sw-window-tertiary-fg-color);
+  --sw-hover-tertiary-fg-color: var(--sw-window-hover-tertiary-fg-color);
+  --sw-selected-tertiary-fg-color: var(--sw-window-selected-tertiary-fg-color);
+  --sw-draft-fg-color: var(--sw-window-draft-fg-color);
+  --sw-reminder-color: var(--sw-window-reminder-color);
 }
 
 /* The drag handles beside the borders (the user's UI tweak, 2026-10-08): unseen until the
@@ -268,11 +320,11 @@ window.sw-one-pane .sw-list-pane .sw-pane-bar {
   border-spacing: var(--sw-space-sm);
 }
 
-/* The sidebar's bar holds the compose button, as far from the top as the mock has it, so it
-   ends where the reader's toolbar does. */
+/* The sidebar's bar holds the compose button in a row as high as the list's header, centred on
+   the same line (phase B: the button sat 6 px below the header's middle). */
 .sw-pane-bar.sw-sidebar-bar {
-  min-height: var(--sw-size-compose);
-  padding: var(--sw-space-xxxl) var(--sw-space-xl) 0;
+  min-height: var(--sw-size-toolbar);
+  padding: 0 var(--sw-space-xl);
 }
 
 .sw-pane-heading {
@@ -281,11 +333,342 @@ window.sw-one-pane .sw-list-pane .sw-pane-bar {
 
 .sw-pane-title {
   font-size: var(--sw-text-heading);
-  font-weight: bold;
+  font-weight: var(--sw-weight-heavy);
+  letter-spacing: -0.01em;
 }
 
 .sw-pane-subtitle {
   color: var(--sw-secondary-fg-color);
+}
+
+/* ==== superhuman: layout ==== */
+/* The list's one quiet header row (the Superhuman pass, 2026-10-28): the sidebar button, the
+   view's name in bold rather than heavy, its count, the filter pill, then search, compose and
+   the menu. */
+.sw-list-bar .sw-pane-title {
+  font-weight: var(--sw-weight-bold);
+}
+
+/* The header row's lines (phase B, the visual QA): the sidebar button fills the rows' unread-dot
+   gutter, so the view's name, the search field and the select mode's count start on the names'
+   column, and the icons at the end stop where the rows' dates do (a 16 px icon centred in its
+   button). The icons are quiet, in the secondary text, and take the text's colour on hover. */
+.sw-pane-bar.sw-list-bar {
+  padding: 0 calc(var(--sw-space-xxl) - (var(--sw-size-icon-button) - 16px) / 2) 0
+    var(--sw-space-lg);
+}
+
+.sw-pane-bar.sw-list-bar:dir(rtl) {
+  padding: 0 var(--sw-space-lg) 0
+    calc(var(--sw-space-xxl) - (var(--sw-size-icon-button) - 16px) / 2);
+}
+
+.sw-pane-bar.sw-list-bar > box {
+  border-spacing: 0;
+}
+
+/* It fills the gutter up to the names' column (GTK's min-width is the content's, the padding
+   comes on top), so its fill is inset, a padding's width short of the view's name: whole, it
+   ran into the name (phase B's review). Pressed, it says so by its glyph, in the text's
+   colour, and fills only under the pointer. */
+.sw-list-bar button.sw-sidebar-toggle {
+  min-width: calc(var(--sw-size-list-gutter) - 2 * var(--sw-space-sm));
+  min-height: calc(var(--sw-size-icon-button) - 2 * var(--sw-space-sm));
+  padding: var(--sw-space-sm);
+  background-clip: content-box;
+}
+
+.sw-list-bar button.sw-sidebar-toggle:checked:not(:hover):not(:active) {
+  background: none;
+}
+
+/* Its keyboard focus ring goes on the fill's edge, inside the button, 4 px clear of the name's
+   first letter (phase C, the visual QA: the ring at x 8–35 touched the "I" of "Inbox" at 36;
+   round the fill it was 2 px clear). */
+.sw-list-bar button.sw-sidebar-toggle,
+.sw-list-bar button.sw-sidebar-toggle:focus-visible {
+  outline-offset: calc(-1 * var(--sw-space-sm) - 2px);
+}
+
+.sw-list-tools {
+  border-spacing: var(--sw-space-sm);
+}
+
+.sw-list-bar button.sw-icon-button,
+.sw-list-bar menubutton.sw-icon-button > button {
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-list-bar button.sw-icon-button:hover,
+.sw-list-bar button.sw-icon-button:checked,
+.sw-list-bar menubutton.sw-icon-button > button:hover,
+.sw-list-bar menubutton.sw-icon-button > button:checked {
+  color: var(--window-fg-color);
+}
+
+/* The search in the header row, in the view name's place: a quiet field about 520 px wide at
+   most, the query in the list's own size, no accent ring (the caret says where typing goes),
+   and the scope after it as two quiet words, the chosen one in the selected chip's pair. */
+.sw-list-bar .sw-list-head {
+  border-spacing: var(--sw-space-lg);
+}
+
+.sw-list-bar entry.sw-search {
+  min-height: var(--sw-size-icon-button);
+  padding: 0 var(--sw-space-lg);
+  border: none;
+  border-radius: var(--sw-radius-small);
+  background: var(--sw-hover-bg-color);
+  font-size: var(--sw-text-title);
+}
+
+.sw-list-bar entry.sw-search:focus-within {
+  outline: none;
+  box-shadow: inset 0 0 0 var(--sw-control-border-width) var(--border-color);
+}
+
+.sw-list-bar entry.sw-search > image {
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-list-bar .sw-search-scope {
+  border-spacing: var(--sw-space-xxs);
+}
+
+.sw-list-bar .sw-search-scope .sw-chip {
+  min-height: calc(var(--sw-size-chip) - var(--sw-space-sm));
+  padding: 0 var(--sw-space-lg);
+  border: none;
+  background: none;
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-small);
+  font-weight: var(--sw-weight-regular);
+}
+
+.sw-list-bar .sw-search-scope .sw-chip:hover {
+  background: var(--sw-hover-bg-color);
+  color: var(--window-fg-color);
+}
+
+.sw-list-bar .sw-search-scope .sw-chip:checked {
+  background: var(--sw-chip-selected-bg-color);
+  color: var(--sw-chip-selected-fg-color);
+  font-weight: var(--sw-weight-medium);
+}
+
+/* The select mode in the header row (Focused, or one pane at a time): the count in the title's
+   place, the batch actions as the header's quiet icons, and Clear as a quiet word. */
+.sw-batch-bar {
+  border-spacing: var(--sw-space-xxs);
+}
+
+.sw-batch-bar .sw-batch-count {
+  margin-right: var(--sw-space-xl);
+}
+
+button.sw-batch-clear {
+  min-height: calc(var(--sw-size-chip) - var(--sw-space-sm));
+  margin-left: var(--sw-space-md);
+  padding: 0 var(--sw-space-lg);
+  border: none;
+  border-radius: var(--sw-radius-small);
+  background: none;
+  box-shadow: none;
+  color: var(--sw-secondary-fg-color);
+  font-weight: var(--sw-weight-regular);
+}
+
+button.sw-batch-clear:hover {
+  background: var(--sw-hover-bg-color);
+  color: var(--window-fg-color);
+}
+
+/* Right to left, the gaps after the count and before Clear mirror (phase B's review). */
+.sw-batch-bar .sw-batch-count:dir(rtl) {
+  margin-right: 0;
+  margin-left: var(--sw-space-xl);
+}
+
+button.sw-batch-clear:dir(rtl) {
+  margin-left: 0;
+  margin-right: var(--sw-space-md);
+}
+
+/* The sidebar button's dot while an account needs the user and the sidebar is hidden: the
+   status dot's colours, at the icon's top right. */
+.sw-attention-dot {
+  margin: 0 calc(-1 * var(--sw-space-xxs)) 0 0;
+}
+
+/* The filter the list shows, which a click removes: the selected chip's pair, quiet. */
+button.sw-filter-pill {
+  min-height: calc(var(--sw-size-chip) - var(--sw-space-sm));
+  padding: 0 var(--sw-space-md) 0 var(--sw-space-lg);
+  border: none;
+  border-radius: var(--sw-radius-small);
+  background: var(--sw-chip-selected-bg-color);
+  color: var(--sw-chip-selected-fg-color);
+  box-shadow: none;
+  font-size: var(--sw-text-small);
+  font-weight: var(--sw-weight-medium);
+}
+
+button.sw-filter-pill > box {
+  border-spacing: var(--sw-space-xs);
+}
+
+/* The pill's words sit on the name's baseline (it aligns by baseline, phase B); it reaches
+   further below the baseline than the name does, so it lends the row none of that depth, and
+   the name doesn't move when it comes. */
+.sw-list-bar button.sw-filter-pill {
+  margin-bottom: calc(-1 * var(--sw-space-sm));
+}
+
+/* After the search's scope, centred on the row as the scope's words are (phase C: the filter
+   narrows the search too, so its pill stays). */
+.sw-list-bar .sw-list-head ~ button.sw-filter-pill {
+  margin-bottom: 0;
+  margin-left: var(--sw-space-sm);
+}
+
+.sw-list-bar .sw-list-head ~ button.sw-filter-pill:dir(rtl) {
+  margin-left: 0;
+  margin-right: var(--sw-space-sm);
+}
+
+button.sw-filter-pill:hover {
+  background-image: image(var(--sw-hover-bg-color));
+}
+
+.sw-filter-pill-close {
+  -gtk-icon-size: var(--sw-text-small);
+}
+
+/* Inbox Zero: the list's whole pane in a soft tint of the accent, its header row too (phase B:
+   the tint stopped under a neutral header, a seam across the window), a large light title, the
+   day, and how to write. The tint is flat: a gradient this faint across the window drew rings
+   on 8-bit output, which GTK doesn't dither. */
+.sw-list-pane.sw-zero .sw-pane-bar,
+.sw-list-pane.sw-zero .sw-inbox-zero {
+  background-image: image(alpha(var(--accent-bg-color), 0.05));
+}
+
+/* No line under the header while the tint shows: the tint reaches under the bar's border,
+   which lets it through (phase C, the visual QA: a transparent border alone let the untinted
+   window through, a 1 px seam across the window). */
+window.sw-one-pane .sw-list-pane.sw-zero .sw-pane-bar {
+  border-bottom-color: transparent;
+  background-origin: border-box;
+}
+
+/* The list's empty states hold the focus only so its keys work with no row; no ring round
+   the page. */
+.sw-inbox-zero:focus-visible,
+.sw-empty-state.sw-empty-folder:focus-visible {
+  outline: none;
+}
+
+.sw-inbox-zero-content {
+  padding: var(--sw-space-huge);
+  border-spacing: var(--sw-space-md);
+}
+
+/* A quiet mark, in the tertiary text: the accent stays for what acts and what is unread. */
+.sw-inbox-zero-mark {
+  -gtk-icon-size: calc(1.5 * var(--sw-size-empty-icon));
+  margin-bottom: var(--sw-space-xl);
+  color: var(--sw-tertiary-fg-color);
+}
+
+.sw-inbox-zero-title {
+  font-size: calc(2 * var(--sw-text-display));
+  font-weight: calc(var(--sw-weight-regular) - 150);
+  letter-spacing: -0.02em;
+}
+
+.sw-inbox-zero-date {
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-title);
+}
+
+.sw-inbox-zero-hint {
+  margin-top: var(--sw-space-huge);
+  border-spacing: var(--sw-space-sm);
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-small);
+}
+
+/* The key as a keycap: the hover fill, a hairline, the small radius. */
+.sw-inbox-zero-key {
+  min-width: var(--sw-space-xxl);
+  padding: 0 var(--sw-space-sm);
+  border: var(--sw-control-border-width) solid var(--border-color);
+  border-radius: var(--sw-radius-small);
+  background: var(--sw-hover-bg-color);
+  color: var(--window-fg-color);
+  font-weight: var(--sw-weight-medium);
+}
+
+/* ==== superhuman: split ==== */
+/* The Split Inbox's tabs in the header row (phase C, docs/superhuman/split.md "UI"): plain
+   words at the view name's size in regular weight, the side shown in the text's colour and
+   the other in the secondary, each total after it smaller, in the secondary; no fill,
+   underline or box (Superhuman's). The pointer brings a tab to the text's colour; the
+   keyboard's ring stands clear of the words and of the sidebar button before them: 2 px out
+   from the words, the tabs 1 px further in, so 3 px each side of the ring. */
+.sw-list-bar splittabs {
+  margin-left: 1px;
+}
+
+.sw-list-bar splittabs:dir(rtl) {
+  margin-left: 0;
+  margin-right: 1px;
+}
+
+.sw-list-bar splittabs button.sw-split-tab,
+.sw-list-bar splittabs button.sw-split-tab:hover,
+.sw-list-bar splittabs button.sw-split-tab:active {
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+.sw-list-bar splittabs button.sw-split-tab {
+  border-radius: var(--sw-radius-small);
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-heading);
+  font-weight: var(--sw-weight-regular);
+  letter-spacing: -0.01em;
+}
+
+.sw-list-bar splittabs button.sw-split-tab.sw-current,
+.sw-list-bar splittabs button.sw-split-tab:hover {
+  color: var(--window-fg-color);
+}
+
+.sw-list-bar splittabs button.sw-split-tab:focus-visible {
+  outline-offset: var(--sw-space-xxs);
+}
+
+.sw-list-bar splittabs .sw-split-count {
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-body);
+  font-feature-settings: "tnum";
+}
+
+/* An empty side's Inbox Zero says what the other one holds, in the date's quiet words, with
+   the key that goes there as a keycap. */
+.sw-inbox-zero-other {
+  border-spacing: var(--sw-space-md);
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-title);
+}
+
+.sw-inbox-zero-other .sw-inbox-zero-key {
+  font-size: var(--sw-text-small);
 }
 
 /* Sidebar: folder rows, account headings, counts, status dots and the footer. */
@@ -322,7 +705,12 @@ list.sw-folder-list {
 .sw-sidebar-row.sw-current,
 .sw-sidebar-row:selected {
   background: var(--sw-selected-bg-color);
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
+}
+
+/* The folder shown: its icon in the accent, so the place reads at a glance. */
+.sw-sidebar-row.sw-current image:not(.sw-folder-arrow) {
+  color: var(--accent-color);
 }
 
 .sw-more-row {
@@ -334,6 +722,7 @@ list.sw-folder-list {
   margin-top: calc(var(--sw-space-huge) - var(--sw-space-md));
   padding: var(--sw-space-md) var(--sw-space-xl);
   font-size: var(--sw-text-caption);
+  font-weight: var(--sw-weight-bold);
   letter-spacing: 0.08em;
   color: var(--sw-secondary-fg-color);
 }
@@ -416,8 +805,7 @@ row.sw-sidebar-heading:active {
 .sw-account-iris { --sw-account-color: var(--sw-account-iris-color); }
 .sw-account-mauve { --sw-account-color: var(--sw-account-mauve-color); }
 
-.sw-account-colored .sw-account-name,
-.sw-account-colored .sw-rail-initial {
+.sw-account-colored .sw-account-name {
   color: var(--sw-account-color);
 }
 
@@ -425,82 +813,58 @@ row.sw-sidebar-heading:active {
   background: var(--sw-account-color);
 }
 
+/* Its words line up with the folders' names, Preferences with their rows. */
 .sw-sidebar-footer {
-  padding: var(--sw-space-xl) var(--sw-space-xl) 0;
+  padding: var(--sw-space-xl) 0 0;
   border-top: var(--sw-control-border-width) solid var(--border-color);
   border-spacing: var(--sw-space-sm);
   font-size: var(--sw-text-small);
   color: var(--sw-secondary-fg-color);
 }
 
-.sw-sidebar-footer button.sw-icon-button,
-.sw-sidebar-footer menubutton.sw-icon-button > button {
-  min-width: var(--sw-space-control-height);
-  min-height: var(--sw-space-control-height);
+.sw-sidebar-footer .sw-sidebar-summary {
+  padding: 0 var(--sw-space-xl);
 }
 
-/* The rail (900–1279 px): icon buttons with the accent badge on unread mail at their
-   top-right corner, the other accounts as initial and count, as in the mock. */
-.sw-rail {
-  padding: var(--sw-space-xl) 0 var(--sw-space-xxl);
+/* Nothing needs the user: no words and no border, Preferences alone. */
+.sw-sidebar-footer.sw-quiet {
+  border-top-color: transparent;
 }
 
-.sw-rail-items,
-.sw-rail-footer {
-  border-spacing: var(--sw-space-sm);
-}
-
-button.sw-rail-button,
-menubutton.sw-rail-button > button {
-  min-width: calc(var(--sw-size-icon-button) + var(--sw-space-lg));
-  min-height: calc(var(--sw-size-icon-button) + var(--sw-space-sm));
-  padding: 0;
+/* ==== superhuman: sidebar ==== */
+/* Preferences: a row like the folders', its icon and word in the secondary text. */
+button.sw-sidebar-config {
+  min-height: var(--sw-size-nav-row);
+  padding: 0 var(--sw-space-xl);
   border: none;
   border-radius: var(--sw-radius-small);
   background: none;
   box-shadow: none;
+  color: var(--sw-secondary-fg-color);
+  font-weight: var(--sw-weight-regular);
 }
 
-button.sw-rail-button:hover,
-menubutton.sw-rail-button > button:hover {
+button.sw-sidebar-config > box {
+  border-spacing: var(--sw-space-xl);
+}
+
+button.sw-sidebar-config:hover {
   background: var(--sw-hover-bg-color);
+  color: var(--sidebar-fg-color);
 }
 
-button.sw-rail-button:checked,
-menubutton.sw-rail-button > button:checked {
-  background: var(--sw-selected-bg-color);
+/* The compose button, quiet: the width of its words, in the selected chip's pair (the filter
+   pill's), the icon-button's height; the accent fill stays for the setup's primary buttons. */
+button.sw-compose.sw-quiet-compose {
+  min-height: var(--sw-size-icon-button);
+  padding: 0 var(--sw-space-xl);
+  background: var(--sw-chip-selected-bg-color);
+  color: var(--sw-chip-selected-fg-color);
+  font-weight: var(--sw-weight-medium);
 }
 
-button.sw-rail-button:active,
-menubutton.sw-rail-button > button:active {
-  background: var(--sw-pressed-bg-color);
-}
-
-.sw-rail-badge {
-  min-width: var(--sw-space-lg);
-  min-height: var(--sw-space-xxxl);
-  margin: var(--sw-space-xxs) var(--sw-space-xxs) 0 0;
-  padding: 0 var(--sw-space-xs);
-  border-radius: var(--sw-space-xxxl);
-  background: var(--accent-bg-color);
-  color: var(--accent-fg-color);
-  font-size: var(--sw-text-caption);
-  font-weight: bold;
-}
-
-button.sw-rail-account box {
-  border-spacing: var(--sw-space-xxs);
-}
-
-.sw-rail-initial {
-  font-size: var(--sw-text-small);
-}
-
-separator.sw-rail-separator {
-  min-width: calc(2 * var(--sw-space-xxl));
-  min-height: var(--sw-control-border-width);
-  margin: var(--sw-space-lg) 0;
-  background: var(--border-color);
+button.sw-compose.sw-quiet-compose > box {
+  border-spacing: var(--sw-space-xl);
 }
 
 /* The command palette (ML-022): its rows in the theme's corners and selection. */
@@ -516,8 +880,133 @@ list.sw-palette-list > row:selected {
   background: var(--sw-selected-bg-color);
 }
 
+/* ==== superhuman: palette ==== */
+/* The command palette over the whole window (Superhuman's Cmd+K): a dimmed window, a card a
+   fifth of the way down, the query large in the theme's monospace face, one quiet line per
+   command with its keycaps at the end, light headings over the groups of the empty query. The
+   card's place and width are the palette's (app/src/palette.rs); it fades in over less than
+   --sw-motion. */
+.sw-palette-backdrop {
+  background-color: rgb(from var(--shade-color) r g b / calc(alpha * 2.4));
+}
+
+/* The card is raised over the dimmed window: the popover colour, or a step lighter where the
+   theme's popover is darker than its window (Omarchy's darker_background read as a hole); never
+   below the composer card that the pickers (and the palette) open over. */
+.sw-palette-card {
+  border: var(--sw-control-border-width) solid var(--border-color);
+  border-radius: var(--sw-radius);
+  background-color: var(--sw-raised-bg-color);
+  color: var(--popover-fg-color);
+  box-shadow: 0 var(--sw-space-xxl) calc(3 * var(--sw-space-huge))
+    rgb(from var(--shade-color) r g b / calc(alpha * 2));
+}
+
+.sw-palette-card entry.sw-palette-search,
+.sw-palette-card entry.sw-palette-search:focus-within {
+  min-height: calc(4 * var(--sw-space-xxl) + var(--sw-space-lg));
+  margin: 0;
+  padding: 0 var(--sw-space-huge);
+  border: none;
+  border-radius: var(--sw-radius) var(--sw-radius) 0 0;
+  outline: none;
+  background: none;
+  box-shadow: none;
+  font-family: var(--sw-font-mono);
+  font-size: calc(var(--sw-text-heading) * 1.25);
+}
+
+.sw-palette-card entry.sw-palette-search > image {
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-palette-card entry.sw-palette-search > text > placeholder {
+  color: var(--sw-secondary-fg-color);
+}
+
+separator.sw-palette-separator {
+  min-height: var(--sw-control-border-width);
+  margin: 0;
+  background: var(--border-color);
+}
+
+/* The last row fades into the card's edge while there is more below it: to the card's own
+   colour at no alpha, not `transparent` (transparent black, a grey band halfway). */
+.sw-palette-card scrolledwindow.sw-palette-scroll > undershoot.bottom {
+  background: linear-gradient(to top, var(--sw-raised-bg-color),
+    alpha(var(--sw-raised-bg-color), 0));
+  min-height: calc(2 * var(--sw-space-huge));
+}
+
+.sw-palette-card list.sw-palette-list {
+  padding: var(--sw-space-md);
+}
+
+.sw-palette-card list.sw-palette-list > row {
+  padding: 0;
+  border-radius: var(--sw-radius-small);
+  color: var(--sw-raised-secondary-fg-color);
+}
+
+/* Secondary text on the card reads on a hovered and the selected row too (phase C: it fell to
+   4.1:1 on a hovered row in Tokyo Night and Gruvbox): the raised card's own secondary colour. */
+.sw-palette-card .sw-secondary {
+  color: var(--sw-raised-secondary-fg-color);
+}
+
+.sw-palette-card list.sw-palette-list > row:hover {
+  background: var(--sw-hover-bg-color);
+}
+
+.sw-palette-card list.sw-palette-list > row:selected {
+  background: var(--sw-selected-bg-color);
+  color: var(--popover-fg-color);
+}
+
+.sw-palette-row-content {
+  min-height: calc(3 * var(--sw-space-xxl) + var(--sw-space-sm));
+  padding: 0 var(--sw-space-xxl);
+  border-spacing: var(--sw-space-lg);
+}
+
+.sw-palette-card .sw-palette-title,
+.sw-palette-card .sw-palette-alias {
+  font-size: var(--sw-text-title);
+}
+
 .sw-palette-keys {
+  border-spacing: var(--sw-space-md);
+}
+
+.sw-palette-step {
+  border-spacing: var(--sw-space-xs);
+}
+
+.sw-palette-card .sw-keycap {
+  min-width: calc(var(--sw-space-huge) + var(--sw-space-xxs));
+  padding: var(--sw-space-xxs) var(--sw-space-md);
+  border: var(--sw-control-border-width) solid var(--border-color);
+  border-radius: var(--sw-radius-small);
+  background-color: var(--sw-control-bg-color);
+  color: var(--sw-raised-secondary-fg-color);
+  font-family: var(--sw-font-mono);
   font-size: var(--sw-text-small);
+}
+
+.sw-palette-card list.sw-palette-list > row:selected .sw-keycap {
+  color: var(--popover-fg-color);
+}
+
+.sw-palette-heading {
+  padding: var(--sw-space-lg) var(--sw-space-xxl) var(--sw-space-xs);
+  font-size: var(--sw-text-caption);
+  font-weight: var(--sw-weight-bold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sw-palette-card .sw-palette-empty {
+  padding: var(--sw-space-huge);
 }
 
 /* Message list: no ligatures in list text (S3: 30–36 % less layout). */
@@ -526,50 +1015,233 @@ list.sw-palette-list > row:selected {
   font-feature-settings: "liga" 0, "calt" 0;
 }
 
+/* ==== superhuman: rows ==== */
+/* Rows (the Superhuman pass, 2026-10-28; docs/superhuman/rows.md) run edge to edge, square and
+   without gaps. Hover is a quiet fill, at once: the quick actions' backdrop takes the same
+   colour. The selected row's one signal is the accent tint and a bar at its start; a focused
+   row that isn't selected (the select mode's cursor) shows the bar alone, never libadwaita's
+   square focus ring. */
 listview.sw-message-list > row,
 list.sw-message-list > row {
-  margin: 0 var(--sw-space-lg) var(--sw-space-xxs);
+  margin: 0;
   padding: 0;
-  border-radius: var(--sw-radius);
+  border-radius: 0;
   background: none;
 }
 
 listview.sw-message-list > row:hover,
 list.sw-message-list > row:hover {
-  background: var(--sw-hover-bg-color);
+  background: var(--sw-row-hover-bg-color);
 }
 
 listview.sw-message-list > row:selected,
 list.sw-message-list > row:selected {
-  background: var(--sw-selected-bg-color);
+  background: var(--sw-row-selected-bg-color);
+  box-shadow: inset calc(3 * var(--sw-control-border-width)) 0 var(--accent-bg-color);
+}
+
+/* No ring outside the select mode: the selection is the cursor there, and the keyboard focus
+   follows it (phase B: a filter left a square ring on row 0 beside the selection). A focused
+   row that isn't selected (nothing selected yet in Split, Tab into the list) shows the bar
+   alone, as the select mode's cursor does, so the keyboard's place still shows. */
+listview.sw-message-list:not(.sw-select-mode) > row:focus-visible {
+  outline: none;
+}
+
+listview.sw-message-list:not(.sw-select-mode) > row:focus-visible:not(:selected) {
+  box-shadow: inset calc(3 * var(--sw-control-border-width)) 0 var(--accent-bg-color);
+}
+
+/* In the select mode the tint says chosen and the bar says cursor: the chosen rows lose the
+   bar, the focused row takes it, never the square ring over the tint (the visual QA). */
+listview.sw-message-list.sw-select-mode > row:selected {
+  box-shadow: none;
+}
+
+listview.sw-message-list.sw-select-mode > row:focus-visible {
+  outline: none;
+  box-shadow: inset calc(3 * var(--sw-control-border-width)) 0 var(--accent-bg-color);
+}
+
+/* Date sections: a quiet caption over the sender column, not a gap (libadwaita pads list
+   headers 18 px above and 6 below). */
+listview.sw-message-list > header {
+  padding: 0;
 }
 
 .sw-section-header {
-  padding: var(--sw-space-xxl) var(--sw-space-xl) var(--sw-space-md);
+  padding: var(--sw-space-xl) var(--sw-space-xl) var(--sw-space-xs)
+    calc(var(--sw-space-lg) + var(--sw-size-list-gutter));
   font-size: var(--sw-text-caption);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--sw-secondary-fg-color);
+  font-weight: var(--sw-weight-medium);
+  letter-spacing: 0.06em;
+  color: var(--sw-tertiary-fg-color);
 }
 
+/* One line, --sw-size-list-row high (the gutter's height; the row's layout puts a narrow list's
+   rows on two lines): the dot's gutter, the sender column, the subject and the snippet in one
+   size, the indicators, and the date small, in capitals and tabular figures, in a column as wide
+   as the widest date (the row's layout measures it). */
 .sw-message-row {
-  padding: var(--sw-space-xl) var(--sw-space-xl) var(--sw-space-xl) var(--sw-space-md);
-  border-spacing: var(--sw-space-xl);
+  padding: 0 var(--sw-space-xxl) 0 var(--sw-space-lg);
 }
 
-.sw-sender {
-  font-size: var(--sw-text-subtitle);
+.sw-row-gutter {
+  min-width: var(--sw-size-list-gutter);
+  min-height: var(--sw-size-list-row);
 }
 
-.sw-unread .sw-sender,
-.sw-unread .sw-subject {
-  font-weight: bold;
+/* The optional avatar (RowContext::avatars) sits between the gutter and the sender column. */
+.sw-message-row > .sw-avatar {
+  margin-right: var(--sw-space-lg);
 }
 
-.sw-snippet,
-.sw-time {
+/* The sender column at its widest, gap included: the list's one ruler, beside its rows, draws
+   nothing, and the rows' layout narrows the column in a narrower list (row.rs, SENDER_SHARE). */
+.sw-row-ruler {
+  min-width: var(--sw-size-list-sender);
+  margin-right: var(--sw-space-xxl);
+}
+
+.sw-row-who {
+  margin-right: var(--sw-space-xxl);
+  border-spacing: var(--sw-space-md);
+}
+
+.sw-message-row .sw-sender,
+.sw-message-row .sw-row-draft,
+.sw-message-row .sw-subject,
+.sw-message-row .sw-snippet {
+  font-size: var(--sw-text-title);
+}
+
+.sw-message-row .sw-subject {
+  margin-right: var(--sw-space-lg);
+}
+
+.sw-message-row .sw-snippet {
+  margin-right: var(--sw-space-xl);
+}
+
+.sw-message-row .sw-thread-count {
   font-size: var(--sw-text-small);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Quiet: the snippet's colour (below), regular weight, barely tracked, so the date column is
+   never the loudest thing in the list (the visual QA). */
+.sw-message-row .sw-time {
+  margin-left: var(--sw-space-md);
+  font-size: var(--sw-text-small);
+  font-weight: var(--sw-weight-regular);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.sw-message-row .sw-star,
+.sw-message-row .sw-indicator {
+  margin: 0 var(--sw-space-xxs);
+  -gtk-icon-size: var(--sw-text-body);
+}
+
+/* Right to left the row's layout mirrors its parts (RowLayout); their CSS sides follow here:
+   the padding, the gaps after the names, the subject and the snippet, the date's gap and the
+   selection's bar, at the line's start on the right (phase B). */
+.sw-message-row:dir(rtl) {
+  padding: 0 var(--sw-space-lg) 0 var(--sw-space-xxl);
+}
+
+.sw-row-who:dir(rtl) {
+  margin-right: 0;
+  margin-left: var(--sw-space-xxl);
+}
+
+.sw-message-row .sw-subject:dir(rtl) {
+  margin-right: 0;
+  margin-left: var(--sw-space-lg);
+}
+
+.sw-message-row .sw-snippet:dir(rtl) {
+  margin-right: 0;
+  margin-left: var(--sw-space-xl);
+}
+
+.sw-message-row .sw-time:dir(rtl) {
+  margin-left: 0;
+  margin-right: var(--sw-space-md);
+}
+
+.sw-section-header:dir(rtl) {
+  padding: var(--sw-space-xl) calc(var(--sw-space-lg) + var(--sw-size-list-gutter))
+    var(--sw-space-xs) var(--sw-space-xl);
+}
+
+listview.sw-message-list > row:selected:dir(rtl) {
+  box-shadow: inset calc(-3 * var(--sw-control-border-width)) 0 var(--accent-bg-color);
+}
+
+listview.sw-message-list.sw-select-mode > row:selected:dir(rtl) {
+  box-shadow: none;
+}
+
+listview.sw-message-list.sw-select-mode > row:focus-visible:dir(rtl),
+listview.sw-message-list:not(.sw-select-mode) > row:focus-visible:not(:selected):dir(rtl) {
+  box-shadow: inset calc(-3 * var(--sw-control-border-width)) 0 var(--accent-bg-color);
+}
+
+/* Read rows are quiet; an unread row (sw-unread, the row's one state class) keeps the
+   foreground, and its weight comes from Pango. Every colour here is a theme role held at
+   4.5:1 on the list, a hovered and the selected row (domain/tests/theme.rs). */
+.sw-message-row .sw-sender,
+.sw-message-row .sw-subject {
+  color: var(--sw-read-fg-color);
+}
+
+.sw-message-row.sw-unread .sw-sender,
+.sw-message-row.sw-unread .sw-subject {
+  color: var(--window-fg-color);
+}
+
+/* The date takes the snippet's colour: tertiary, secondary on an unread row (phase B; it was
+   brighter than every snippet). */
+.sw-message-row .sw-snippet,
+.sw-message-row .sw-time,
+.sw-message-row .sw-thread-count {
+  color: var(--sw-tertiary-fg-color);
+}
+
+.sw-message-row.sw-unread .sw-snippet,
+.sw-message-row.sw-unread .sw-time,
+.sw-message-row .sw-indicator {
   color: var(--sw-secondary-fg-color);
+}
+
+.sw-message-row .sw-row-draft {
+  color: var(--sw-draft-fg-color);
+}
+
+listview.sw-message-list > row:hover .sw-snippet,
+listview.sw-message-list > row:hover .sw-time,
+listview.sw-message-list > row:hover .sw-thread-count {
+  color: var(--sw-hover-tertiary-fg-color);
+}
+
+listview.sw-message-list > row:hover .sw-message-row.sw-unread .sw-snippet,
+listview.sw-message-list > row:hover .sw-message-row.sw-unread .sw-time,
+listview.sw-message-list > row:hover .sw-indicator {
+  color: var(--sw-hover-secondary-fg-color);
+}
+
+listview.sw-message-list > row:selected .sw-snippet,
+listview.sw-message-list > row:selected .sw-time,
+listview.sw-message-list > row:selected .sw-thread-count {
+  color: var(--sw-selected-tertiary-fg-color);
+}
+
+listview.sw-message-list > row:selected .sw-message-row.sw-unread .sw-snippet,
+listview.sw-message-list > row:selected .sw-message-row.sw-unread .sw-time,
+listview.sw-message-list > row:selected .sw-indicator {
+  color: var(--sw-selected-secondary-fg-color);
 }
 
 .sw-unread-dot {
@@ -577,36 +1249,6 @@ list.sw-message-list > row:selected {
   min-height: var(--sw-size-unread-dot);
   border-radius: var(--sw-size-unread-dot);
   background: var(--sw-unread-color);
-}
-
-.sw-thread-count {
-  padding: 0 var(--sw-space-sm);
-  border: var(--sw-control-border-width) solid var(--border-color);
-  border-radius: var(--sw-radius-small);
-  font-size: var(--sw-text-caption);
-  color: var(--sw-secondary-fg-color);
-}
-
-/* A hovered or selected row's fill lowers the contrast of secondary text, so it takes the
-   colour made to read there (4.5:1), and the thread count's box a border that shows on the
-   fill: the plain border is about the selected fill's own colour. */
-listview.sw-message-list > row:hover .sw-snippet,
-listview.sw-message-list > row:hover .sw-time,
-listview.sw-message-list > row:hover .sw-thread-count,
-listview.sw-message-list > row:hover .sw-indicator {
-  color: var(--sw-hover-secondary-fg-color);
-}
-
-listview.sw-message-list > row:selected .sw-snippet,
-listview.sw-message-list > row:selected .sw-time,
-listview.sw-message-list > row:selected .sw-thread-count,
-listview.sw-message-list > row:selected .sw-indicator {
-  color: var(--sw-selected-secondary-fg-color);
-}
-
-listview.sw-message-list > row:hover .sw-thread-count,
-listview.sw-message-list > row:selected .sw-thread-count {
-  border-color: alpha(currentColor, 0.3);
 }
 
 .sw-star {
@@ -626,7 +1268,7 @@ entry.sw-search {
   box-shadow: none;
 }
 
-/* Filter chips (All, Unread, Starred, Attachments); toggle buttons or .sw-selected. */
+/* Chips: the search's scope (this folder, all folders); toggle buttons or .sw-selected. */
 .sw-chip {
   min-height: calc(var(--sw-size-chip) - 2 * var(--sw-control-border-width));
   padding: 0 var(--sw-space-xl);
@@ -634,7 +1276,7 @@ entry.sw-search {
   border-radius: var(--sw-radius-small);
   background: none;
   box-shadow: none;
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 .sw-chip:hover {
@@ -647,10 +1289,10 @@ entry.sw-search {
 
 .sw-chip:checked,
 .sw-chip.sw-selected {
-  border-color: var(--sw-chip-selected-bg-color);
+  border-color: var(--sw-chip-selected-fg-color);
   background: var(--sw-chip-selected-bg-color);
   color: var(--sw-chip-selected-fg-color);
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 /* Avatars: initials on a tint chosen from the address (sw-avatar-tint-<0..6>). */
@@ -659,7 +1301,7 @@ entry.sw-search {
   min-height: var(--sw-size-avatar);
   border-radius: var(--sw-avatar-radius);
   font-size: var(--sw-text-small);
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 .sw-avatar.sw-avatar-small {
@@ -728,9 +1370,13 @@ separator.sw-toolbar-separator {
   background: var(--border-color);
 }
 
+/* The subject: a calm heading (about 21 px at the default size), bold rather than heavy. */
+/* Inset as the rows and cards below it, so the heading's text starts where theirs do. */
 .sw-subject-heading {
-  font-size: var(--sw-text-display);
-  font-weight: bold;
+  padding: 0 var(--sw-space-md) var(--sw-space-huge);
+  font-size: calc(1.5 * var(--sw-text-title));
+  font-weight: var(--sw-weight-bold);
+  letter-spacing: -0.01em;
 }
 
 .sw-tag {
@@ -741,29 +1387,18 @@ separator.sw-toolbar-separator {
   color: var(--sw-secondary-fg-color);
 }
 
+/* A message is no box of its own: the conversation draws a hairline between messages. */
 .sw-message-card {
-  padding: var(--sw-space-huge);
-  border: var(--sw-control-border-width) solid var(--border-color);
-  border-radius: var(--sw-radius);
-  border-spacing: var(--sw-space-huge);
+  padding: var(--sw-space-huge) var(--sw-space-md) calc(var(--sw-space-huge) + var(--sw-space-xs));
+  border-spacing: var(--sw-space-xxl);
 }
 
 .sw-message-header {
-  border-spacing: var(--sw-space-xxl);
+  border-spacing: var(--sw-space-lg);
 }
 
 .sw-address {
   color: var(--sw-secondary-fg-color);
-}
-
-.sw-collapsed-message {
-  padding: var(--sw-space-xl) var(--sw-space-huge);
-  border-bottom: var(--sw-control-border-width) solid var(--border-color);
-  border-spacing: var(--sw-space-xxl);
-}
-
-.sw-collapsed-message:hover {
-  background: var(--sw-hover-bg-color);
 }
 
 /* HTML with colours of its own keeps its design on a light card (DESIGN.md); the reader
@@ -786,25 +1421,33 @@ separator.sw-toolbar-separator {
   background: var(--window-bg-color);
 }
 
+/* The quick reply: one quiet line ("Reply to Tomas Berg…") that opens when it takes the focus
+   or holds text. */
 .sw-quick-reply {
-  padding: var(--sw-space-xxl) var(--sw-space-xxxl);
+  margin-top: var(--sw-space-huge);
+  padding: var(--sw-space-xl) var(--sw-space-xxxl);
   border: var(--sw-control-border-width) solid var(--border-color);
   border-radius: var(--sw-radius);
-  background: var(--sidebar-bg-color);
-  border-spacing: var(--sw-space-xl);
+  background: var(--sw-control-bg-color);
+  border-spacing: var(--sw-space-lg);
 }
 
-/* Attachment cards. */
+.sw-quick-reply.sw-quick-reply-open {
+  padding: var(--sw-space-xxl) var(--sw-space-xxxl);
+  background: none;
+}
+
+/* Attachment cards: quiet tiles on a light fill, no border (the fork's Superhuman pass). */
 .sw-attachment-card {
   padding: var(--sw-space-xl);
-  border: var(--sw-control-border-width) solid var(--border-color);
+  border: var(--sw-control-border-width) solid transparent;
   border-radius: var(--sw-radius);
-  background: var(--card-bg-color);
+  background: var(--sw-hover-bg-color);
   border-spacing: var(--sw-space-xl);
 }
 
 .sw-attachment-card:hover {
-  border-color: var(--sw-secondary-fg-color);
+  background: var(--sw-pressed-bg-color);
 }
 
 .sw-attachment-type {
@@ -814,7 +1457,7 @@ separator.sw-toolbar-separator {
   background: var(--sw-chip-selected-bg-color);
   color: var(--sw-chip-selected-fg-color);
   font-size: var(--sw-text-caption);
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 .sw-attachment-meta {
@@ -861,7 +1504,7 @@ separator.sw-toolbar-separator {
 }
 
 .sw-banner-title {
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 .sw-banner-text {
@@ -913,7 +1556,7 @@ button.sw-banner-secondary:active {
 
 .sw-empty-title {
   font-size: var(--sw-text-heading);
-  font-weight: bold;
+  font-weight: var(--sw-weight-heavy);
 }
 
 .sw-empty-body,
@@ -921,21 +1564,18 @@ button.sw-banner-secondary:active {
   color: var(--sw-secondary-fg-color);
 }
 
-/* Message list (ML-026) */
+/* Message list (ML-026): while a search is typed or runs, the field and the scope, in the list's
+   header row since the Superhuman pass (the layout block). */
 .sw-list-head {
-  padding: var(--sw-space-md) var(--sw-space-xl) var(--sw-space-lg);
+  border-spacing: var(--sw-space-lg);
 }
 
 .sw-list-head entry.sw-search {
   margin: 0;
 }
 
-.sw-chips {
-  border-spacing: var(--sw-space-md);
-}
-
 /* Search (ML-082): the Search key at the end of the empty field (the mock's "/"), the scope row
-   under the chips while a search runs from a folder, and the suggestions under the field. */
+   under the field while a search runs from a folder, and the suggestions under the field. */
 .sw-search-key {
   margin-right: var(--sw-space-lg);
   padding: 0 var(--sw-space-md);
@@ -982,7 +1622,7 @@ list.sw-search-suggestions-list > row:selected {
 }
 
 .sw-search-suggestion-term {
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 .sw-search-suggestion-detail,
@@ -993,38 +1633,18 @@ list.sw-search-suggestions-list > row:selected {
 }
 
 list.sw-search-suggestions-list > row.sw-search-suggestion-hint .sw-search-suggestion-term {
-  font-weight: normal;
-}
-
-/* Constant row heights: the mock's 1.45 is about 1.1 in GTK (S3), and two lines of snippet are
-   kept even for a short one, so rows don't change size as pages fill in. */
-.sw-message-list .sw-snippet {
-  line-height: 1.1;
-  min-height: 2.9em;
-}
-
-.sw-message-row .sw-unread-dot {
-  margin-top: var(--sw-space-md);
-}
-
-.sw-message-row .sw-row-indicators {
-  min-width: var(--sw-space-xxxl);
-  margin-top: var(--sw-space-huge);
-}
-
-.sw-message-row .sw-star,
-.sw-message-row .sw-indicator {
-  -gtk-icon-size: var(--sw-text-body);
+  font-weight: var(--sw-weight-regular);
 }
 
 /* Reader (ML-027) */
 
-/* Plain-text bodies: GTK multiplies the font's own line height (S3), so 1.35 here is about
-   the 1.55 of message text in a browser (DESIGN.md "Typography"). */
+/* Plain-text bodies: GTK multiplies the font's own line height (S3); Adwaita Sans is about 1.2
+   of its size, so 1.29 here is the 1.55 of message text in a browser (DESIGN.md
+   "Typography"; it was 1.35, for Liberation Sans). */
 textview.sw-reader-plain,
 textview.sw-reader-plain > text {
   background: none;
-  line-height: 1.35;
+  line-height: 1.29;
 }
 
 .sw-reader-details {
@@ -1032,8 +1652,7 @@ textview.sw-reader-plain > text {
 }
 
 .sw-reader-attachments {
-  padding-top: var(--sw-space-xxl);
-  border-top: 1px solid var(--border-color);
+  padding-top: var(--sw-space-xs);
 }
 
 .sw-reader-notice {
@@ -1066,7 +1685,7 @@ dialog.sw-setup sheet {
 
 .sw-setup-title {
   font-size: var(--sw-text-heading);
-  font-weight: bold;
+  font-weight: var(--sw-weight-heavy);
 }
 
 .sw-setup-subtitle,
@@ -1240,7 +1859,7 @@ dropdown.sw-setup-security > button:hover {
 
 .sw-setup-provider,
 .sw-setup-alert-title {
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 .sw-setup-card-note {
@@ -1361,31 +1980,80 @@ button.sw-setup-secondary:active {
 /* Triage (M4): the select mode's checkboxes, the rows' quick actions, the reader's batch page
    and the folder menu, in the theme's roles. Move to… is a palette (sw-palette-*). */
 
-/* The checkbox takes the avatar's place and size, so the row's text doesn't move. */
+/* ==== superhuman: rows ==== */
+/* The select mode's checkbox lies round the unread dot's place in the gutter, so the row's text
+   doesn't move and the dot still shows inside an empty box: a light square (a hairline in the
+   tertiary text, two dots wide), filled with the accent once ticked (phase B; libadwaita's
+   20 px box with its 2 px edge was the heaviest thing on the row). */
 .sw-message-row checkbutton.sw-row-check {
-  min-width: var(--sw-size-avatar);
-  min-height: var(--sw-size-avatar);
+  min-width: 0;
+  min-height: 0;
   padding: 0;
 }
 
 .sw-message-row checkbutton.sw-row-check > check {
+  min-width: calc(2 * var(--sw-size-unread-dot));
+  min-height: calc(2 * var(--sw-size-unread-dot));
   margin: 0;
-  border-radius: var(--sw-radius-small);
+  padding: var(--sw-control-border-width);
+  border-radius: calc(var(--sw-radius-small) / 2);
+  background: none;
+  box-shadow: inset 0 0 0 var(--sw-control-border-width) var(--sw-tertiary-fg-color);
+  -gtk-icon-size: calc(2 * var(--sw-size-unread-dot));
 }
 
-/* Quick actions stay inside the sender's line, so a hovered row keeps its height. */
+.sw-message-row checkbutton.sw-row-check > check:checked {
+  background: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+  box-shadow: none;
+}
+
+/* Quick actions (Done, Remind Me, Delete, Star) lie over the date and the indicators, on the
+   row's own fill that fades in over the snippet's end (from the other side right to left), so
+   nothing under them moves or shows. */
+.sw-quick-actions {
+  padding-left: var(--sw-space-huge);
+  border-spacing: var(--sw-space-xxs);
+}
+
+.sw-quick-actions:dir(rtl) {
+  padding-left: 0;
+  padding-right: var(--sw-space-huge);
+}
+
+listview.sw-message-list > row:hover .sw-quick-actions {
+  background-image: linear-gradient(to right, alpha(var(--sw-row-hover-bg-color), 0),
+      var(--sw-row-hover-bg-color) var(--sw-space-huge));
+}
+
+listview.sw-message-list > row:hover .sw-quick-actions:dir(rtl) {
+  background-image: linear-gradient(to left, alpha(var(--sw-row-hover-bg-color), 0),
+      var(--sw-row-hover-bg-color) var(--sw-space-huge));
+}
+
+listview.sw-message-list > row:selected .sw-quick-actions {
+  background-image: linear-gradient(to right, alpha(var(--sw-row-selected-bg-color), 0),
+      var(--sw-row-selected-bg-color) var(--sw-space-huge));
+}
+
+listview.sw-message-list > row:selected .sw-quick-actions:dir(rtl) {
+  background-image: linear-gradient(to left, alpha(var(--sw-row-selected-bg-color), 0),
+      var(--sw-row-selected-bg-color) var(--sw-space-huge));
+}
+
 .sw-quick-actions button.sw-quick-action {
   min-width: 0;
   min-height: 0;
-  padding: 0 var(--sw-space-xs);
+  padding: var(--sw-space-sm) var(--sw-space-md);
   border: none;
+  border-radius: var(--sw-radius-small);
   background: none;
   box-shadow: none;
   color: var(--sw-hover-secondary-fg-color);
 }
 
 .sw-quick-actions button.sw-quick-action:hover {
-  background: var(--sw-selected-bg-color);
+  background: var(--sw-hover-bg-color);
   color: var(--window-fg-color);
 }
 
@@ -1394,11 +2062,50 @@ button.sw-setup-secondary:active {
 }
 
 .sw-quick-actions button.sw-quick-action image {
-  -gtk-icon-size: var(--sw-text-body);
+  -gtk-icon-size: var(--sw-text-title);
 }
 
 listview.sw-message-list > row:selected .sw-quick-actions button.sw-quick-action {
   color: var(--sw-selected-secondary-fg-color);
+}
+
+/* The hovered icon brightens on the selected row too (the rule above outranked the hover's). */
+listview.sw-message-list > row:selected .sw-quick-actions button.sw-quick-action:hover {
+  color: var(--window-fg-color);
+}
+
+/* ==== superhuman: remind ==== */
+/* Where nothing can be reminded (Sent, Drafts, Trash, Junk) a row's clock quick action is
+   dimmed as the toolbar's disabled Remind Me is, hovered too; a click says why (phase C, the
+   second review). */
+.sw-quick-actions button.sw-quick-action.sw-quick-off,
+listview.sw-message-list > row:selected .sw-quick-actions button.sw-quick-action.sw-quick-off {
+  opacity: 0.5;
+}
+
+.sw-quick-actions button.sw-quick-action.sw-quick-off:hover {
+  background: none;
+}
+
+/* Remind Me (phase C): the clock on a conversation back from Reminders, in the reminder's purple
+   (a theme role held at 3:1 on the window, the list, a hovered and the selected row,
+   domain/tests/theme.rs), as the paperclip's size in a slot of its own before it; and the
+   reader's quiet line under the subject while a conversation waits. */
+.sw-message-row .sw-indicator.sw-reminded,
+listview.sw-message-list > row:hover .sw-indicator.sw-reminded,
+listview.sw-message-list > row:selected .sw-indicator.sw-reminded {
+  color: var(--sw-reminder-color);
+}
+
+.sw-reader-reminder {
+  margin: calc(-1 * var(--sw-space-xxl)) var(--sw-space-md) var(--sw-space-xxl);
+  border-spacing: var(--sw-space-sm);
+  font-size: var(--sw-text-small);
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-reader-reminder image {
+  -gtk-icon-size: var(--sw-text-small);
 }
 
 /* The reader in the select mode: the batch actions as chips under the count. */
@@ -1416,7 +2123,7 @@ button.sw-batch-action {
   border: var(--sw-control-border-width) solid var(--border-color);
   background: none;
   box-shadow: none;
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 button.sw-batch-action:hover {
@@ -1440,7 +2147,7 @@ popover.sw-folder-menu > contents {
 popover.sw-folder-menu button.sw-menu-item {
   min-height: var(--sw-space-control-height);
   padding: 0 var(--sw-space-control-padding-x);
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 popover.sw-folder-menu button.sw-menu-item:hover {
@@ -1460,7 +2167,7 @@ button.sw-attachment-action {
   box-shadow: none;
   color: var(--accent-color);
   font-size: var(--sw-text-small);
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 button.sw-attachment-action:hover {
@@ -1491,7 +2198,7 @@ button.sw-reader-sender-hide {
   min-height: 0;
   padding: var(--sw-space-xxs) var(--sw-space-md);
   font-size: var(--sw-text-small);
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 /* Show Original: the raw source in the Omarchy font on the dialog's surface. */
@@ -1507,17 +2214,18 @@ textview.sw-original-text > text {
   border-top: var(--sw-control-border-width) solid var(--border-color);
 }
 
-/* Conversations (ML-057): the collapsed messages as one-line rows in the cards' frame, the
-   expanded card's sender block as the button that collapses it, and the "N earlier messages"
-   fold as a quiet pill between rules. Every colour and radius is the theme's. */
+/* Conversations (ML-057; the fork's Superhuman pass): the collapsed messages as quiet one-line
+   rows between hairlines, the expanded card's sender block as the button that collapses it,
+   and "N more messages" as a quiet row with the count in a round badge. Every colour and radius
+   is the theme's. */
 button.sw-collapsed-message {
   min-height: 0;
-  padding: var(--sw-space-lg) var(--sw-space-huge);
-  border: var(--sw-control-border-width) solid var(--border-color);
-  border-radius: var(--sw-radius);
+  padding: var(--sw-space-xl) var(--sw-space-md);
+  border: none;
+  border-radius: var(--sw-radius-small);
   background: none;
   box-shadow: none;
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 button.sw-collapsed-message:hover {
@@ -1529,7 +2237,7 @@ button.sw-collapsed-message:active {
 }
 
 button.sw-collapsed-message .sw-strong {
-  font-weight: bold;
+  font-weight: var(--sw-weight-bold);
 }
 
 button.sw-reader-card-header {
@@ -1539,35 +2247,55 @@ button.sw-reader-card-header {
   border-radius: var(--sw-radius-small);
   background: none;
   box-shadow: none;
-  font-weight: normal;
-}
-
-button.sw-reader-card-header:hover {
-  background: var(--sw-hover-bg-color);
+  font-weight: var(--sw-weight-regular);
 }
 
 button.sw-reader-fold {
   min-height: 0;
-  padding: var(--sw-space-xs) 0;
+  padding: var(--sw-space-xl) var(--sw-space-md);
   border: none;
+  border-radius: var(--sw-radius-small);
   background: none;
   box-shadow: none;
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
-button.sw-reader-fold separator {
-  background: var(--border-color);
+button.sw-reader-fold:hover {
+  background: var(--sw-hover-bg-color);
+}
+
+.sw-reader-fold-line {
+  border-spacing: var(--sw-space-xl);
+}
+
+/* The folded messages' count in a quiet round badge (a stack of rules read as a menu). */
+.sw-reader-fold-badge {
+  min-width: calc(2 * var(--sw-space-lg));
+  padding: 0 var(--sw-space-sm);
+  border: var(--sw-control-border-width) solid var(--border-color);
+  border-radius: 999px;
+  color: var(--sw-secondary-fg-color);
+  font-weight: var(--sw-weight-medium);
+}
+
+button.sw-reader-fold:hover .sw-reader-fold-badge {
+  color: var(--window-fg-color);
+}
+
+/* A collapsed message's date, as the list's date column shows it: small capitals, spaced. */
+.sw-reader-row-date {
+  font-size: var(--sw-text-caption);
+  font-weight: var(--sw-weight-medium);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .sw-reader-fold-count {
-  padding: var(--sw-space-xxs) var(--sw-space-xl);
-  border: var(--sw-control-border-width) solid var(--border-color);
-  border-radius: var(--sw-radius-small);
   color: var(--sw-secondary-fg-color);
+  font-weight: var(--sw-weight-medium);
 }
 
 button.sw-reader-fold:hover .sw-reader-fold-count {
-  background: var(--sw-hover-bg-color);
   color: var(--window-fg-color);
 }
 
@@ -1600,66 +2328,100 @@ popover.sw-link-warning > contents {
   margin-bottom: var(--sw-space-xl);
 }
 
-/* The "…" that collapses a plain-text body's quoted history. */
+/* The "•••" pill that collapses a plain-text body's quoted history, as the HTML bodies' toggle
+   (the reader's QUOTES_JS) draws it. */
 button.sw-quote-toggle {
   min-height: 0;
   min-width: 0;
-  padding: 0 var(--sw-space-md);
-  border-radius: var(--sw-radius-small);
+  margin-top: var(--sw-space-lg);
+  padding: 0 var(--sw-space-lg);
+  border-radius: 9999px;
   background: var(--sw-hover-bg-color);
-  font-weight: bold;
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-caption);
+  font-weight: var(--sw-weight-bold);
+  letter-spacing: 0.15em;
 }
 
 button.sw-quote-toggle:hover {
   background: var(--sw-pressed-bg-color);
+  color: var(--window-fg-color);
 }
 
 /* Replying from the reader (M6: ML-068, ML-069). The cards' Reply, Reply all and Forward are the
-   flat icon buttons; the quick reply (the .sw-quick-reply box above) holds a two-row text area
-   in the reading font with its placeholder over it, the hint to expand it, and Send in the
-   accent fill with its keys lighter beside the bold title (the mock's). A Send with nothing to
-   send takes the selected chip's pair, as a disabled primary button does. */
-/* The accent border marks the focus in the text area, as in the setup assistant's fields. */
+   flat icon buttons; the inline reply (the .sw-quick-reply box above) holds its recipients line,
+   a text area in the reading font with its placeholder over it, Send with its keys beside it,
+   and Pop Out. A Send with nothing to send takes the selected chip's pair, as a disabled
+   primary button does. */
+/* The open box marks the focus with the controls' stronger border, not the accent. */
 box.sw-quick-reply:focus-within {
-  border-color: var(--accent-bg-color);
+  border-color: var(--sw-control-border-color);
 }
 
 textview.sw-quick-reply-text,
 textview.sw-quick-reply-text > text {
   background: none;
-  line-height: 1.35;
+  line-height: 1.29;
 }
 
+/* One line closed, four rows open. */
 textview.sw-quick-reply-text {
-  min-height: calc(2 * 1.6 * var(--sw-text-reading));
+  min-height: calc(1.55 * var(--sw-text-reading));
+}
+
+box.sw-quick-reply-open textview.sw-quick-reply-text {
+  min-height: calc(4 * 1.55 * var(--sw-text-reading));
 }
 
 .sw-quick-reply-placeholder {
   color: var(--sw-secondary-fg-color);
 }
 
-button.sw-quick-reply-expand {
+/* The recipients line ("Reply to Tomas Berg ▾"): quiet text that edits them. */
+button.sw-quick-reply-heading {
   min-height: 0;
-  padding: 0;
+  padding: var(--sw-space-xxs) var(--sw-space-xs);
+  margin: 0 0 0 calc(-1 * var(--sw-space-xs));
   border: none;
   background: none;
   box-shadow: none;
-  font-weight: normal;
+  color: var(--sw-secondary-fg-color);
+  font-weight: var(--sw-weight-regular);
 }
 
-button.sw-quick-reply-expand:hover label,
-button.sw-quick-reply-expand:focus-visible label {
+button.sw-quick-reply-heading:hover,
+button.sw-quick-reply-heading:focus-visible {
+  background: var(--sw-hover-bg-color);
+}
+
+button.sw-quick-reply-heading:hover label,
+button.sw-quick-reply-heading:focus-visible label {
   color: var(--window-fg-color);
 }
 
+.sw-quick-reply-fields {
+  margin-bottom: var(--sw-space-sm);
+}
+
+button.sw-quick-reply-pop {
+  color: var(--sw-secondary-fg-color);
+}
+
+button.sw-quick-reply-pop:hover {
+  color: var(--window-fg-color);
+}
+
+/* Send in the primary fill, its label alone (white on Adwaita in both modes); its keys sit
+   beside it, small and quiet (the fork's phase B). */
 button.sw-quick-reply-send {
   min-height: calc(var(--sw-size-chip) + var(--sw-space-xxs));
   padding: 0 var(--sw-space-xxl);
   border: none;
   border-radius: var(--sw-radius);
-  background: var(--accent-bg-color);
-  color: var(--accent-fg-color);
+  background: var(--sw-primary-bg-color);
+  color: var(--sw-primary-fg-color);
   box-shadow: none;
+  font-weight: var(--sw-weight-bold);
 }
 
 button.sw-quick-reply-send:hover {
@@ -1676,36 +2438,267 @@ button.sw-quick-reply-send:disabled {
   color: var(--sw-chip-selected-fg-color);
 }
 
-button.sw-quick-reply-send .sw-strong {
-  font-weight: bold;
-}
-
 .sw-quick-reply-send-keys {
-  font-weight: normal;
-  opacity: 0.75;
+  font-weight: var(--sw-weight-regular);
 }
 
-/* The composer (M6: ML-067, ML-071, ML-072), the approved mock's "New message" frame: the
-   header and the footer on the sidebar surface with a border, the fields and the toolbar on
-   the window's with a border below, recipient chips with the address's tint, the suggestions
-   in the popover colour, attachment cards, and Send in the accent. Since the user's UI tweak
-   (2026-10-08) it is a card docked over the panes at the window's bottom right, as Gmail's
-   composer: a border on the window's surface, the surfaces' radius on its top corners (on all
-   four expanded), no shadow. */
+/* ==== superhuman: reader ==== */
+/* The thread (the fork's Superhuman pass): no box around a message, a hairline between messages,
+   quiet one-line rows, the card's actions shown while the pointer or the focus is in the card
+   (opacity only, so they stay in the Tab chain), the sender's address beside the name likewise. */
+box.sw-reader-conversation > box.sw-reader-item:not(:first-child),
+box.sw-reader-conversation > button.sw-reader-fold:not(:first-child) {
+  border-top: var(--sw-control-border-width) solid var(--border-color);
+}
+
+.sw-reader-row-line {
+  border-spacing: var(--sw-space-xl);
+}
+
+/* A read message's row names its sender quietly, below the expanded card's sender in weight
+   and size; an unread one's is bold. */
+.sw-reader-row-sender {
+  font-weight: var(--sw-weight-regular);
+}
+
+button.sw-collapsed-message .sw-reader-row-sender.sw-strong {
+  font-weight: var(--sw-weight-bold);
+}
+
+.sw-reader-names {
+  border-spacing: var(--sw-space-xxs);
+}
+
+.sw-reader-sender-line {
+  border-spacing: var(--sw-space-md);
+}
+
+.sw-reader-sender {
+  font-size: var(--sw-text-title);
+  font-weight: var(--sw-weight-bold);
+}
+
+.sw-card-actions {
+  border-spacing: var(--sw-space-xxs);
+}
+
+.sw-reader-card .sw-card-action,
+.sw-reader-card .sw-address {
+  opacity: 0;
+  transition: opacity var(--sw-motion) ease-out;
+}
+
+.sw-reader-card:hover .sw-card-action,
+.sw-reader-card:focus-within .sw-card-action,
+.sw-reader-card .sw-card-action:checked,
+.sw-reader-card:hover .sw-address,
+.sw-reader-card:focus-within .sw-address {
+  opacity: 1;
+}
+
+.sw-reader-details {
+  margin-top: var(--sw-space-lg);
+}
+
+/* The remote-images banner of a message: a quiet line, its icon in the secondary text. */
+.sw-banner.sw-reader-banner {
+  padding: var(--sw-space-lg) var(--sw-space-xxl);
+  background: var(--sw-hover-bg-color);
+}
+
+.sw-reader-banner image.sw-accent {
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-quick-reply-actions,
+.sw-quick-reply-send-box {
+  border-spacing: var(--sw-space-lg);
+}
+
+/* The reader's toolbar: quiet icons that take the text colour on hover. */
+.sw-reader-toolbar button.sw-icon-button,
+.sw-reader-toolbar menubutton > button {
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-reader-toolbar button.sw-icon-button:hover,
+.sw-reader-toolbar menubutton > button:hover {
+  color: var(--window-fg-color);
+}
+
+/* A starred selection: Star is the filled star in the star colour. */
+.sw-reader-toolbar button.sw-icon-button.sw-starred,
+.sw-reader-toolbar button.sw-icon-button.sw-starred:hover {
+  color: var(--sw-star-color);
+}
+
+/* ==== superhuman: contact ==== */
+/* The contact pane (phase C, docs/superhuman/contact.md): Superhuman's right-hand pane in the
+   reading column's right margin, quiet as the thread beside it. The window's surface, no box,
+   border or hairline; the reader's type scale; what it lists in the secondary text, which
+   takes the text colour on hover, as the toolbar's icons do; the search link in the accent, as
+   links are. Its top lines up with the subject's (the column's clamp keeps the same gutter). */
+.sw-contact-pane {
+  padding: calc(2 * var(--sw-space-xxl)) calc(2 * var(--sw-space-xxl))
+    calc(2 * var(--sw-space-xxl)) calc(var(--sw-space-xxl) + var(--sw-space-sm));
+}
+
+/* Right to left the pane is in the column's left margin: mirrored, the narrower side still by
+   the column and the wider one by the window's edge. */
+.sw-contact-pane:dir(rtl) {
+  padding-right: calc(var(--sw-space-xxl) + var(--sw-space-sm));
+  padding-left: calc(2 * var(--sw-space-xxl));
+}
+
+.sw-contact-person {
+  margin-bottom: calc(2 * var(--sw-space-xxl));
+}
+
+.sw-avatar.sw-contact-monogram {
+  min-width: calc(4 * var(--sw-space-xxl));
+  min-height: calc(4 * var(--sw-space-xxl));
+  margin-bottom: var(--sw-space-xxl);
+  font-size: var(--sw-text-heading);
+  font-weight: var(--sw-weight-medium);
+}
+
+.sw-contact-name {
+  font-size: var(--sw-text-heading);
+  font-weight: var(--sw-weight-bold);
+}
+
+button.sw-contact-address,
+button.sw-contact-row,
+button.sw-contact-link {
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--sw-radius-small);
+  background: none;
+  box-shadow: none;
+  font-weight: var(--sw-weight-regular);
+  /* The keyboard's ring a little outside the words, which line up with the name's. */
+  outline-offset: var(--sw-space-xs);
+}
+
+button.sw-contact-address {
+  margin-top: var(--sw-space-xxs);
+  color: var(--sw-secondary-fg-color);
+}
+
+button.sw-contact-address:hover,
+button.sw-contact-row:hover .sw-contact-subject,
+button.sw-contact-row:hover .sw-contact-date {
+  color: var(--window-fg-color);
+}
+
+.sw-contact-history {
+  margin-top: var(--sw-space-lg);
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-small);
+}
+
+/* "Recent", as the sidebar names an account: small spaced capitals. */
+.sw-contact-heading {
+  margin-bottom: var(--sw-space-sm);
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-caption);
+  font-weight: var(--sw-weight-bold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+button.sw-contact-row {
+  padding: var(--sw-space-sm) 0;
+}
+
+.sw-contact-row-line {
+  border-spacing: var(--sw-space-xl);
+}
+
+.sw-contact-subject {
+  color: var(--sw-secondary-fg-color);
+}
+
+/* The date of their latest message there, as the reader's collapsed rows date theirs. */
+.sw-contact-date {
+  color: var(--sw-secondary-fg-color);
+  font-size: var(--sw-text-caption);
+  font-weight: var(--sw-weight-medium);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+button.sw-contact-link {
+  margin-top: calc(2 * var(--sw-space-lg));
+  color: var(--accent-color);
+}
+
+button.sw-contact-link:hover .sw-contact-link-text {
+  text-decoration-line: underline;
+}
+
+/* ==== superhuman: reader (phase C) ==== */
+/* A draft in a conversation: "Draft" in the draft colour where the date goes, on its card and
+   its collapsed row, as the list marks the conversation (it read as a sent message), and its
+   card's Edit draft in view without a hover. */
+.sw-reader-draft {
+  color: var(--sw-window-draft-fg-color);
+  font-weight: var(--sw-weight-medium);
+}
+
+.sw-reader-card .sw-card-action.sw-card-edit {
+  opacity: 1;
+}
+
+/* The open reply at the conversation's foot keeps room below it, so the column can scroll the
+   heading out of view whole when the reply needs more than the heading's own room (live.rs
+   reveal_delta): it never stops with the heading cut under the toolbar. */
+.sw-quick-reply.sw-quick-reply-open:last-child {
+  margin-bottom: calc(4 * var(--sw-space-huge));
+}
+
+/* The toolbar's strip keeps to the conversation's column: with the bar's padding (xxxl) its
+   margin is the column's (`.sw-reader-clamp`, 2 × xxl), so a pane narrower than the column
+   narrows both alike. */
+.sw-reader-strip {
+  margin: 0 calc(2 * var(--sw-space-xxl) - var(--sw-space-xxxl));
+}
+
+/* The composer (M6: ML-067, ML-071, ML-072), the approved mock's "New message" frame, made calm
+   in the fork's phase B (Superhuman's): one raised surface (lighter than the window in a dark
+   theme, at most the palette's raised card; the window's in a light one) with a neutral
+   hairline and an elevation shadow, no band
+   for the header or the footer, compact rows, recipient chips with the address's tint, the
+   suggestions in the popover colour, attachment cards, and the accent on Send alone. Docked
+   over the panes at the window's bottom right (the user's UI tweak, 2026-10-08), flush with
+   the window's right and bottom edges, whose border and corners go there; all four corners
+   expanded. */
+/* ==== superhuman: composer ==== */
 .sw-composer {
   border: var(--sw-control-border-width) solid var(--border-color);
   border-bottom: none;
   border-radius: var(--sw-radius) var(--sw-radius) 0 0;
-  background: var(--window-bg-color);
+  background: var(--sw-composer-bg-color);
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.14), 0 10px 32px rgb(0 0 0 / 0.26);
+}
+
+.sw-composer.sw-dock-edge {
+  border-right: none;
+  border-top-right-radius: 0;
+}
+
+.sw-composer.sw-dock-full {
+  border-left: none;
+  border-right: none;
+  border-radius: 0;
 }
 
 .sw-composer.sw-composer-expanded {
   border-bottom: var(--sw-control-border-width) solid var(--border-color);
   border-radius: var(--sw-radius);
-}
-
-.sw-composer.sw-composer-minimized .sw-composer-header {
-  border-bottom: none;
 }
 
 /* Behind an expanded card, the panes dim as under libadwaita's dialogs. */
@@ -1714,20 +2707,29 @@ button.sw-quick-reply-send .sw-strong {
 }
 
 .sw-composer-header {
-  min-height: var(--sw-size-toolbar);
-  padding: 0 var(--sw-space-xl) 0 var(--sw-space-xxxl);
-  border-bottom: var(--sw-control-border-width) solid var(--border-color);
-  background: var(--sidebar-bg-color);
-  border-spacing: var(--sw-space-lg);
+  min-height: calc(var(--sw-size-toolbar) - var(--sw-space-md));
+  padding: 0 var(--sw-space-md) 0 var(--sw-space-xxxl);
+  border-spacing: var(--sw-space-xxs);
+}
+
+.sw-composer.sw-composer-minimized .sw-composer-header {
+  background: var(--sw-composer-bg-color);
+}
+
+.sw-composer-header button.sw-icon-button,
+menubutton.sw-composer-menu > button {
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-composer-header button.sw-icon-button:hover,
+menubutton.sw-composer-menu > button:hover {
+  color: var(--window-fg-color);
 }
 
 .sw-composer-title {
-  font-weight: bold;
-  font-size: var(--sw-text-subtitle);
+  font-weight: var(--sw-weight-bold);
 }
 
-.sw-composer-dot,
-.sw-composer-from-caption,
 .sw-composer-field-label,
 .sw-composer-key-hint,
 .sw-composer-saved,
@@ -1736,14 +2738,15 @@ button.sw-quick-reply-send .sw-strong {
   color: var(--sw-secondary-fg-color);
 }
 
+/* From is a plain line: the sender as text, a click picks another. */
 menubutton.sw-composer-from > button {
-  min-height: calc(var(--sw-size-chip) - 2 * var(--sw-control-border-width));
-  padding: 0 var(--sw-space-xl);
-  border: var(--sw-control-border-width) solid var(--border-color);
+  min-height: var(--sw-size-chip);
+  padding: 0 var(--sw-space-xs);
+  border: none;
   border-radius: var(--sw-radius-small);
   background: none;
   box-shadow: none;
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 menubutton.sw-composer-from > button:hover {
@@ -1756,8 +2759,8 @@ menubutton.sw-composer-from > button:hover {
 }
 
 .sw-composer-row {
-  min-height: calc(var(--sw-size-chip) + 2 * var(--sw-space-md));
-  padding: var(--sw-space-sm) 0;
+  min-height: calc(var(--sw-size-chip) + 2 * var(--sw-space-xs));
+  padding: var(--sw-space-xxs) 0;
   border-spacing: var(--sw-space-lg);
 }
 
@@ -1775,8 +2778,8 @@ entry.sw-composer-subject {
 }
 
 entry.sw-composer-subject {
-  font-weight: bold;
-  font-size: var(--sw-text-subtitle);
+  font-weight: var(--sw-weight-bold);
+  font-size: var(--sw-text-title);
 }
 
 .sw-composer-chip {
@@ -1826,7 +2829,7 @@ button.sw-composer-ccbcc {
   background: none;
   box-shadow: none;
   color: var(--sw-secondary-fg-color);
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 button.sw-composer-ccbcc:hover {
@@ -1890,7 +2893,7 @@ button.sw-composer-undo {
   border: none;
   background: none;
   box-shadow: none;
-  font-weight: normal;
+  font-weight: var(--sw-weight-regular);
 }
 
 menubutton.sw-composer-style-button > button:hover,
@@ -1904,10 +2907,16 @@ button.sw-composer-undo {
 
 .sw-composer-footer {
   min-height: var(--sw-size-toolbar);
-  padding: var(--sw-space-lg) var(--sw-space-xxxl);
-  border-top: var(--sw-control-border-width) solid var(--border-color);
-  background: var(--sidebar-bg-color);
-  border-spacing: var(--sw-space-xl);
+  padding: var(--sw-space-lg) var(--sw-space-xl) var(--sw-space-lg) var(--sw-space-xxxl);
+  border-spacing: var(--sw-space-lg);
+}
+
+.sw-composer-footer button.sw-icon-button {
+  color: var(--sw-secondary-fg-color);
+}
+
+.sw-composer-footer button.sw-icon-button:hover {
+  color: var(--window-fg-color);
 }
 
 .sw-composer-attachment {
@@ -1930,14 +2939,16 @@ button.sw-composer-undo {
   color: var(--window-fg-color);
 }
 
+/* Send: the card's one accent, its label alone; its keys sit beside it. */
 button.sw-composer-send {
   min-height: var(--sw-size-compose);
   padding: 0 var(--sw-space-huge);
   border: none;
-  border-radius: var(--sw-radius-small);
-  background: var(--accent-bg-color);
-  color: var(--accent-fg-color);
+  border-radius: var(--sw-radius);
+  background: var(--sw-primary-bg-color);
+  color: var(--sw-primary-fg-color);
   box-shadow: none;
+  font-weight: var(--sw-weight-bold);
 }
 
 button.sw-composer-send:hover {
@@ -1948,17 +2959,43 @@ button.sw-composer-send:active {
   background-image: image(var(--sw-pressed-bg-color));
 }
 
-.sw-composer-send-label {
-  font-weight: bold;
-}
-
-.sw-composer-send-key {
-  font-size: var(--sw-text-small);
-  opacity: 0.8;
-}
-
 .sw-composer-problem {
   padding: var(--sw-space-huge);
+}
+
+/* ==== superhuman: writing ==== */
+/* The pickers over the window (the fork's phase B: Send Later's time picker, Use Snippet…): the
+   palette's card (sw-palette-*), a quiet heading over the field, and each row's detail at its end,
+   muted, its digits aligned (a preset's time, a snippet's first words); a row that only says
+   something reads as text, not as a choice. */
+.sw-picker-card .sw-picker-heading {
+  padding-bottom: 0;
+}
+
+.sw-picker-card .sw-picker-detail {
+  font-size: var(--sw-text-small);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A picker's field reads in the rows' face and size (phase C's visual QA: the palette's large
+   monospace query read like a terminal over times and snippets), its glyph what it reads (a
+   clock for a time, picker.rs). */
+.sw-picker-card entry.sw-palette-search,
+.sw-picker-card entry.sw-palette-search:focus-within {
+  min-height: calc(3 * var(--sw-space-xxl) + var(--sw-space-lg));
+  font-family: var(--sw-font-chrome);
+  font-size: var(--sw-text-title);
+}
+
+.sw-picker-card list.sw-picker-list > row.sw-picker-hint,
+.sw-picker-card list.sw-picker-list > row.sw-picker-hint:hover {
+  background: none;
+  color: var(--sw-secondary-fg-color);
+}
+
+/* Scheduled Messages: the sends waiting for their time, one row each. */
+.sw-scheduled {
+  margin: var(--sw-space-xxl) var(--sw-space-xxl) var(--sw-space-huge);
 }
 
 /* Edit Account (the user's UI tweak, 2026-10-08): the account, its name and its colour, spaced

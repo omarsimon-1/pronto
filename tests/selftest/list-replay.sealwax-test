@@ -1,0 +1,12 @@
+# Conversation rows' change events applied by the list's own model (the Superhuman pass, phase
+# B; docs/superhuman/conversations.md): random new conversations, replies (the user's in Sent
+# too), batches, flag changes and removals through a scratch store of their own, each event
+# applied to models of three conversation views (Inbox; Inbox, unread; All Inboxes, starred),
+# moves told GTK at once in one model and row by row in its twin. After every step each model
+# equals its view read fresh from the store, row for row, sections included. Every message is
+# fictional.
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/list-replay.sealwax-test
+
+desktop tiling
+resize 1024 700
+list-replay 6 150

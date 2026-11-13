@@ -116,7 +116,7 @@ async fn starttls_asks_capabilities_again_and_falls_back_to_login() {
     assert_eq!(
         id.split_once(' ').unwrap().1,
         format!(
-            "ID (\"name\" \"Sealwax\" \"version\" \"{}\")",
+            "ID (\"name\" \"Pronto\" \"version\" \"{}\")",
             env!("CARGO_PKG_VERSION")
         ),
         "generic ID values only"
@@ -369,6 +369,83 @@ async fn xoauth2_sends_the_token_and_answers_the_error_challenge() {
         let tag = peer.expect("AUTHENTICATE XOAUTH2").await;
         peer.send("+ \r\n").await;
         let response = STANDARD.decode(peer.line().await.unwrap()).unwrap();
+        peer.send(&format!(
+            "+ {}\r\n",
+            STANDARD.encode("{\"status\":\"401\",\"schemes\":\"bearer\"}")
+        ))
+        .await;
+        let answer = peer.line().await.unwrap();
+        peer.send(&format!(
+            "{tag} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n"
+        ))
+        .await;
+        (response, answer, peer.drain().await)
+    });
+    let error = connect(
+        &endpoint(port, Security::Tls),
+        Credentials::OAuth2 {
+            username: "user",
+            token: "token-123",
+        },
+        ca.trust.client_config().unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.failure(), LoginFailure::WrongPassword);
+    let (response, answer, _) = server.await.unwrap();
+    assert_eq!(response, b"user=user\x01auth=Bearer token-123\x01\x01");
+    assert_eq!(answer, "", "the error challenge gets an empty response");
+}
+
+/// SASL-IR (RFC 4959, the fork's Superhuman pass): where offered, the response goes with the
+/// AUTHENTICATE command, saving the round trip of the empty challenge.
+#[tokio::test]
+async fn sasl_ir_sends_the_response_with_the_command() {
+    let ca = test_ca();
+    let config = ca.server.clone();
+    let (listener, port) = bind().await;
+    let server = tokio::spawn(async move {
+        let mut peer = Peer::accept_tls(&listener, config).await;
+        peer.send("* OK [CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN] ready\r\n")
+            .await;
+        let line = peer.line().await.unwrap();
+        let (tag, command) = line.split_once(' ').unwrap();
+        let encoded = command.strip_prefix("AUTHENTICATE PLAIN ").unwrap();
+        let response = STANDARD.decode(encoded).unwrap();
+        peer.send(&format!("{tag} OK authenticated\r\n")).await;
+        let tag = peer.expect("CAPABILITY").await;
+        peer.send("* CAPABILITY IMAP4rev1\r\n").await;
+        peer.send(&format!("{tag} OK done\r\n")).await;
+        (response, peer.drain().await)
+    });
+    let conn = connect(
+        &endpoint(port, Security::Tls),
+        PASSWORD,
+        ca.trust.client_config().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(conn.mechanism(), Mechanism::Plain);
+    drop(conn);
+    let (response, _) = server.await.unwrap();
+    assert_eq!(response, b"\0user\0secret-password");
+}
+
+/// XOAUTH2 with SASL-IR, as Gmail takes it: the token with the command, and an empty line for
+/// the error challenge of a refused one.
+#[tokio::test]
+async fn xoauth2_with_sasl_ir_answers_the_error_challenge() {
+    let ca = test_ca();
+    let config = ca.server.clone();
+    let (listener, port) = bind().await;
+    let server = tokio::spawn(async move {
+        let mut peer = Peer::accept_tls(&listener, config).await;
+        peer.send("* OK [CAPABILITY IMAP4rev1 SASL-IR AUTH=XOAUTH2] ready\r\n")
+            .await;
+        let line = peer.line().await.unwrap();
+        let (tag, command) = line.split_once(' ').unwrap();
+        let encoded = command.strip_prefix("AUTHENTICATE XOAUTH2 ").unwrap();
+        let response = STANDARD.decode(encoded).unwrap();
         peer.send(&format!(
             "+ {}\r\n",
             STANDARD.encode("{\"status\":\"401\",\"schemes\":\"bearer\"}")

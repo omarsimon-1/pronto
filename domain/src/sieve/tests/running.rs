@@ -405,7 +405,7 @@ fn environment_names_the_folder_it_arrived_in() {
                   \"imap.user\" \"\" { discard; }";
     let in_junk = run(script, &Message::new().mailbox("Junk"));
     assert_eq!(filed(&in_junk), ["INBOX"]);
-    assert!(!in_junk.discard, "an item Sealwax doesn't know is false");
+    assert!(!in_junk.discard, "an item Pronto doesn't know is false");
     assert!(run(script, &Message::new()).keep);
     let without_imapsieve = "require \"environment\";\nif environment \"imap.mailbox\" \"junk\" { \
                              discard; }";

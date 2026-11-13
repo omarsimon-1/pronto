@@ -9,10 +9,10 @@
 //! and faults pause and every account's cache is compared with an independent read of its
 //! server. It logs counters only: no names, subjects or addresses.
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem SEALWAX_SOAK_MINUTES=1440 \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem PRONTO_SOAK_MINUTES=1440 \
 //!   cargo test -p sealwax-engine --release --test soak -- --ignored --nocapture
 //!
-//! `SEALWAX_SOAK_MINUTES` (30), `SEALWAX_SOAK_CHECK_MINUTES` (60), `SEALWAX_SOAK_SEED` (1). It
+//! `PRONTO_SOAK_MINUTES` (30), `PRONTO_SOAK_CHECK_MINUTES` (60), `PRONTO_SOAK_SEED` (1). It
 //! resets and changes the users rand, idle and fault, and only reads perf.
 
 mod common;
@@ -385,11 +385,11 @@ async fn check(
 }
 
 #[test]
-#[ignore = "soak (ML-049): needs the testbed; SEALWAX_SOAK_MINUTES sets its length"]
+#[ignore = "soak (ML-049): needs the testbed; PRONTO_SOAK_MINUTES sets its length"]
 fn soak() {
-    let length = minutes("SEALWAX_SOAK_MINUTES", 30);
-    let every = minutes("SEALWAX_SOAK_CHECK_MINUTES", 60);
-    let seed = std::env::var("SEALWAX_SOAK_SEED")
+    let length = minutes("PRONTO_SOAK_MINUTES", 30);
+    let every = minutes("PRONTO_SOAK_CHECK_MINUTES", 60);
+    let seed = std::env::var("PRONTO_SOAK_SEED")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(1u64);

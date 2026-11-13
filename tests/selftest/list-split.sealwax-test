@@ -1,0 +1,90 @@
+# The list in Split, one row a conversation (the Superhuman pass, phase B's review;
+# docs/superhuman/conversations.md): a click held as a person holds it selects and shows the row
+# clicked, the list staying where it is, with the selected row scrolled out of view and the
+# keyboard focus in the list or in the reader; an Undo of several conversations from Inbox Zero
+# chooses them again, showing none and reading none; new mail after Inbox Zero comes in
+# unselected, unshown and unread. Every message is fictional.
+# Run: tools/headless.sh 63 target/debug/pronto --self-test tests/selftest/list-split.sealwax-test
+
+desktop tiling
+resize 1440 900
+grouping conversations
+triage-mark-read-on-open false
+conversation-account Alex alex.berg@example.test
+conversation-add singles
+conversation-add typical
+conversation-add trip
+folder inbox
+list-wait
+assert-view-mode split
+assert-list-count 26
+assert-list-row 0 unread true
+
+# A held click (the press, frames, the release) with the selected row scrolled away, the focus
+# in the list: the row clicked is selected and shown, and the list stays where it was (the
+# focus following the selection scrolled back to it between the press and the release).
+focus list
+list-select 0
+wait-until assert-reader-selected
+list-scroll-end
+assert-list-scrolled 300
+click-row-held 20 150
+assert-list-selected 20
+wait-until assert-reader-selected
+assert-focus-row 20
+assert-list-scrolled 300
+# The same with the focus in the reader, which the press brings into the list.
+list-select 0
+wait-until assert-reader-selected
+focus reader
+list-scroll-end
+click-row-held 22 150
+assert-list-selected 22
+wait-until assert-reader-selected
+assert-focus-row 22
+assert-list-scrolled 300
+
+# Every conversation archived at once, then Undo from Inbox Zero: they come back chosen as they
+# left, in the select mode, the reader on its batch page; none is shown, none is read.
+list-select 0
+focus list
+key <Control>a
+assert-select-mode true
+key e
+wait-until assert-list-count 0
+assert-toast "Archived 26 conversations"
+assert-list-empty "Inbox Zero"
+key z
+wait-until assert-list-count 26
+wait-until assert-select-mode true
+assert-label batch-title "26 conversations selected"
+assert-reader-page batch
+assert-list-row 0 unread true
+
+# Archived again, then a reply to one of them: new mail, not the Undo. Its row comes in with
+# nothing selected, the reader empty, the reply unread (it was selected, shown and read).
+key e
+wait-until assert-list-count 0
+triage-mark-read-on-open true
+conversation-reply trip
+wait-until assert-list-count 1
+wait-frames 4
+assert-list-selection none
+assert-reader-page empty
+assert-list-row 0 unread true
+
+# Nothing selected and newer mail above: the keyboard focus that comes into the list lands on
+# the first row, not where GtkListView's own focus row drifted (phase C; phase B's review: its
+# bar on row 2 after two newer conversations, while j selected row 0), and j starts from the
+# row the focus is on.
+conversation-reply typical
+wait-until assert-list-count 2
+assert-list-selection none
+focus list-sidebar
+focus list
+wait-until assert-focus-row 0
+key <Control>Down
+assert-focus-row 1
+assert-list-selection none
+key j
+assert-list-selected 1

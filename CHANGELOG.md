@@ -1,6 +1,29 @@
-# What's new in Sealwax
+# What's new in Pronto
 
-Each release, newest first, in plain words. [INSTALL.md](INSTALL.md) says how to install, update and uninstall Sealwax.
+Each release, newest first, in plain words. [INSTALL.md](INSTALL.md) says how to install, update and uninstall Pronto. Entries for 0.5.1 and earlier are Sealwax's releases, which Pronto is built on.
+
+## 0.6.0 — 2026-11-12
+
+The first release of Pronto, a fork of [Sealwax](https://github.com/PixDevsApps/sealwax) 0.5.1.
+
+- **Split inbox, command palette and one-key triage:** work through mail from the keyboard.
+- **Reminders and Send Later**, contact details, conversation threading and per-account signatures.
+- **Inline reply and composer cards.**
+- **Optional reply drafts from a local agent CLI** ([docs/AI.md](docs/AI.md)); off unless you turn it on.
+- **Its own identity:** the app is `pronto`, and the first launch copies mail, settings and saved passwords from Dispatchy, the name earlier private builds used.
+- **New keys:** Space and Shift+Space scroll the open message a page; in a composer, Ctrl+Shift+A attaches a file, Ctrl+Shift+D discards the draft, Ctrl+Shift+F opens From, Ctrl+Alt+A switches between Reply and Reply All, and Escape minimizes the card with the draft kept. One-key shortcuts work with the sidebar focused, and a key that can't do anything says why.
+- **Before sending:** Pronto asks once when the subject is empty or the text mentions an attachment and none is attached. Enter sends anyway.
+- **Fixes:** an inline reply no longer drops an address you typed but didn't confirm; Print, Show Original, Save and Show Images act on the message you moved to; an attachment no longer opens after you've moved on; a failed open says so; the same draft can't be open in two cards.
+- **Safer storage:** only one Pronto can open the mail store at a time, POP3 deletes from the server only after mail is safely on disk, search no longer misses mail after a crash mid-download, and scheduled sends keep their time across suspend.
+- **Reply drafts:** agent CLIs are only looked for when the feature is on, mail text is fenced off in the prompt as untrusted, paragraph breaks survive, and a short agent outage no longer empties the queue.
+
+Also in this release, from Sealwax after 0.5.1:
+
+- **Sign in with Google for Gmail, with your own Google client:** make a Google OAuth client for your own Gmail accounts ([GOOGLE-OAUTH-SETUP.md](docs/GOOGLE-OAUTH-SETUP.md) shows how, in about ten minutes), put its ID and secret under `[oauth.google]` in `config.toml`, and the setup assistant offers **Sign in with Google** for Gmail instead of asking for an app password. Several Gmail accounts each keep their own sign-in. Sealwax ships no Google client, and without one Gmail works with an app password as before.
+- **A new look:** Sealwax now looks like a GNOME app out of the box, with libadwaita's colours (light or dark as your desktop prefers) and **Adwaita Sans** throughout, a shade bolder and with brighter secondary text so it stays crisp on high-resolution screens. Headings are heavier, the message list is denser and marks the selected message with an accent edge, the reader's cards breathe a little more, and the composer you're writing in is outlined in the accent.
+- **Tokyo Night, or your Omarchy theme:** set `palette = "tokyo-night"` under `[appearance]` in `config.toml` for Tokyo Night, or `palette = "omarchy"` to follow your live Omarchy theme as before. `chrome_font = "omarchy"` brings back the Omarchy font.
+- **Gentle motion:** hovered and chosen things fade in quickly instead of switching at once. Nothing fades when your desktop has animations off or asks for reduced motion.
+- **A solid window:** Sealwax paints only opaque surfaces; the user guide has the Hyprland line that stops Omarchy making it see-through.
 
 ## 0.5.1 — 2026-10-20
 

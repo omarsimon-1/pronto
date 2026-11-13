@@ -7,58 +7,66 @@ use sealwax_domain::model::Address;
 const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
 
-/// The header's date: `09:30 (2 h ago)` today, `Yesterday 18:44`, `Mon 21:10` within the week,
-/// `12 Sep, 09:30` this year, `12 Sep 2025` before; a date in the future gets the full form.
+/// The header's date, in the list's words and order (the Superhuman pass's review: the list
+/// said "OCT 22", the reader "22 Oct"): `09:30 (2 h ago)` today, `Sep 12, 09:30` this year
+/// (yesterday too: the list says "OCT 28", not a word, since phase C's visual QA), `Sep 12 2025`
+/// before; a date in the future gets the full form.
 pub fn date_line(date: i64, now: i64, zone: &glib::TimeZone) -> String {
     let (Some(then), Some(today)) = (local(date, zone), local(now, zone)) else {
         return String::new();
     };
-    let format = |pattern: &str| {
-        then.format(pattern)
-            .map(|text| text.to_string())
-            .unwrap_or_default()
-    };
+    let time = then
+        .format("%H:%M")
+        .map(|text| text.to_string())
+        .unwrap_or_default();
     if date > now + MINUTE {
-        return format("%-d %b %Y, %H:%M");
+        return format!("{}, {time}", month_day(&then, true));
     }
-    let days = day_number(&today) - day_number(&then);
-    match days {
-        0 => format!("{} ({})", format("%H:%M"), ago(now - date)),
-        1 => format("Yesterday %H:%M"),
-        2..=6 => format("%a %H:%M"),
-        _ if then.year() == today.year() => format("%-d %b, %H:%M"),
-        _ => format("%-d %b %Y"),
+    match day_number(&today) - day_number(&then) {
+        0 => format!("{time} ({})", ago(now - date)),
+        _ if then.year() == today.year() => format!("{}, {time}", month_day(&then, false)),
+        _ => month_day(&then, true),
     }
 }
 
-/// A collapsed message's time (the approved mock's rows): `09:30` today, `Yesterday`, `Mon`
-/// within the week, `4 Sep` this year, `30 Aug 2025` before; a date in the future gets the
-/// last form.
+/// A collapsed message's time, as the list's date column says it (style.css sets it in its
+/// capitals): `09:30` today, `Sep 4` this year (yesterday too), and before it the list's short
+/// date in the locale's order (`8/30/25`; [`crate::list::row::numeric_date`]).
 pub fn short_date(date: i64, now: i64, zone: &glib::TimeZone) -> String {
     let (Some(then), Some(today)) = (local(date, zone), local(now, zone)) else {
         return String::new();
     };
-    let format = |pattern: &str| {
-        then.format(pattern)
+    if day_number(&today) == day_number(&then) && date <= now + MINUTE {
+        return then
+            .format("%H:%M")
             .map(|text| text.to_string())
-            .unwrap_or_default()
-    };
-    if date > now + MINUTE {
-        return format("%-d %b %Y");
+            .unwrap_or_default();
     }
-    match day_number(&today) - day_number(&then) {
-        0 => format("%H:%M"),
-        1 => "Yesterday".to_owned(),
-        2..=6 => format("%a"),
-        _ if then.year() == today.year() => format("%-d %b"),
-        _ => format("%-d %b %Y"),
+    if then.year() == today.year() {
+        month_day(&then, false)
+    } else {
+        crate::list::row::numeric_date(&then)
     }
 }
 
-/// The date in the expanded details: `Sunday 4 October 2026, 09:30 (+02:00)`.
+/// `Sep 4`, or `Sep 4 2025` with its year: the month as the locale abbreviates it, without the
+/// abbreviation's full stop (`okt.`), as the list shows it.
+fn month_day(then: &glib::DateTime, year: bool) -> String {
+    let month = then
+        .format("%b")
+        .map(|month| month.trim().trim_end_matches('.').to_owned())
+        .unwrap_or_default();
+    if year {
+        format!("{month} {} {}", then.day_of_month(), then.year())
+    } else {
+        format!("{month} {}", then.day_of_month())
+    }
+}
+
+/// The date in the expanded details: `Sunday, October 4, 2026, 09:30 (+02:00)`.
 pub fn full_date(date: i64, zone: &glib::TimeZone) -> String {
     local(date, zone)
-        .and_then(|then| then.format("%A %-d %B %Y, %H:%M (%:z)").ok())
+        .and_then(|then| then.format("%A, %B %-d, %Y, %H:%M (%:z)").ok())
         .map(|text| text.to_string())
         .unwrap_or_default()
 }
@@ -92,8 +100,9 @@ fn ago(seconds: i64) -> String {
 }
 
 /// Whom the message went to, each address once, To before Cc (Bcc isn't known): the user first
-/// as "me" when one of their addresses is among them, then the others, three names at most:
-/// `to me`, `to me, Leah Kim and 2 others`, `to Leah Kim, Marius Dahl`.
+/// as "me" when one of their addresses is among them, then the others by first name
+/// ([`short_name`]; the card's details name everyone in full), three names at most: `to me`,
+/// `to me, Leah and 2 others`, `to Leah, Marius`.
 pub fn recipients_line(to: &[Address], cc: &[Address], mine: &[String]) -> String {
     let mut recipients: Vec<&Address> = Vec::new();
     for address in to.iter().chain(cc) {
@@ -115,7 +124,7 @@ pub fn recipients_line(to: &[Address], cc: &[Address], mine: &[String]) -> Strin
     let others: Vec<&str> = recipients
         .iter()
         .filter(|address| !is_mine(&address.email, mine))
-        .map(|address| address.display_name())
+        .map(|address| short_name(address))
         .collect();
     const SHOWN: usize = 3;
     let mut names: Vec<&str> = if me { vec!["me"] } else { Vec::new() };
@@ -126,6 +135,25 @@ pub fn recipients_line(to: &[Address], cc: &[Address], mine: &[String]) -> Strin
         0 => format!("to {}", names.join(", ")),
         1 => format!("to {} and 1 other", names.join(", ")),
         _ => format!("to {} and {rest} others", names.join(", ")),
+    }
+}
+
+/// What the recipients line calls someone (the fork's Superhuman pass): the first word of
+/// their name ("Leah" for Leah Kim), the whole name when that word is a title or a surname
+/// written first ("Dr. Kim", "Kim, Leah"), the address's local part when there is no name.
+pub fn short_name(address: &Address) -> &str {
+    let name = address.name.trim();
+    if name.is_empty() {
+        let email = address.email.trim();
+        return email
+            .split('@')
+            .next()
+            .filter(|local| !local.is_empty())
+            .unwrap_or(email);
+    }
+    match name.split_whitespace().next() {
+        Some(first) if !first.ends_with('.') && !first.ends_with(',') => first,
+        _ => name,
     }
 }
 
@@ -208,22 +236,40 @@ mod tests {
         assert_eq!(line(NOW - 30), "11:59 (just now)");
         assert_eq!(line(NOW - 25 * MINUTE), "11:35 (25 min ago)");
         assert_eq!(line(NOW - 2 * HOUR - 5 * MINUTE), "09:55 (2 h ago)");
-        assert_eq!(line(NOW - 13 * HOUR), "Yesterday 23:00");
-        assert_eq!(line(NOW - 3 * 24 * HOUR), "Thu 12:00");
-        assert_eq!(line(NOW - 30 * 24 * HOUR), "4 Sep, 12:00");
-        assert_eq!(line(NOW - 400 * 24 * HOUR), "30 Aug 2025");
-        assert_eq!(line(NOW + 2 * 24 * HOUR), "6 Oct 2026, 12:00");
+        assert_eq!(line(NOW - 13 * HOUR), "Oct 3, 23:00", "yesterday is a date");
+        assert_eq!(line(NOW - 3 * 24 * HOUR), "Oct 1, 12:00");
+        assert_eq!(line(NOW - 30 * 24 * HOUR), "Sep 4, 12:00");
+        assert_eq!(line(NOW - 400 * 24 * HOUR), "Aug 30 2025");
+        assert_eq!(line(NOW + 2 * 24 * HOUR), "Oct 6 2026, 12:00");
     }
 
     #[test]
     fn collapsed_rows_take_a_short_time() {
         let short = |date: i64| short_date(date, NOW, &utc());
         assert_eq!(short(NOW - 25 * MINUTE), "11:35");
-        assert_eq!(short(NOW - 13 * HOUR), "Yesterday");
-        assert_eq!(short(NOW - 3 * 24 * HOUR), "Thu");
-        assert_eq!(short(NOW - 30 * 24 * HOUR), "4 Sep");
-        assert_eq!(short(NOW - 400 * 24 * HOUR), "30 Aug 2025");
-        assert_eq!(short(NOW + 2 * 24 * HOUR), "6 Oct 2026");
+        assert_eq!(
+            short(NOW - 13 * HOUR),
+            "Oct 3",
+            "yesterday is a date, as in the list"
+        );
+        assert_eq!(short(NOW - 3 * 24 * HOUR), "Oct 1");
+        assert_eq!(short(NOW - 30 * 24 * HOUR), "Sep 4");
+        assert_eq!(short(NOW + 2 * 24 * HOUR), "Oct 6");
+        // Before this year, the list's short date in the locale's order.
+        let old = local(NOW - 400 * 24 * HOUR, &utc()).unwrap();
+        assert_eq!(
+            short(NOW - 400 * 24 * HOUR),
+            crate::list::row::numeric_date(&old)
+        );
+        assert!(short(NOW - 400 * 24 * HOUR).contains("25"));
+        // Month and day in the list's order, the same words in the row and the header.
+        for days in [1, 3, 30] {
+            let date = NOW - days * 24 * HOUR;
+            assert!(
+                date_line(date, NOW, &utc()).starts_with(&short(date)),
+                "{days} days ago"
+            );
+        }
     }
 
     #[test]
@@ -235,10 +281,10 @@ mod tests {
         // 22:30 UTC on Saturday is 00:30 on Sunday in Oslo: today there, yesterday in UTC.
         let date = NOW - 13 * HOUR - 30 * MINUTE;
         assert_eq!(date_line(date, NOW, &oslo), "00:30 (13 h ago)");
-        assert_eq!(date_line(date, NOW, &utc()), "Yesterday 22:30");
+        assert_eq!(date_line(date, NOW, &utc()), "Oct 3, 22:30");
         assert_eq!(
             full_date(NOW, &oslo),
-            "Sunday 4 October 2026, 14:00 (+02:00)"
+            "Sunday, October 4, 2026, 14:00 (+02:00)"
         );
     }
 
@@ -258,8 +304,8 @@ mod tests {
             Address::new("", "alex.berg@example.test"),
         ];
         assert_eq!(recipients_line(&to[1..], &[], &mine), "to me");
-        assert_eq!(recipients_line(&to, &[], &mine), "to me, Leah Kim");
-        assert_eq!(recipients_line(&[], &to, &mine), "to me, Leah Kim");
+        assert_eq!(recipients_line(&to, &[], &mine), "to me, Leah");
+        assert_eq!(recipients_line(&[], &to, &mine), "to me, Leah");
         let others = [
             Address::new("Leah Kim", "leah@example.test"),
             Address::new("", "marius@example.test"),
@@ -267,29 +313,26 @@ mod tests {
             Address::new("Tomas", "tomas@example.test"),
             Address::new("Sana", "sana@example.test"),
         ];
-        assert_eq!(
-            recipients_line(&others[..2], &[], &mine),
-            "to Leah Kim, marius@example.test"
-        );
+        assert_eq!(recipients_line(&others[..2], &[], &mine), "to Leah, marius");
         assert_eq!(
             recipients_line(&others[..4], &[], &mine),
-            "to Leah Kim, marius@example.test, Ingrid and 1 other"
+            "to Leah, marius, Ingrid and 1 other"
         );
         assert_eq!(
             recipients_line(&others, &[], &mine),
-            "to Leah Kim, marius@example.test, Ingrid and 2 others"
+            "to Leah, marius, Ingrid and 2 others"
         );
         assert_eq!(
             recipients_line(&to[1..], &others[..1], &mine),
-            "to me, Leah Kim"
+            "to me, Leah"
         );
         assert_eq!(
             recipients_line(&to[1..], &others[..3], &mine),
-            "to me, Leah Kim, marius@example.test and 1 other"
+            "to me, Leah, marius and 1 other"
         );
         assert_eq!(
             recipients_line(&to, &others, &mine),
-            "to me, Leah Kim, marius@example.test and 3 others",
+            "to me, Leah, marius and 3 others",
             "Leah once, though she is in To and Cc"
         );
         assert_eq!(
@@ -297,6 +340,14 @@ mod tests {
             "to undisclosed recipients"
         );
         assert!(!is_mine("", &[String::new()]));
+        for (name, email, short) in [
+            ("Dr. Leah Kim", "leah@example.test", "Dr. Leah Kim"),
+            ("Kim, Leah", "leah@example.test", "Kim, Leah"),
+            ("Åse", "ase@example.test", "Åse"),
+            ("", "@example.test", "@example.test"),
+        ] {
+            assert_eq!(short_name(&Address::new(name, email)), short);
+        }
     }
 
     #[test]

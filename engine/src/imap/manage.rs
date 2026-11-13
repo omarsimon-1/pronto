@@ -19,6 +19,7 @@ use super::raw::{self, quote};
 use super::sync::view;
 use crate::api::{FolderChange, FolderError};
 use crate::folders::{Plan, Wire, deepest_first, known, plan};
+use async_imap::imap_proto::{MailboxDatum, Response};
 use sealwax_domain::folders::within;
 use sealwax_domain::model::{AccountId, BlobKey};
 use sealwax_infrastructure::store::Store;
@@ -190,6 +191,42 @@ pub async fn change(
             relist(conn, store, account).await
         }
     }
+}
+
+/// Creates the Reminders folder the store made for the fork's Remind Me
+/// (docs/superhuman/remind.md) under `name_raw`, then SUBSCRIBEs it, before the first move into
+/// it runs. A folder of that name the server already has counts as made: `[ALREADYEXISTS]`, or
+/// a refusal without that code where LIST names the folder. On Gmail it is a label.
+pub async fn create_reminders(conn: &mut Connection, name_raw: &str) -> Result<(), FolderError> {
+    let line = format!("CREATE {}", quote(name_raw).map_err(refused)?);
+    match raw::run(&mut conn.session, &line, |_| {}).await {
+        Ok(()) => {}
+        Err(ImapError::No(text))
+            if text
+                .code()
+                .is_some_and(|code| code.eq_ignore_ascii_case("ALREADYEXISTS")) => {}
+        Err(ImapError::No(text)) => {
+            if !listed(conn, name_raw).await? {
+                return Err(FolderError::Refused(text));
+            }
+        }
+        Err(error) => return Err(refused(error)),
+    }
+    subscriptions(conn, "SUBSCRIBE", &[name_raw.to_owned()]).await
+}
+
+/// Whether the server lists `name_raw` itself (`LIST "" <name>`).
+async fn listed(conn: &mut Connection, name_raw: &str) -> Result<bool, FolderError> {
+    let line = format!("LIST \"\" {}", quote(name_raw).map_err(refused)?);
+    let mut found = false;
+    raw::run(&mut conn.session, &line, |response| {
+        if let Response::MailboxData(MailboxDatum::List(list)) = response {
+            found |= list.name.as_ref() == name_raw;
+        }
+    })
+    .await
+    .map_err(refused)?;
+    Ok(found)
 }
 
 #[cfg(test)]

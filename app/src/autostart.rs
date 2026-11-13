@@ -1,5 +1,5 @@
-//! Start Sealwax at Login (ML-084, PRD D6's opt-in autostart): an XDG autostart entry,
-//! `$XDG_CONFIG_HOME/autostart/<app-id>.desktop`, that runs `sealwax --background`. On Omarchy
+//! Start Pronto at Login (ML-084, PRD D6's opt-in autostart): an XDG autostart entry,
+//! `$XDG_CONFIG_HOME/autostart/<app-id>.desktop`, that runs `pronto --background`. On Omarchy
 //! uwsm activates `xdg-desktop-autostart.target` once Hyprland has started, and systemd's
 //! `systemd-xdg-autostart-generator` turns every entry there into an `app-<id>@autostart.service`
 //! unit (INTEGRATIONS.md "Autostart"). The toggle is on while that entry exists and isn't
@@ -20,10 +20,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-/// The command an installed Sealwax runs as.
-pub const PROGRAM: &str = "sealwax";
+/// The command an installed Pronto runs as.
+pub const PROGRAM: &str = "pronto";
 
-/// The option the entry starts Sealwax with.
+/// The option the entry starts Pronto with.
 pub const BACKGROUND_OPTION: &str = "--background";
 
 /// The entry for `app_id` under the configuration home `config_home`.
@@ -33,7 +33,7 @@ pub fn entry_path(config_home: &Path, app_id: &str) -> PathBuf {
         .join(format!("{app_id}.desktop"))
 }
 
-/// What the entry starts: `sealwax` when the running executable is the one on `PATH`, else its
+/// What the entry starts: `pronto` when the running executable is the one on `PATH`, else its
 /// own path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Program {
@@ -42,7 +42,7 @@ pub enum Program {
 }
 
 impl Program {
-    /// From the running executable and the `sealwax` found on `PATH`, both canonical.
+    /// From the running executable and the `pronto` found on `PATH`, both canonical.
     pub fn choose(current: &Path, on_path: Option<&Path>) -> Self {
         if on_path == Some(current) {
             Self::Installed
@@ -90,16 +90,16 @@ pub fn entry_text(program: &Program, development: bool) -> Option<String> {
     let exec = exec_argument(&text)?;
     let try_exec = text.replace('\\', "\\\\");
     let name = if development {
-        "Sealwax (development build)"
+        "Pronto (development build)"
     } else {
-        "Sealwax"
+        "Pronto"
     };
     Some(format!(
         "[Desktop Entry]\n\
-         # Written by Sealwax's Start Sealwax at Login. Turning it off deletes this file.\n\
+         # Written by Pronto's Start Pronto at Login. Turning it off deletes this file.\n\
          Type=Application\n\
          Name={name}\n\
-         Comment=Starts Sealwax without a window, so mail keeps syncing\n\
+         Comment=Starts Pronto without a window, so mail keeps syncing\n\
          Exec={exec} {BACKGROUND_OPTION}\n\
          TryExec={try_exec}\n\
          Icon={ICON_NAME}\n\
@@ -108,7 +108,7 @@ pub fn entry_text(program: &Program, development: bool) -> Option<String> {
     ))
 }
 
-/// Whether an entry's text starts Sealwax: not `Hidden=true`, not
+/// Whether an entry's text starts Pronto: not `Hidden=true`, not
 /// `X-GNOME-Autostart-enabled=false`, in its `[Desktop Entry]` group.
 pub fn starts(text: &str) -> bool {
     let mut in_entry = false;
@@ -135,7 +135,7 @@ pub fn starts(text: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
     pub path: PathBuf,
-    /// The entry exists and starts Sealwax.
+    /// The entry exists and starts Pronto.
     pub on: bool,
     pub program: Program,
     /// A debug build (the `.Devel` app-id), which packaging never installs.
@@ -210,9 +210,9 @@ pub fn question(probe: &Probe) -> (String, String) {
         Program::Path(_) => format!("runs this build with {BACKGROUND_OPTION}"),
     };
     let mut body = format!(
-        "Sealwax will start without a window when you log in, so mail syncs and new mail is \
-         notified from the start. Open Sealwax as usual to see its window.\n\nSealwax writes \
-         {}, which {runs}. Nothing else changes.\n\nTo undo: turn Start Sealwax at Login off, \
+        "Pronto will start without a window when you log in, so mail syncs and new mail is \
+         notified from the start. Open Pronto as usual to see its window.\n\nPronto writes \
+         {}, which {runs}. Nothing else changes.\n\nTo undo: turn Start Pronto at Login off, \
          or delete that file.",
         shown(&probe.path),
     );
@@ -220,13 +220,13 @@ pub fn question(probe: &Probe) -> (String, String) {
         let build = if probe.development {
             "This is a development build"
         } else {
-            "This Sealwax isn't the one installed"
+            "This Pronto isn't the one installed"
         };
         body.push_str(&format!(
             "\n\n{build}: the entry starts it where it is now, and does nothing once it is gone."
         ));
     }
-    ("Start Sealwax at login?".to_owned(), body)
+    ("Start Pronto at login?".to_owned(), body)
 }
 
 /// Installs the toggle, with its state read from the entry.
@@ -298,7 +298,7 @@ fn toggled(state: &Rc<AppState>, on: bool) {
                 Ok(Ok(_)) => {
                     tracing::info!("start at login turned off");
                     show_state(&state, false);
-                    toast(window.as_ref(), "Sealwax won't start at login");
+                    toast(window.as_ref(), "Pronto won't start at login");
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "the autostart entry can't be deleted");
@@ -312,7 +312,7 @@ fn toggled(state: &Rc<AppState>, on: bool) {
             return;
         }
         if probe.on {
-            toast(window.as_ref(), "Sealwax already starts at login");
+            toast(window.as_ref(), "Pronto already starts at login");
             return;
         }
         let Some(window) = window else {
@@ -322,7 +322,7 @@ fn toggled(state: &Rc<AppState>, on: bool) {
         let Some(text) = entry_text(&probe.program, probe.development) else {
             toast(
                 Some(&window),
-                "Sealwax's path can't be written into an autostart entry",
+                "Pronto's path can't be written into an autostart entry",
             );
             return;
         };
@@ -338,7 +338,7 @@ fn toggled(state: &Rc<AppState>, on: bool) {
             Ok(Ok(())) => {
                 tracing::info!("start at login turned on");
                 show_state(&state, true);
-                toast(Some(&window), "Sealwax will start at login");
+                toast(Some(&window), "Pronto will start at login");
             }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "the autostart entry can't be written");
@@ -384,51 +384,48 @@ mod tests {
         assert_eq!(
             entry_path(
                 Path::new("/home/kari/.config"),
-                "io.github.pixdevsapps.Sealwax"
+                "io.github.omarsimon1.Pronto"
             ),
-            Path::new("/home/kari/.config/autostart/io.github.pixdevsapps.Sealwax.desktop")
+            Path::new("/home/kari/.config/autostart/io.github.omarsimon1.Pronto.desktop")
         );
         let text = entry_text(&Program::Installed, false).unwrap();
         assert!(text.starts_with("[Desktop Entry]\n"), "{text}");
-        assert!(text.contains("\nExec=sealwax --background\n"), "{text}");
-        assert!(text.contains("\nTryExec=sealwax\n"), "{text}");
-        assert!(text.contains("\nName=Sealwax\n"), "{text}");
+        assert!(text.contains("\nExec=pronto --background\n"), "{text}");
+        assert!(text.contains("\nTryExec=pronto\n"), "{text}");
+        assert!(text.contains("\nName=Pronto\n"), "{text}");
         assert!(text.contains("\nType=Application\n"), "{text}");
         assert!(starts(&text));
         let development = entry_text(
-            &Program::Path(PathBuf::from("/home/kari/src/sealwax/target/debug/sealwax")),
+            &Program::Path(PathBuf::from("/home/kari/src/pronto/target/debug/pronto")),
             true,
         )
         .unwrap();
         assert!(
             development.contains(
-                "\nExec=/home/kari/src/sealwax/target/debug/sealwax --background\n\
-                 TryExec=/home/kari/src/sealwax/target/debug/sealwax\n"
+                "\nExec=/home/kari/src/pronto/target/debug/pronto --background\n\
+                 TryExec=/home/kari/src/pronto/target/debug/pronto\n"
             ),
             "{development}"
         );
-        assert!(development.contains("\nName=Sealwax (development build)\n"));
+        assert!(development.contains("\nName=Pronto (development build)\n"));
     }
 
     #[test]
     fn exec_arguments_are_quoted_as_the_specification_says() {
+        assert_eq!(exec_argument("/usr/bin/pronto").unwrap(), "/usr/bin/pronto");
         assert_eq!(
-            exec_argument("/usr/bin/sealwax").unwrap(),
-            "/usr/bin/sealwax"
+            exec_argument("/opt/a b/pronto").unwrap(),
+            "\"/opt/a b/pronto\""
         );
         assert_eq!(
-            exec_argument("/opt/a b/sealwax").unwrap(),
-            "\"/opt/a b/sealwax\""
-        );
-        assert_eq!(
-            exec_argument("/opt/100%/sealwax").unwrap(),
-            "/opt/100%%/sealwax"
+            exec_argument("/opt/100%/pronto").unwrap(),
+            "/opt/100%%/pronto"
         );
         // A quoted `$` and `"` are escaped with a backslash, and every backslash is then
         // escaped once more as a string value.
         assert_eq!(
-            exec_argument("/opt/$x\"y/sealwax").unwrap(),
-            "\"/opt/\\\\$x\\\\\"y/sealwax\""
+            exec_argument("/opt/$x\"y/pronto").unwrap(),
+            "\"/opt/\\\\$x\\\\\"y/pronto\""
         );
         assert_eq!(exec_argument("/opt/a\nb"), None);
         assert_eq!(
@@ -439,24 +436,24 @@ mod tests {
 
     #[test]
     fn hidden_or_disabled_entries_start_nothing() {
-        assert!(starts("[Desktop Entry]\nExec=sealwax --background\n"));
+        assert!(starts("[Desktop Entry]\nExec=pronto --background\n"));
         assert!(!starts("[Desktop Entry]\nHidden=true\n"));
         assert!(!starts(
             "[Desktop Entry]\nX-GNOME-Autostart-enabled=false\n"
         ));
         assert!(starts(
-            "[Desktop Entry]\nExec=sealwax\n[Desktop Action other]\nHidden=true\n"
+            "[Desktop Entry]\nExec=pronto\n[Desktop Action other]\nHidden=true\n"
         ));
     }
 
     #[test]
     fn the_program_is_sealwax_only_when_it_is_the_one_on_the_path() {
-        let installed = Path::new("/usr/bin/sealwax");
+        let installed = Path::new("/usr/bin/pronto");
         assert_eq!(
             Program::choose(installed, Some(installed)),
             Program::Installed
         );
-        let built = Path::new("/home/kari/src/sealwax/target/release/sealwax");
+        let built = Path::new("/home/kari/src/pronto/target/release/pronto");
         assert_eq!(
             Program::choose(built, Some(installed)),
             Program::Path(built.to_path_buf())
@@ -470,24 +467,24 @@ mod tests {
     #[test]
     fn the_question_says_what_changes_and_how_to_undo_it() {
         let mut probe = Probe {
-            path: PathBuf::from("/nowhere/.config/autostart/io.github.pixdevsapps.Sealwax.desktop"),
+            path: PathBuf::from("/nowhere/.config/autostart/io.github.omarsimon1.Pronto.desktop"),
             on: false,
             program: Program::Installed,
             development: false,
         };
         let (heading, body) = question(&probe);
-        assert_eq!(heading, "Start Sealwax at login?");
+        assert_eq!(heading, "Start Pronto at login?");
         assert!(
-            body.contains("io.github.pixdevsapps.Sealwax.desktop"),
+            body.contains("io.github.omarsimon1.Pronto.desktop"),
             "{body}"
         );
-        assert!(body.contains("runs “sealwax --background”"), "{body}");
+        assert!(body.contains("runs “pronto --background”"), "{body}");
         assert!(
-            body.contains("To undo: turn Start Sealwax at Login off"),
+            body.contains("To undo: turn Start Pronto at Login off"),
             "{body}"
         );
         assert!(!body.contains("development"), "{body}");
-        probe.program = Program::Path(PathBuf::from("/src/target/debug/sealwax"));
+        probe.program = Program::Path(PathBuf::from("/src/target/debug/pronto"));
         probe.development = true;
         let (_, body) = question(&probe);
         assert!(
@@ -504,9 +501,9 @@ mod tests {
     #[test]
     fn on_writes_the_entry_and_off_deletes_only_it() {
         let config = scratch("toggle").join("config");
-        let path = entry_path(&config, "io.github.pixdevsapps.Sealwax.Test");
+        let path = entry_path(&config, "io.github.omarsimon1.Pronto.Test");
         let neighbour = config.join("autostart").join("other.desktop");
-        let probe_now = || probe(&config, "io.github.pixdevsapps.Sealwax.Test");
+        let probe_now = || probe(&config, "io.github.omarsimon1.Pronto.Test");
         assert!(!probe_now().on);
         let text = entry_text(&Program::Installed, false).unwrap();
         enable(&path, &text).unwrap();
@@ -522,10 +519,7 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            [
-                "io.github.pixdevsapps.Sealwax.Test.desktop",
-                "other.desktop"
-            ]
+            ["io.github.omarsimon1.Pronto.Test.desktop", "other.desktop"]
         );
         // An entry the user hid counts as off.
         fs::write(&path, "[Desktop Entry]\nHidden=true\n").unwrap();

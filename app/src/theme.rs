@@ -1,11 +1,13 @@
-//! The live Omarchy theme (ADR-004, ADR-019; ML-018, ML-019). Reads the palette, the font
-//! families, `shell.toml` and Hyprland's rounding off the GTK thread, installs `style.css` and
-//! the generated variables at application priority, forces libadwaita's dark or light scheme
-//! from the palette's mode, and follows every change: a theme switch (`current/`), `omarchy
-//! font set` (`~/.config/fontconfig/`) and `omarchy display text size` (`shell.toml` in
-//! `~/.config/omarchy/`). Outside Omarchy two built-in palettes follow the system's dark
-//! preference. Subscribers such as WebViews hear about every change through
-//! [`ThemeController::connect_changed`].
+//! The theme (ADR-004, ADR-019; ML-018, ML-019). Reads the Omarchy palette, the font families,
+//! `shell.toml` and Hyprland's rounding off the GTK thread, installs `style.css` and the
+//! generated variables at application priority, and follows every change: a theme switch
+//! (`current/`), `omarchy font set` (`~/.config/fontconfig/`) and `omarchy display text size`
+//! (`shell.toml` in `~/.config/omarchy/`). `config.toml`'s `palette` picks the colours:
+//! Adwaita's (the default), which follow the system's dark preference; Tokyo Night, always
+//! dark; or the live Omarchy theme, whose mode forces libadwaita's dark or light scheme
+//! (Adwaita's colours outside Omarchy). Motion is turned off while the desktop asks for
+//! reduced motion or no animations. Subscribers such as WebViews hear about every change
+//! through [`ThemeController::connect_changed`].
 
 use crate::monitor::{DirWatch, TriggerRule};
 use gtk4 as gtk;
@@ -13,7 +15,8 @@ use gtk4::prelude::*;
 use gtk4::{gdk, gio, glib};
 use libadwaita as adw;
 use sealwax_domain::theme::{
-    FontFamilies, Mode, Palette, ShellValues, Theme, ThemeInputs, ThemeOptions, ThemeSource,
+    FontFamilies, Mode, Palette, PaletteChoice, ShellValues, Theme, ThemeInputs, ThemeOptions,
+    ThemeSource,
 };
 use sealwax_infrastructure::omarchy::{self, OmarchyPaths, OmarchyTheme, Readout, Request};
 use std::cell::{Cell, RefCell};
@@ -25,6 +28,13 @@ use std::time::{Duration, Instant};
 pub const STARTUP_WAIT: Duration = Duration::from_millis(500);
 
 const STYLE_CSS: &str = include_str!("style.css");
+
+/// Loaded over `style.css` while the desktop asks for less motion: no transition or animation
+/// of Pronto's or libadwaita's CSS runs (DESIGN.md "Motion").
+const STILL_CSS: &str = "* { transition: none; animation: none; }\n";
+
+/// GTK 4.20's reduced-motion setting, read by name so 4.18 runs without it.
+const REDUCED_MOTION: &str = "gtk-interface-reduced-motion";
 
 type Listener = Rc<dyn Fn(&Theme)>;
 
@@ -65,6 +75,8 @@ struct Answer {
 pub struct ThemeController {
     paths: OmarchyPaths,
     options: Cell<ThemeOptions>,
+    /// A palette that wins over `config.toml`'s (self-tests that follow Omarchy fixtures).
+    pinned: Cell<Option<PaletteChoice>>,
     omarchy: RefCell<Option<OmarchyTheme>>,
     shell: RefCell<ShellValues>,
     fonts: RefCell<FontFamilies>,
@@ -73,6 +85,9 @@ pub struct ThemeController {
     installed: Cell<bool>,
     provider: gtk::CssProvider,
     style: gtk::CssProvider,
+    still: gtk::CssProvider,
+    still_installed: Cell<bool>,
+    motion_handlers: RefCell<Vec<glib::SignalHandlerId>>,
     css_errors: Rc<Cell<u32>>,
     forced: Cell<Option<Mode>>,
     dark_handler: RefCell<Option<glib::SignalHandlerId>>,
@@ -103,6 +118,8 @@ impl ThemeController {
         let style = provider(&css_errors, "style.css");
         style.load_from_string(STYLE_CSS);
         let generated = provider(&css_errors, "theme");
+        let still = provider(&css_errors, "still");
+        still.load_from_string(STILL_CSS);
         for provider in [&style, &generated] {
             gtk::style_context_add_provider_for_display(
                 &display,
@@ -117,6 +134,7 @@ impl ThemeController {
         let this = Rc::new(Self {
             paths,
             options: Cell::new(options),
+            pinned: Cell::new(None),
             omarchy: RefCell::new(None),
             shell: RefCell::new(ShellValues::new()),
             fonts: RefCell::new(FontFamilies::default()),
@@ -125,6 +143,9 @@ impl ThemeController {
             installed: Cell::new(false),
             provider: generated,
             style,
+            still,
+            still_installed: Cell::new(false),
+            motion_handlers: RefCell::new(Vec::new()),
             css_errors,
             forced: Cell::new(None),
             dark_handler: RefCell::new(None),
@@ -173,8 +194,62 @@ impl ThemeController {
         });
         this.dark_handler.replace(Some(handler));
 
+        this.follow_motion();
         this.watch();
         this
+    }
+
+    /// Whether motion is off: `gtk-enable-animations` false, or GTK 4.20's
+    /// `gtk-interface-reduced-motion` asking to reduce.
+    pub fn reduced_motion(&self) -> bool {
+        self.still_installed.get()
+    }
+
+    fn follow_motion(self: &Rc<Self>) {
+        let Some(settings) = gtk::Settings::default() else {
+            return;
+        };
+        let mut handlers = Vec::new();
+        for name in ["gtk-enable-animations", REDUCED_MOTION] {
+            if settings.find_property(name).is_none() {
+                continue;
+            }
+            let weak = Rc::downgrade(self);
+            handlers.push(
+                settings.connect_notify_local(Some(name), move |settings, _| {
+                    if let Some(this) = weak.upgrade() {
+                        this.apply_motion(settings);
+                    }
+                }),
+            );
+        }
+        self.motion_handlers.replace(handlers);
+        self.apply_motion(&settings);
+    }
+
+    fn apply_motion(&self, settings: &gtk::Settings) {
+        let reduced = settings.find_property(REDUCED_MOTION).is_some_and(|_| {
+            let value = settings.property_value(REDUCED_MOTION);
+            glib::EnumValue::from_value(&value).is_some_and(|(_, value)| value.nick() == "reduce")
+        });
+        let still = reduced || !settings.is_gtk_enable_animations();
+        if still == self.still_installed.get() {
+            return;
+        }
+        let Some(display) = gdk::Display::default() else {
+            return;
+        };
+        if still {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &self.still,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+        } else {
+            gtk::style_context_remove_provider_for_display(&display, &self.still);
+        }
+        self.still_installed.set(still);
+        tracing::info!(reduced, still, "motion follows the desktop");
     }
 
     /// The theme as last applied.
@@ -194,6 +269,14 @@ impl ThemeController {
     pub fn set_options(&self, options: ThemeOptions) {
         if options != self.options.get() {
             self.options.set(options);
+            self.apply();
+        }
+    }
+
+    /// Uses `palette` whatever `config.toml` says, until unpinned with `None`.
+    pub fn pin_palette(&self, palette: Option<PaletteChoice>) {
+        if palette != self.pinned.get() {
+            self.pinned.set(palette);
             self.apply();
         }
     }
@@ -297,13 +380,18 @@ impl ThemeController {
 
     fn apply(&self) {
         let started = Instant::now();
-        let omarchy = self.omarchy.borrow().clone();
-        let (palette, source) = match omarchy {
-            Some(theme) => (
+        let choice = self.pinned.get().unwrap_or(self.options.get().palette);
+        let omarchy = match choice {
+            PaletteChoice::Omarchy => self.omarchy.borrow().clone(),
+            PaletteChoice::Adwaita | PaletteChoice::TokyoNight => None,
+        };
+        let (palette, source) = match (choice, omarchy) {
+            (PaletteChoice::TokyoNight, _) => (Palette::TOKYO_NIGHT, ThemeSource::TokyoNight),
+            (_, Some(theme)) => (
                 Palette::from_resolved(&theme.resolved),
                 ThemeSource::Omarchy(theme.name),
             ),
-            None => {
+            (_, None) => {
                 let style = adw::StyleManager::default();
                 if self.forced.take().is_some() {
                     style.set_color_scheme(adw::ColorScheme::Default);
@@ -331,11 +419,9 @@ impl ThemeController {
         self.installed.set(true);
         let theme = Rc::new(theme);
         // Replaced before the colour scheme changes: that emits `notify::dark`, which applies
-        // again only while a built-in palette is in use.
+        // again only while Adwaita's palette is in use. Every other palette has its own mode.
         self.theme.replace(theme.clone());
-        if let ThemeSource::Omarchy(_) = theme.source
-            && self.forced.get() != Some(theme.mode())
-        {
+        if theme.source != ThemeSource::Builtin && self.forced.get() != Some(theme.mode()) {
             self.forced.set(Some(theme.mode()));
             adw::StyleManager::default().set_color_scheme(match theme.mode() {
                 Mode::Dark => adw::ColorScheme::ForceDark,
@@ -387,8 +473,13 @@ impl Drop for ThemeController {
         if let Some(handler) = self.dark_handler.take() {
             adw::StyleManager::default().disconnect(handler);
         }
+        if let Some(settings) = gtk::Settings::default() {
+            for handler in self.motion_handlers.take() {
+                settings.disconnect(handler);
+            }
+        }
         if let Some(display) = gdk::Display::default() {
-            for provider in [&self.style, &self.provider] {
+            for provider in [&self.style, &self.provider, &self.still] {
                 gtk::style_context_remove_provider_for_display(&display, provider);
             }
         }

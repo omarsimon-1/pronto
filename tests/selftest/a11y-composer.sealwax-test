@@ -1,15 +1,16 @@
 # The accessibility pass (M9, ML-092) on the composer, docked in the main window since the
 # user's UI tweak of 2026-10-08, on phase A's stand-in backend: every control on screen has an
 # accessible name, a role that says what it is and the states its role needs
-# (assert-accessible), with recipient chips, the suggestions, the From and style menus,
+# (assert-accessible), with recipient chips, the suggestions, the From, card and style menus,
 # attachment cards, the size warning, the link dialog and the discard dialog; Tab and Shift+Tab
-# (real key presses) go through the card after the panes: From → Attach → Discard → Minimize →
-# Expand → Close → To → Cc · Bcc → Subject → the toolbar → the body → Send, then round the
-# window to the sidebar's compose button and back into the card; Tab in the body moves on
-# instead of typing a tab. The chosen suggestion is announced, as the entry keeps the focus.
+# (real key presses) go through the card after the panes (the fork's phase B's calm card): More
+# → Minimize → Expand → Close → From → To → Cc · Bcc → Subject → the body → Send → Attach →
+# Discard (the formatting toolbar hidden until the card's menu shows it), then round the window
+# to the sidebar's compose button and back into the card; Tab in the body moves on instead of
+# typing a tab. The chosen suggestion is announced, as the entry keeps the focus.
 # Minimizing gives the focus back to the mail, restoring takes it again. Every name, address and
 # file is fictional.
-# Run: tools/headless.sh 71 target/debug/sealwax --self-test tests/selftest/a11y-composer.sealwax-test
+# Run: tools/headless.sh 71 target/debug/pronto --self-test tests/selftest/a11y-composer.sealwax-test
 
 desktop tiling
 fixtures --count 40 --seed 9 --folders spread
@@ -30,6 +31,7 @@ assert-accessible-name composer-subject Subject
 assert-accessible-name composer-send Send
 assert-accessible-name composer-from "Send from"
 assert-accessible-name composer-bold Bold
+assert-accessible-name composer-menu More
 assert-accessible-name composer-minimize Minimize
 assert-accessible-name composer-expand Expand
 assert-accessible-name composer-close "Save and close"
@@ -38,9 +40,14 @@ assert-accessible-name composer "New message"
 
 # The Tab order, from the To field round the window and back.
 tab-chain composer forward 80
-assert-tab-chain composer-to-entry,composer-ccbcc,composer-subject,composer-style,composer-bold,composer-clear-formatting,composer-body,composer-send,compose,message-list,quick-reply-text,composer-from,composer-attach,composer-discard,composer-minimize,composer-expand,composer-close,composer-to-entry
+assert-tab-chain composer-to-entry,composer-ccbcc,composer-subject,composer-body,composer-send,composer-attach,composer-discard,compose,message-list,quick-reply-text,composer-menu,composer-minimize,composer-expand,composer-close,composer-from,composer-to-entry
 tab-chain composer backward 80
-assert-tab-chain composer-to-entry,composer-close,composer-expand,composer-minimize,composer-discard,composer-attach,composer-from,quick-reply-text,message-list,compose,composer-send,composer-body,composer-clear-formatting,composer-bold,composer-style,composer-subject,composer-ccbcc,composer-to-entry
+assert-tab-chain composer-to-entry,composer-from,composer-close,composer-expand,composer-minimize,composer-menu,quick-reply-text,message-list,compose,composer-discard,composer-attach,composer-send,composer-body,composer-subject,composer-ccbcc,composer-to-entry
+# With the formatting toolbar shown, it comes between the subject and the body.
+composer-action show-formatting
+tab-chain composer forward 80
+assert-tab-chain composer-to-entry,composer-ccbcc,composer-subject,composer-style,composer-bold,composer-clear-formatting,composer-body,composer-send
+composer-action show-formatting
 
 # Minimized, the card keeps its header's buttons and gives the focus back to where it was
 # before it took it (the message list); restored, it takes the focus again.
@@ -64,7 +71,7 @@ composer-key Tab
 assert-composer focus "GtkButton composer-send"
 composer-focus body
 composer-key <Shift>Tab
-assert-composer focus "GtkButton composer-clear-formatting"
+assert-composer focus subject
 assert-composer html-lacks "\t"
 
 # Chips, Cc and Bcc, and the suggestions, whose chosen row is announced.
@@ -104,8 +111,13 @@ composer-click composer-from
 assert-composer shown composer-from-1 true
 assert-accessible composer
 composer-key Escape
+composer-action show-formatting
 composer-click composer-style
 assert-composer shown composer-style-h2 true
+assert-accessible composer
+composer-key Escape
+composer-click composer-menu
+assert-composer shown composer-menu true
 assert-accessible composer
 composer-key Escape
 

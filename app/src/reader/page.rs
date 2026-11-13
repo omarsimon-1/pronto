@@ -1,9 +1,12 @@
-//! The GTK side of one expanded message (DESIGN.md "Reader", the approved mock): a card with the
-//! sender block (avatar, name and address, "to me" or the recipients, the date with relative
-//! time, expandable details), its own remote-content banner, the body and the attachment cards.
-//! The sender block is a button that collapses the card. The banner (or the line of a sender
-//! whose images load) is [`super::remote`]'s, the cards [`super::attachments`]'s and a
-//! plain-text body [`super::plain`]'s (M5's owners); each card calls them in one place, [`card`].
+//! The GTK side of one expanded message (DESIGN.md "Reader"; the fork's Superhuman pass): no box
+//! of its own, a hairline between messages; the sender block (the name, "to me, Tomas and 2
+//! others", the date at the right, the address and expandable details), its own
+//! remote-content banner, the body and the attachment cards. The sender block is a button that
+//! collapses the card; the card's actions (Details, Reply, Reply all, Forward) sit beside the
+//! date and show while the pointer or the focus is in the card (they stay in the Tab chain).
+//! The banner (or the line of a sender whose images load) is [`super::remote`]'s, the cards
+//! [`super::attachments`]'s and a plain-text body [`super::plain`]'s (M5's owners); each card
+//! calls them in one place, [`card`].
 
 use super::Reader;
 use super::attachments::attachment_cards;
@@ -14,13 +17,14 @@ use gtk4 as gtk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use sealwax_domain::model::{Attachment, MessageDetail};
-use sealwax_domain::theme::{avatar_class, initials};
 
 /// The widgets of one message's card that the reader changes after building it.
 pub struct CardWidgets {
     pub root: gtk::Box,
     /// The sender block: a click, Enter or Space collapses the card.
     pub header: gtk::Button,
+    /// The card's actions beside the date: Details, then the reply buttons the reader adds.
+    pub actions: gtk::Box,
     /// Where the body goes.
     pub body: gtk::Box,
     pub banner: Option<Banner>,
@@ -29,6 +33,44 @@ pub struct CardWidgets {
     /// What takes the focus when the reader keeps it across messages: the body once it has
     /// one, else the details button.
     pub focus: Option<gtk::Widget>,
+    /// The date beside the sender, so a page laid out ahead says it afresh when shown
+    /// ([`CardWidgets::redate`]).
+    pub date: CardDate,
+}
+
+/// The date beside a card's sender, and what the reader needs to say it again.
+pub struct CardDate {
+    pub label: gtk::Label,
+    /// The message's date, in seconds since the epoch.
+    pub at: i64,
+    /// The sender's name, for the header's accessible label.
+    pub sender: String,
+    /// A draft's card says Draft there, whenever it is.
+    pub draft: bool,
+}
+
+impl CardWidgets {
+    /// Says the date as of `now`: "25 min ago" and a time today move on (to a date) while a
+    /// page waits laid out ahead.
+    pub fn redate(&self, now: i64) {
+        let CardDate {
+            label,
+            at,
+            sender,
+            draft,
+        } = &self.date;
+        if *draft {
+            return;
+        }
+        let text = format::date_line(*at, now, &glib::TimeZone::local());
+        if label.label() != text {
+            label.set_label(&text);
+            self.header
+                .update_property(&[gtk::accessible::Property::Label(&format!(
+                    "{sender}, {text}, expanded"
+                ))]);
+        }
+    }
 }
 
 pub struct Header<'a> {
@@ -36,6 +78,8 @@ pub struct Header<'a> {
     /// The user's own addresses, for "to me".
     pub mine: &'a [String],
     pub now: i64,
+    /// The message is the user's unsent draft: Draft in the draft colour where the date goes.
+    pub draft: bool,
 }
 
 pub fn card(
@@ -46,11 +90,10 @@ pub fn card(
 ) -> CardWidgets {
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(18)
         .css_classes(["sw-message-card", "sw-reader-card"])
         .build();
     root.set_widget_name("reader-card");
-    let (sender, header_button, details) = sender_block(header);
+    let (sender, header_button, details, actions, date) = sender_block(header);
     root.append(&sender);
     let banner = match &notice {
         Notice::Hidden(address) => Some(banner(reader, address)),
@@ -78,10 +121,12 @@ pub fn card(
     CardWidgets {
         root,
         header: header_button,
+        actions,
         body,
         banner,
         notice,
         focus: Some(details.upcast()),
+        date,
     }
 }
 
@@ -103,8 +148,11 @@ fn label(text: &str, classes: &[&str]) -> gtk::Label {
         .build()
 }
 
-/// The sender block, the button it makes (avatar, names and date), and its details button.
-fn sender_block(header: &Header<'_>) -> (gtk::Box, gtk::Button, gtk::ToggleButton) {
+/// The sender block, the button it makes (the names), its details button, the box of the
+/// card's actions (the details button first), and its date ([`CardWidgets::date`]).
+fn sender_block(
+    header: &Header<'_>,
+) -> (gtk::Box, gtk::Button, gtk::ToggleButton, gtk::Box, CardDate) {
     let headers = &header.detail.headers;
     let sender = headers.from.first().cloned().unwrap_or_default();
     let name = if sender.name.trim().is_empty() {
@@ -112,20 +160,11 @@ fn sender_block(header: &Header<'_>) -> (gtk::Box, gtk::Button, gtk::ToggleButto
     } else {
         sender.name.clone()
     };
-    let avatar = gtk::Label::builder()
-        .label(initials(&sender.name, &sender.email))
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .css_classes([
-            "sw-avatar".to_owned(),
-            "sw-avatar-large".to_owned(),
-            avatar_class(&sender.email),
-        ])
-        .build();
-    avatar.set_widget_name("reader-avatar");
-    let name_label = label(&name, &["sw-strong", "sw-subtitle"]);
+    let name_label = label(&name, &["sw-reader-sender"]);
     name_label.set_widget_name("reader-sender");
-    let first_line = gtk::Box::builder().spacing(6).build();
+    let first_line = gtk::Box::builder()
+        .css_classes(["sw-reader-sender-line"])
+        .build();
     first_line.append(&name_label);
     if !sender.email.is_empty() && sender.email != name {
         let address = label(&format!("<{}>", sender.email), &["sw-address"]);
@@ -134,13 +173,14 @@ fn sender_block(header: &Header<'_>) -> (gtk::Box, gtk::Button, gtk::ToggleButto
     }
     let recipients = label(
         &format::recipients_line(&headers.to, &headers.cc, header.mine),
-        &["sw-small", "sw-secondary"],
+        &["sw-small", "sw-secondary", "sw-reader-recipients"],
     );
     recipients.set_widget_name("reader-recipients");
     let names = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .valign(gtk::Align::Center)
         .hexpand(true)
+        .css_classes(["sw-reader-names"])
         .build();
     names.append(&first_line);
     names.append(&recipients);
@@ -150,8 +190,17 @@ fn sender_block(header: &Header<'_>) -> (gtk::Box, gtk::Button, gtk::ToggleButto
         .date
         .unwrap_or(header.detail.summary.date);
     let zone = glib::TimeZone::local();
-    let date_text = format::date_line(date, header.now, &zone);
-    let when = label(&date_text, &["sw-small", "sw-secondary", "numeric"]);
+    let date_text = if header.draft {
+        super::conversation::DRAFT.to_owned()
+    } else {
+        format::date_line(date, header.now, &zone)
+    };
+    let classes: &[&str] = if header.draft {
+        &["sw-small", "sw-reader-draft", "sw-reader-date"]
+    } else {
+        &["sw-small", "sw-secondary", "numeric", "sw-reader-date"]
+    };
+    let when = label(&date_text, classes);
     when.set_widget_name("reader-date");
     when.set_valign(gtk::Align::Center);
     when.set_tooltip_text(Some(&format::full_date(date, &zone)));
@@ -163,7 +212,7 @@ fn sender_block(header: &Header<'_>) -> (gtk::Box, gtk::Button, gtk::ToggleButto
         .child(&icon(&["pan-down-symbolic"]))
         .tooltip_text("Details")
         .valign(gtk::Align::Center)
-        .css_classes(["flat", "sw-icon-button"])
+        .css_classes(["flat", "sw-icon-button", "sw-card-action"])
         .build();
     toggle.set_widget_name("reader-details-toggle");
     toggle.update_property(&[gtk::accessible::Property::Label("Details")]);
@@ -171,12 +220,8 @@ fn sender_block(header: &Header<'_>) -> (gtk::Box, gtk::Button, gtk::ToggleButto
         .bind_property("active", &details, "reveal-child")
         .sync_create()
         .build();
-    let who = gtk::Box::builder().spacing(12).build();
-    who.append(&avatar);
-    who.append(&names);
-    who.append(&when);
     let button = gtk::Button::builder()
-        .child(&who)
+        .child(&names)
         .hexpand(true)
         .css_classes(["flat", "sw-reader-card-header"])
         .build();
@@ -185,26 +230,35 @@ fn sender_block(header: &Header<'_>) -> (gtk::Box, gtk::Button, gtk::ToggleButto
         "{name}, {date_text}, expanded"
     ))]);
     button.update_state(&[gtk::accessible::State::Expanded(Some(true))]);
+    let actions = gtk::Box::builder()
+        .valign(gtk::Align::Center)
+        .css_classes(["sw-card-actions"])
+        .build();
+    actions.append(&toggle);
     let row = gtk::Box::builder()
-        .spacing(12)
         .css_classes(["sw-message-header"])
         .build();
     row.append(&button);
-    row.append(&toggle);
+    row.append(&actions);
+    row.append(&when);
     let block = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
     block.append(&row);
     block.append(&details);
-    (block, button, toggle)
+    let date = CardDate {
+        label: when,
+        at: date,
+        sender: name,
+        draft: header.draft,
+    };
+    (block, button, toggle, actions, date)
 }
 
 fn details_grid(detail: &MessageDetail, date: i64, zone: &glib::TimeZone) -> gtk::Grid {
     let grid = gtk::Grid::builder()
         .column_spacing(12)
         .row_spacing(4)
-        .margin_start(50)
-        .margin_top(8)
         .css_classes(["sw-reader-details"])
         .build();
     grid.set_widget_name("reader-details");

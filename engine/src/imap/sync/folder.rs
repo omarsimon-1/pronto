@@ -11,6 +11,7 @@ use crate::imap::error::SyncError;
 use crate::imap::first_sync::{self, BATCH, Progress};
 use crate::imap::raw;
 use sealwax_domain::model::{Flags, FolderId, MessageId};
+use sealwax_domain::split::Split;
 use sealwax_infrastructure::store::{
     FlagUpdate, FolderChanges, FolderSync, NewMessage, Store, SyncState,
 };
@@ -61,6 +62,7 @@ pub(super) async fn pass(
         return Err(SyncError::NotSelectable);
     }
     let mut view = view::examine(conn, &state.name_raw).await?;
+    view.categories = view::categorizes(conn, &state);
     report.stats.passes += 1;
     if state
         .uidvalidity
@@ -82,7 +84,46 @@ pub(super) async fn pass(
         from: (!fresh).then_some(state.uidnext),
         sink: options.arrivals.as_ref(),
     };
-    incremental(conn, store, &state, &mut view, arrivals, report).await
+    incremental(conn, store, &state, &mut view, arrivals, report).await?;
+    if view.categories && !conn.categories.caught_up {
+        catch_up(conn, store, folder, &mut view).await?;
+    }
+    Ok(())
+}
+
+/// The stored messages of Gmail's INBOX one pass asks about at most, and per SEARCH.
+const CATCH_UP: u32 = 5_000;
+const CATCH_UP_BATCH: usize = 500;
+
+/// Asks Gmail for the categories of the INBOX's stored messages that have none, once per
+/// connection after its first pass (the fork's Split Inbox, docs/superhuman/split.md): mail
+/// stored before Pronto asked, or while the server refused. Mail the passes fetch comes with
+/// its category already (`view::fetch_rows`).
+async fn catch_up(
+    conn: &mut Connection,
+    store: &Store,
+    folder: FolderId,
+    view: &mut View,
+) -> Result<(), SyncError> {
+    conn.categories.caught_up = true;
+    let pending = store.uncategorized(folder, CATCH_UP).recv().await?;
+    let mut categories = Vec::with_capacity(pending.len());
+    for chunk in pending.chunks(CATCH_UP_BATCH) {
+        let uids: Vec<u32> = chunk.iter().map(|message| message.uid).collect();
+        let Some(primary) = view::primary(conn, &uids, view).await? else {
+            break;
+        };
+        categories.extend(
+            chunk
+                .iter()
+                .map(|message| (message.message, Split::of(primary.contains(&message.uid)))),
+        );
+    }
+    if !categories.is_empty() {
+        tracing::debug!(%folder, messages = categories.len(), "Gmail's categories caught up");
+        store.set_categories(categories).recv().await?;
+    }
+    Ok(())
 }
 
 /// Where a pass reports new mail: the rows it stores at or above `from`, the UIDNEXT the store

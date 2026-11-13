@@ -1,0 +1,99 @@
+# Conversations laid out ahead (the fork's Superhuman pass, docs/superhuman/reader.md): showing
+# the selected message lays out the conversations of the list's next and previous rows unseen,
+# so j, k and the next message an archive moves on to swap in at once; the conversation the
+# selection left stays laid out too. One laid out ahead isn't marked read until it is shown,
+# and neither the widget lookups nor a screen reader find it. Another message of the shown
+# conversation is shown in place, without building the page again. Every message is fictional.
+# Run: tools/headless.sh 25 target/debug/pronto --self-test tests/selftest/reader-ahead.sealwax-test
+
+desktop tiling
+resize 1440 900
+engine-attach
+mail-account Personal
+conversation-add singles
+mail-add inbox 30m "Lunch on Friday" "from=Leah Kim" "text=Shall we try the new place by the harbour?"
+mail-add inbox 40m "Board games" "from=Marius Dahl" "text=I can bring Wingspan and the snacks."
+mail-add inbox 50m "Train tickets" "from=Sana Malik" "text=The tickets for Saturday are booked."
+assert-list-count 27
+
+# Board games selected: Lunch on Friday and Train tickets are laid out ahead, still unread, and
+# the reader's widgets, the lookups and the screen reader see the shown conversation only.
+focus list
+list-select 1
+wait-until assert-reader-selected
+assert-conversation shown-ahead false
+wait-until assert-conversation ahead 2
+assert-list-row 0 unread true
+assert-list-row 2 unread true
+assert-conversation cards 1
+assert-body-text Wingspan
+assert-accessible window
+assert-labelled
+
+# j: Train tickets swaps in, and is read once shown; the next row is laid out in turn.
+key j
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-body-text Saturday
+wait-until assert-list-row 2 unread false
+wait-until assert-conversation ahead 2
+
+# k: back to Board games, kept laid out since the selection left it. Shown two hours after it
+# was laid out, it says its dates as of now: "(40 min ago)" is gone.
+conversation-clock 2
+key k
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-body-text Wingspan
+assert-conversation date-lacks "min ago"
+conversation-clock 0
+
+# Archive moves on to the next row, laid out ahead; Lunch on Friday was never shown, so it is
+# still unread.
+wait-until assert-conversation ahead 2
+key e
+wait-until assert-list-count 26
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-body-text Saturday
+assert-list-row 0 unread true
+
+# Another message of the shown conversation: shown in place.
+conversation-add trip
+conversation-show trip-6
+wait-until assert-conversation read trip-5 true
+wait-until assert-conversation read trip-6 true
+conversation-show trip-2
+assert-conversation selected trip-2
+assert-conversation expanded trip-2,trip-6
+assert-conversation shown-ahead false
+# A day later, a card collapsed into its row says its date as of then, as the list does: a
+# date, not the time it said when the page was built, nor "Yesterday".
+conversation-clock 24
+conversation-click-header trip-6
+assert-conversation row-date-lacks trip-6 ":"
+assert-conversation row-date-lacks trip-6 "Yesterday"
+conversation-clock 0
+focus list
+
+# Focused (the app's default): the cursor lays Lunch on Friday out behind the list, unseen.
+# Opened two hours later, it says its dates as of then, as a page swapped in does; and again
+# when Escape left it there and Enter opens it two hours after that.
+view-mode focused
+assert-pane list
+focus list
+list-select 0
+wait-until assert-reader-selected
+assert-reader-on-screen false
+conversation-clock 2
+key Return
+wait-until assert-reader-on-screen true
+assert-conversation date-lacks "min ago"
+key Escape
+assert-pane list
+conversation-clock 4
+key Return
+wait-until assert-reader-on-screen true
+assert-conversation date-lacks "2 h ago"
+conversation-clock 0
+assert-conversation criticals 0

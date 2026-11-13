@@ -1,13 +1,13 @@
 # The accessibility pass (M9, ML-092) on the command palette, Move to…, the Keyboard Shortcuts
 # dialog, the search suggestions, toasts, banners and the window's dialogs (the default mail app,
-# Start Sealwax at Login, the certificate's details, "Was the message sent?", Show Original):
+# Start Pronto at Login, the certificate's details, "Was the message sent?", Show Original):
 # every control on screen has an accessible name, a role and the states its role needs
 # (assert-accessible); Tab stays inside a dialog and comes round, Escape closes it, and the focus
 # goes back where it was. The palette, Move to… and the suggestions keep the focus in their
 # field, so the row Up and Down choose is announced. Every name, address and message is
 # fictional; nothing reaches the desktop (the sandboxed handlers of reply-default-app and
 # background-login).
-# Run: tools/headless.sh 71 target/debug/sealwax --self-test tests/selftest/a11y-dialogs.sealwax-test
+# Run: tools/headless.sh 71 target/debug/pronto --self-test tests/selftest/a11y-dialogs.sealwax-test
 
 desktop tiling
 reply-sandbox
@@ -16,16 +16,21 @@ engine-attach
 triage-undo-window 3000
 triage-mark-read-on-open false
 triage-account Work work
+# The window opens the account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 outbox-draft first Work
 outbox-draft second Work
 mail-add Work:inbox 2h "Kvartalsrapport" "from=Anna Berg" "text=Rapporten for tredje kvartal."
 mail-add Work:inbox 3h "Hyttetur" "from=Anders Lie" attachment
 list-wait
+# Its first rows in, the list has the Inbox's end in view and asks for older mail.
+engine-expect load-older
 list-select 0
 focus list
 
 # The command palette: the focus stays in its field, Down chooses and is announced, Tab doesn't
-# leave the dialog, Escape closes it and the list has the focus again.
+# leave the dialog, Escape closes it and the list has the focus again. The selected message's
+# commands come first (Superhuman pass): Archive, then Reply.
 key F1
 assert-dialog "Command Palette"
 assert-accessible dialog
@@ -33,7 +38,7 @@ assert-accessible-name palette-search "Command palette"
 assert-accessible-name palette-list Commands
 assert-focus palette-search
 key Down
-assert-announced "Previous Message, Navigation, k, Up"
+assert-announced "Reply, r, Ctrl+R"
 assert-focus palette-search
 tab-chain window forward 10
 assert-tab-stops 1
@@ -54,16 +59,16 @@ key Escape
 assert-move-to open false
 assert-focus list
 
-# The Keyboard Shortcuts dialog: every list named by its section; the go-to keys, Back to List
-# and the composer's commands listed as built.
-key h
+# The Keyboard Shortcuts dialog: every list named by its section; the go-to keys, Back to List,
+# the composer's commands and Toggle Sidebar (built in the Superhuman pass) listed as built.
+key <Control>h
 assert-dialog "Keyboard Shortcuts"
 assert-accessible dialog
 assert-shortcut "Go to Inbox" built
 assert-shortcut "Back to List" built
 assert-shortcut Bold built
 assert-shortcut "Undo Typing" built
-assert-shortcut "Toggle Sidebar" "not built"
+assert-shortcut "Toggle Sidebar" built
 key Escape
 assert-dialog none
 assert-focus list
@@ -93,7 +98,7 @@ engine-reply verified ok
 engine-expect add-account
 engine-reply added ok
 wait-until assert-setup open false
-write-file $TMP/config/sealwax/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\n\n[account.imap]\nhost = \"imap.kari.example.test\"\n\n[account.smtp]\nhost = \"smtp.kari.example.test\"\n"
+write-file $TMP/config/pronto/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\n\n[account.imap]\nhost = \"imap.kari.example.test\"\n\n[account.smtp]\nhost = \"smtp.kari.example.test\"\n"
 wait-until assert-label sidebar-summary "2 accounts · all synced"
 setup-dismiss-toasts
 engine-reply status kari@example.test certificate
@@ -131,7 +136,7 @@ key Escape
 assert-dialog none
 assert-focus-stop banner-primary
 
-# Make Sealwax the Default Mail App… and Start Sealwax at Login.
+# Make Pronto the Default Mail App… and Start Pronto at Login.
 reply-install-entry
 action app.default-mail-app
 wait-until assert-shown default-mail-app true

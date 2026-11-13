@@ -4,7 +4,8 @@
 //! beside it ("Acme", "Kunder / 2026"; M9). Typing filters with Stet's matcher, Up and Down
 //! move, Enter moves the messages, Escape closes; a click picks a folder. It is an `AdwDialog`
 //! like the command palette, so its entry keeps every letter: the list's one-key shortcuts don't
-//! reach it.
+//! reach it. Go to Folder… (`g l`, Superhuman pass) is the same picker over every folder that
+//! holds mail, each account's named beside its folders when there are several.
 
 use crate::triage::folder_title;
 use gtk4 as gtk;
@@ -13,7 +14,7 @@ use gtk4::{gdk, glib};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use sealwax_domain::folders;
-use sealwax_domain::model::{Folder, FolderId, FolderRole};
+use sealwax_domain::model::{AccountId, Folder, FolderId, FolderRole};
 use sealwax_domain::palette;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,12 +30,12 @@ struct Choice {
 }
 
 impl Choice {
-    /// What a screen reader says for the row.
-    fn spoken(&self) -> String {
+    /// What a screen reader says for the row: `Move to Archive`, `Go to Acme, Kunder / 2026`.
+    fn spoken(&self, verb: &str) -> String {
         if self.detail.is_empty() {
-            format!("Move to {}", self.title)
+            format!("{verb} {}", self.title)
         } else {
-            format!("Move to {}, {}", self.title, self.detail)
+            format!("{verb} {}, {}", self.title, self.detail)
         }
     }
 
@@ -65,11 +66,14 @@ impl Choice {
                 detail: above.join(" / "),
             };
         }
+        // The server's own word for a role folder only when it is another word ("Sendt", Gmail's
+        // "Sent Mail"): not IMAP's INBOX beside Inbox, nor the path it sits under ("[Gmail]/").
         let title = folder_title(folder);
-        let detail = if folder.name == title {
+        let leaf = folders::leaf(&folder.name, folder.delimiter);
+        let detail = if leaf.eq_ignore_ascii_case(&title) {
             String::new()
         } else {
-            folder.name.clone()
+            leaf.to_owned()
         };
         Self {
             id: folder.id,
@@ -93,6 +97,8 @@ struct Inner {
     choices: Vec<Choice>,
     shown: RefCell<Vec<Choice>>,
     pick: Pick,
+    /// "Move to" or "Go to", for a screen reader.
+    verb: &'static str,
 }
 
 thread_local! {
@@ -107,17 +113,62 @@ pub struct MoveTo {
     inner: Rc<Inner>,
 }
 
-/// Opens the picker over `window` for `count` messages, offering `folders` in their order;
-/// `known` are every folder, which name the folders above a subfolder; `pick` gets the folder
-/// chosen.
+/// Opens the picker over `window` for `count` messages (`conversations`: conversations),
+/// offering `folders` in their order; `known` are every folder, which name the folders above a
+/// subfolder; `pick` gets the folder chosen.
 pub fn present(
     window: &impl IsA<gtk::Widget>,
     folders: &[Folder],
     known: &[Folder],
     count: u32,
+    conversations: bool,
     pick: impl Fn(FolderId) + 'static,
 ) -> MoveTo {
-    let picker = MoveTo::new(folders, known, count, Rc::new(pick));
+    let title = match (count, conversations) {
+        (1, false) => "Move 1 message to…".to_owned(),
+        (1, true) => "Move 1 conversation to…".to_owned(),
+        (count, false) => format!("Move {count} messages to…"),
+        (count, true) => format!("Move {count} conversations to…"),
+    };
+    let choices = folders
+        .iter()
+        .map(|folder| Choice::new(folder, known))
+        .collect();
+    show(
+        window,
+        MoveTo::new(&title, "Move to", choices, Rc::new(pick)),
+    )
+}
+
+/// Go to Folder…: the picker over `folders` in their order; `accounts` names each account's
+/// folders when there are several (empty: one account); `pick` gets the folder chosen.
+pub fn present_go_to(
+    window: &impl IsA<gtk::Widget>,
+    folders: &[Folder],
+    known: &[Folder],
+    accounts: &[(AccountId, String)],
+    pick: impl Fn(FolderId) + 'static,
+) -> MoveTo {
+    let choices = folders
+        .iter()
+        .map(|folder| {
+            let mut choice = Choice::new(folder, known);
+            if let Some((_, name)) = accounts.iter().find(|(id, _)| *id == folder.account) {
+                choice.detail = if choice.detail.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{} — {name}", choice.detail)
+                };
+            }
+            choice
+        })
+        .collect();
+    let picker = MoveTo::new("Go to folder…", "Go to", choices, Rc::new(pick));
+    picker.dialog.set_widget_name("go-to-folder");
+    show(window, picker)
+}
+
+fn show(window: &impl IsA<gtk::Widget>, picker: MoveTo) -> MoveTo {
     picker.dialog.present(Some(window));
     if let Some(entry) = picker.inner.entry.upgrade() {
         entry.grab_focus();
@@ -133,19 +184,15 @@ pub fn current() -> Option<MoveTo> {
 }
 
 impl MoveTo {
-    fn new(folders: &[Folder], known: &[Folder], count: u32, pick: Pick) -> Self {
-        let title = match count {
-            1 => "Move 1 message to…".to_owned(),
-            count => format!("Move {count} messages to…"),
-        };
+    fn new(title: &str, verb: &'static str, choices: Vec<Choice>, pick: Pick) -> Self {
         let entry = gtk::SearchEntry::builder()
-            .placeholder_text(title.as_str())
+            .placeholder_text(title)
             .search_delay(0)
             .hexpand(true)
             .css_classes(["sw-palette-search", "sw-move-to-search"])
             .build();
         entry.set_widget_name("move-to-search");
-        entry.update_property(&[gtk::accessible::Property::Label(&title)]);
+        entry.update_property(&[gtk::accessible::Property::Label(title)]);
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Browse)
             .css_classes(["sw-palette-list", "sw-move-to-list"])
@@ -169,7 +216,7 @@ impl MoveTo {
         content.add_top_bar(&header);
         content.set_content(Some(&scrolled));
         let dialog = adw::Dialog::builder()
-            .title(title.as_str())
+            .title(title)
             .content_width(420)
             .content_height(420)
             .child(&content)
@@ -182,12 +229,10 @@ impl MoveTo {
             entry: entry.downgrade(),
             list: list.downgrade(),
             scrolled: scrolled.downgrade(),
-            choices: folders
-                .iter()
-                .map(|folder| Choice::new(folder, known))
-                .collect(),
+            choices,
             shown: RefCell::new(Vec::new()),
             pick,
+            verb,
         });
         connect(&inner, &entry, &list);
         inner.refresh();
@@ -286,7 +331,7 @@ impl Inner {
             .collect();
         list.remove_all();
         for choice in &shown {
-            list.append(&row(choice));
+            list.append(&row(choice, self.verb));
         }
         if let Some(first) = list.row_at_index(0) {
             list.select_row(Some(&first));
@@ -319,7 +364,7 @@ impl Inner {
                     .ok()
                     .and_then(|index| self.shown.borrow().get(index).cloned()),
             ) {
-                crate::accessibility::announce(&entry, &choice.spoken());
+                crate::accessibility::announce(&entry, &choice.spoken(self.verb));
             }
             if let (Some(scrolled), Some(bounds)) =
                 (self.scrolled.upgrade(), row.compute_bounds(&list))
@@ -347,7 +392,7 @@ impl Inner {
     }
 }
 
-fn row(choice: &Choice) -> gtk::ListBoxRow {
+fn row(choice: &Choice, verb: &str) -> gtk::ListBoxRow {
     let title = gtk::Label::builder()
         .label(&choice.title)
         .xalign(0.0)
@@ -378,7 +423,7 @@ fn row(choice: &Choice) -> gtk::ListBoxRow {
     // The focus stays in the search entry, where Up and Down move the chosen row and a screen
     // reader hears it: Tab doesn't walk every row.
     row.set_focusable(false);
-    row.update_property(&[gtk::accessible::Property::Label(&choice.spoken())]);
+    row.update_property(&[gtk::accessible::Property::Label(&choice.spoken(verb))]);
     row
 }
 
@@ -416,7 +461,8 @@ mod tests {
             (receipts.title.as_str(), receipts.detail.as_str()),
             ("Kvitteringer", "Inbox")
         );
-        assert_eq!(receipts.spoken(), "Move to Kvitteringer, Inbox");
+        assert_eq!(receipts.spoken("Move to"), "Move to Kvitteringer, Inbox");
+        assert_eq!(receipts.spoken("Go to"), "Go to Kvitteringer, Inbox");
         let acme = choice(3);
         assert_eq!(
             (acme.title.as_str(), acme.detail.as_str()),
@@ -430,6 +476,42 @@ mod tests {
         assert_eq!(
             (sent.title.as_str(), sent.detail.as_str()),
             ("Sent", "Sendt")
+        );
+    }
+
+    #[test]
+    fn role_folders_show_no_raw_imap_name() {
+        let known = vec![
+            folder(1, "INBOX", FolderRole::Inbox),
+            folder(2, "[Gmail]/Sent Mail", FolderRole::Sent),
+            folder(3, "[Gmail]/Trash", FolderRole::Trash),
+            folder(4, "[Gmail]/Spam", FolderRole::Junk),
+            folder(5, "Drafts", FolderRole::Drafts),
+        ];
+        let shown: Vec<(String, String)> = known
+            .iter()
+            .map(|folder| {
+                let choice = Choice::new(folder, &known);
+                (choice.title, choice.detail)
+            })
+            .collect();
+        let pairs: Vec<(&str, &str)> = shown
+            .iter()
+            .map(|(title, detail)| (title.as_str(), detail.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("Inbox", ""),
+                ("Sent", "Sent Mail"),
+                ("Trash", ""),
+                ("Junk", "Spam"),
+                ("Drafts", ""),
+            ]
+        );
+        assert_eq!(
+            Choice::new(&known[0], &known).spoken("Go to"),
+            "Go to Inbox"
         );
     }
 }

@@ -4,7 +4,7 @@
 //!   settings, CSP and content filter; remote images only where the user allowed them for that
 //!   message or its sender), held by a window that is never shown, and runs WebKit's print
 //!   dialog on it. The document is the message's own HTML, or its plain text escaped and
-//!   wrapped, with a header (subject, From, To, Cc, Date) that Sealwax's isolated world puts at
+//!   wrapped, with a header (subject, From, To, Cc, Date) that Pronto's isolated world puts at
 //!   its top and a user stylesheet keeps as written. Page-initiated printing stays refused.
 //! - **Show Original** shows the raw source in a read-only, monospace, selectable view in a
 //!   dialog over the window: at most [`ORIGINAL_SHOWN`] bytes of it, with Save as .eml for the
@@ -154,7 +154,7 @@ fn header_script(detail: &MessageDetail) -> String {
 
 /// Prints the shown message: WebKit's print dialog, or a PDF when a print target is set.
 pub(super) fn print(reader: &Reader) {
-    let Some(id) = reader.message() else {
+    let Some(id) = reader.message_in_hand() else {
         return;
     };
     let inner = reader.inner.clone();
@@ -198,7 +198,7 @@ async fn print_message(
 ) -> Result<(), &'static str> {
     let (detail, body) = read(inner, id).await?;
     let (html, parts) = match body {
-        Body::Html { html, parts, .. } => (html, parts),
+        Body::Html { html, parts, .. } => (html.to_string(), parts),
         Body::Plain(text) => (plain_document(&text), InlineParts::default()),
         Body::Empty => (plain_document(""), InlineParts::default()),
         Body::NotDownloaded => (
@@ -345,7 +345,7 @@ pub fn original_dialog() -> Option<Rc<OriginalDialog>> {
 
 /// Shows the shown message's raw source in a dialog over the window.
 pub(super) fn show_original(reader: &Reader) {
-    let Some(id) = reader.message() else {
+    let Some(id) = reader.message_in_hand() else {
         return;
     };
     let inner = reader.inner.clone();
@@ -535,7 +535,7 @@ fn source_text(bytes: &[u8]) -> String {
 
 /// Saves the shown message as `.eml` through the file chooser.
 pub(super) fn save_message(reader: &Reader) {
-    if let Some(id) = reader.message() {
+    if let Some(id) = reader.message_in_hand() {
         glib::spawn_future_local(save(reader.inner.clone(), id, None));
     }
 }

@@ -1,0 +1,115 @@
+# The sender column names whole people for its width (phase C, the visual QA: at the 710 px half
+# tile "Marius … To…" and "Ingrid … me, …" cut names and left an empty item, and at 1440 px the
+# Draft marker cut the unread latest writer to an initial). Every text is made of whole names:
+# all of them while they fit, "Ingrid … Sana, Tomas" past three (the two who wrote last, not the
+# two who joined last), then the first writer and the one the row is about, then that one and
+# how many others wrote ("Sana +2"). The Draft marker takes the count's place, and either
+# follows the names at once. Every message is fictional.
+# Run: tools/headless.sh 62 target/debug/pronto --self-test tests/selftest/list-names.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+conversation-add typical
+# Older mail under them, enough for the list to scroll.
+mail-add Personal:inbox 3d "Older note 3" "from=Leah Kim" read
+mail-add Personal:inbox 4d "Older note 4" "from=Leah Kim" read
+mail-add Personal:inbox 5d "Older note 5" "from=Leah Kim" read
+mail-add Personal:inbox 6d "Older note 6" "from=Leah Kim" read
+mail-add Personal:inbox 7d "Older note 7" "from=Leah Kim" read
+mail-add Personal:inbox 8d "Older note 8" "from=Leah Kim" read
+mail-add Personal:inbox 9d "Older note 9" "from=Leah Kim" read
+mail-add Personal:inbox 10d "Older note 10" "from=Leah Kim" read
+mail-add Personal:inbox 11d "Older note 11" "from=Leah Kim" read
+mail-add Personal:inbox 12d "Older note 12" "from=Leah Kim" read
+mail-add Personal:inbox 13d "Older note 13" "from=Leah Kim" read
+mail-add Personal:inbox 14d "Older note 14" "from=Leah Kim" read
+mail-add Personal:inbox 15d "Older note 15" "from=Leah Kim" read
+mail-add Personal:inbox 16d "Older note 16" "from=Leah Kim" read
+mail-add Personal:inbox 17d "Older note 17" "from=Leah Kim" read
+mail-add Personal:inbox 18d "Older note 18" "from=Leah Kim" read
+mail-add Personal:inbox 19d "Older note 19" "from=Leah Kim" read
+mail-add Personal:inbox 20d "Older note 20" "from=Leah Kim" read
+mail-add Personal:inbox 21d "Older note 21" "from=Leah Kim" read
+mail-add Personal:inbox 22d "Older note 22" "from=Leah Kim" read
+mail-add Personal:inbox 23d "Older note 23" "from=Leah Kim" read
+mail-add Personal:inbox 24d "Older note 24" "from=Leah Kim" read
+mail-add Personal:inbox 25d "Older note 25" "from=Leah Kim" read
+mail-add Personal:inbox 26d "Older note 26" "from=Leah Kim" read
+# Ingrid started the offsite, Tomas answered, Sana wrote last (unread); the user's reply waits
+# as a draft.
+notify-mail a1 Personal:inbox "Q4 planning offsite" read "from=Ingrid Solberg" ago=210 "text=Hi both, shall we do the offsite in Lillehammer again?"
+notify-mail a2 Personal:inbox "Re: Q4 planning offsite" read "from=Tomas Berg" ago=150 reply=a1 "text=Lillehammer works."
+notify-mail a3 Personal:inbox "Re: Q4 planning offsite" "from=Sana Malik" ago=6 reply=a2 "text=Works for me. I'll book the train."
+notify-mail a4 Personal:drafts "Re: Q4 planning offsite" read "from=Alex Berg" ago=3 reply=a3 "text=Great, I'll take the hotel."
+mail-add Personal:inbox 18m "Lunch on Friday?" "from=Kari Nordmann" "text=Want to try the new ramen place?"
+# The window shows the account's Inbox as soon as its folders are there (phase C's first view),
+# so the samples come into it one at a time and the cursor stays on the first to come, the
+# trip's, which the later ones push down: with a row per message (the end of this script) the
+# list keeps that row in view and row 0 above it out of view, where its names aren't laid out.
+# Opened again, the Inbox opens filled, its cursor on the first row.
+folder archive Personal
+list-wait
+folder inbox Personal
+list-wait
+assert-list-row 0 subject "Q4 planning offsite"
+assert-list-row 2 subject "Spring workshop plans"
+assert-list-row 3 subject "Cabin trip in November?"
+
+# 1440 px: every name of the offsite whole beside the Draft marker, which takes the count's
+# place; the trip names the two who wrote last, Tomas the newest.
+assert-list-row 0 sender "Ingrid, Tomas, Sana"
+assert-list-row 0 draft true
+assert-list-row 0 count ""
+assert-list-row 0 names-whole true
+assert-list-row 1 sender "Kari Nordmann"
+assert-list-row 2 sender "Marius … Orbit, Ingrid"
+assert-list-row 2 count 10
+assert-list-row 2 names-whole true
+assert-list-row 3 sender "Ingrid … Sana, Tomas"
+assert-list-row 3 count 6
+assert-list-row 3 names-whole true
+assert-list-row 3 label-starts "Unread, Ingrid, Sana, Tomas and 1 other, 6 messages, Cabin trip in November?, "
+
+# The 710 px half tile: shorter texts of whole names, never a cut one, the count after them;
+# none after "Marius +7", where it would read as one more number ("Marius +7 10", phase C's
+# review).
+resize 710 900
+wait-until assert-list-row 0 sender "Sana +2"
+assert-list-row 0 names-whole true
+assert-list-row 2 sender "Marius +7"
+assert-list-row 2 names-whole true
+assert-list-row 2 count ""
+assert-list-row 3 sender "Ingrid … Tomas"
+assert-list-row 3 names-whole true
+assert-list-row 3 count 6
+# Wider again: the whole names come back, and the count with them.
+resize 1440 900
+wait-until assert-list-row 0 sender "Ingrid, Tomas, Sana"
+assert-list-row 3 sender "Ingrid … Sana, Tomas"
+assert-list-row 2 count 10
+
+# Split's two-line rows have the line's room: every name. The list, at its top in Focused, is
+# at its top in Split, its first date header in view (phase C, the visual QA: "TODAY" sat 26 px
+# above the list right after the switch, the keyboard focus on its first row).
+focus list
+view-mode split
+wait-until assert-list-top true
+assert-list-headers "TODAY,THIS WEEK,THIS MONTH"
+wait-until assert-list-row 3 sender "Ingrid … Sana, Tomas"
+assert-list-row 0 sender "Ingrid, Tomas, Sana"
+assert-list-row 0 names-whole true
+assert-list-row 3 names-whole true
+view-mode focused
+
+# Message rows name each message's sender alone, whole.
+grouping messages
+list-wait
+assert-list-row 0 sender "Sana Malik"
+assert-list-row 0 names-whole true
+
+# Picking names as the rows are laid out leaves GTK nothing to warn about.
+assert-gtk-warnings 0

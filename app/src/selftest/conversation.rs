@@ -9,27 +9,35 @@
 //! | `conversation-account NAME ADDRESS` | An account at ADDRESS with the six role folders (`alex.berg@example.test` makes the samples "to me") |
 //! | `conversation-add NAME [ACCOUNT]` | Files sample conversation NAME (`trip`, `letters`, `long`, `typical`, `links`) in the account's Inbox, the user's own messages in its Sent; `singles` files 24 messages that are each a conversation of their own (`single-1`, newest, to `single-24`) |
 //! | `conversation-show MESSAGE` | Selects MESSAGE's row (`trip-6`, …) and waits until the reader shows its conversation |
+//! | `conversation-open-at POS MESSAGE` | Opens the list's row POS at MESSAGE, as a notification's click does (`MessageList::open_at`) |
 //! | `conversation-click-row N` | A real click on the N-th collapsed row (from 0), scrolled into view first; waits for its card |
 //! | `conversation-click-header MESSAGE` | A real click on MESSAGE's card header; waits for its row |
 //! | `conversation-click-fold` | A real click on the first "N earlier messages" row |
+//! | `conversation-focus MESSAGE` | Puts the keyboard focus on MESSAGE's collapsed row, else its card's header, as a program would (no press) |
 //! | `conversation-scroll top\|bottom\|FRACTION` | Scrolls the reader's column and waits until the bodies on screen are drawn |
 //! | `conversation-scroll-through STEP` | Scrolls from the top to the bottom STEP px at a time: at every step at most `MAX_LIVE_VIEWS` views; once settled, no blank body on screen and every body as tall as first measured |
 //! | `conversation-reply NAME` | A reply to conversation NAME's latest message arrives, unread |
 //! | `conversation-delete MESSAGE` | MESSAGE goes to the Trash (a local account applies it at once) |
 //! | `conversation-remember MESSAGE` | Notes where MESSAGE starts in the column, for `assert-conversation kept` |
-//! | `assert-conversation FIELD VALUE…` | `messages`, `expanded` (a count, or names joined by commas), `collapsed`, `cards` (expanded cards built), `folds`, `folded`, `html-bodies`, `measured` (HTML bodies with a height), `live-bodies`, `live-at-most`, `top-of` MESSAGE (its card or row starts in the column's view), `at-top` (the column isn't scrolled), `blank`, `read` MESSAGE `true\|false`, `selected` MESSAGE, `kept` (the remembered message starts where it did, within 2 px), `labelled` (rows and headers say what they are), `criticals` N, `order` MESSAGE,… (they start in that order down the column), `quick-above`/`quick-below` MESSAGE (the quick reply starts above or below it) |
+//! | `conversation-count-shows` | Counts the conversations the reader shows (`Shown`) from now on; a conversation read again in place isn't one |
+//! | `assert-conversation-shows N` | The reader showed N conversations since `conversation-count-shows` |
+//! | `assert-row-conversation POS MESSAGE` | The list's row POS is MESSAGE's conversation (conversation rows) |
+//! | `assert-selected-conversation MESSAGE` | The one selected row is MESSAGE's conversation |
+//! | `conversation-clock HOURS` | The reader writes its dates as if HOURS more had passed (`Reader::set_clock`) |
+//! | `assert-conversation FIELD VALUE…` | `messages`, `expanded` (a count, or names joined by commas), `collapsed`, `cards` (expanded cards built), `folds`, `folded`, `html-bodies`, `measured` (HTML bodies with a height), `live-bodies`, `live-at-most`, `top-of` MESSAGE (its card or row starts in the column's view), `at-top` (the column isn't scrolled), `blank`, `read` MESSAGE `true\|false`, `selected` MESSAGE, `kept` (the remembered message starts where it did, within 2 px), `labelled` (rows and headers say what they are), `criticals` N, `order` MESSAGE,… (they start in that order down the column), `quick-above`/`quick-below` MESSAGE (the quick reply starts above or below it), `ahead` N (conversations laid out unseen, ready to swap in), `ahead-has` MESSAGE `true\|false` (MESSAGE's conversation is one of them, for that message), `date-lacks` TEXT (no card's date on the page on screen says TEXT), `row-date-lacks` MESSAGE TEXT (MESSAGE's collapsed row, shown or not, doesn't say TEXT as its date), `date-of` MESSAGE TEXT (what its card, else its row, says where its date goes), `heading-clear` `true\|false` (the heading's box is in view with 4 px above it, or out of view whole, not cut by the column's top; read once the column has brought the inline reply into view), `reply-in-view` `true\|false` (the open inline reply in view whole, 12 px clear of the column's foot, read then too), `draft-of` MESSAGE `true\|false` (that is in the draft colour, a draft's "Draft"), `ahead-drawn` MS MAX (the pages laid out ahead were drawn at most MAX times in the next MS ms: they stop once settled; `N+`: at least N times, while they settle), `warm-drawn` MS MAX (the same for the reader kept warm behind a Focused list), `ahead-settled` `true\|false` (every page laid out ahead has settled: loaded, painted, measured at its width, unchanged for a second), `quiet` `true\|false` (the reader has settled, what it shows and what it lays out ahead: kept warm behind a Focused list, it is no longer drawn), `ahead-measured` MIN [MAX] (every HTML body laid out ahead is measured at its width, the tallest at least MIN px and at most MAX), `shown-ahead` `true\|false` (the last one shown came from such a page), `focus` MESSAGE `body\|header\|row\|card\|none` (where the keyboard focus is in it) |
 
 use super::{Harness, StepResult, blocking, equal, mail, number, script, triage};
 use crate::reader::{BodyReport, MAX_LIVE_VIEWS, Reader, samples};
 use gtk4 as gtk;
 use gtk4::glib;
 use gtk4::prelude::*;
-use sealwax_domain::model::{FolderRole, MessageId};
+use sealwax_domain::model::{FolderRole, MessageId, ThreadId};
 use sealwax_domain::triage::Triage;
 use sealwax_infrastructure::ingest::{self, RawMessage};
-use sealwax_infrastructure::store::{FolderSpec, NewAccount, QueueTriage};
+use sealwax_infrastructure::store::{FolderSpec, ListRow, NewAccount, QueueTriage};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// The commands and their argument counts, for the script parser.
@@ -37,15 +45,22 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("conversation-account", 2, 2),
     ("conversation-add", 1, 2),
     ("conversation-show", 1, 1),
+    ("conversation-open-at", 2, 2),
     ("conversation-click-row", 1, 1),
     ("conversation-click-header", 1, 1),
     ("conversation-click-fold", 0, 0),
+    ("conversation-focus", 1, 1),
     ("conversation-scroll", 1, 1),
     ("conversation-scroll-through", 1, 1),
     ("conversation-reply", 1, 1),
     ("conversation-delete", 1, 1),
     ("conversation-remember", 1, 1),
+    ("conversation-count-shows", 0, 0),
+    ("conversation-clock", 1, 1),
     ("assert-conversation", 1, 3),
+    ("assert-conversation-shows", 1, 1),
+    ("assert-row-conversation", 2, 2),
+    ("assert-selected-conversation", 1, 1),
 ];
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -62,10 +77,45 @@ thread_local! {
     static CRITICALS: Cell<Option<u32>> = const { Cell::new(None) };
     /// A message and where it started in the column when `conversation-remember` ran.
     static REMEMBERED: Cell<Option<(MessageId, f64)>> = const { Cell::new(None) };
+    /// Conversations the reader showed since `conversation-count-shows`, once it ran.
+    static SHOWS: Rc<Cell<Option<u32>>> = Rc::default();
 }
 
 pub fn handles(command: &str) -> bool {
-    command.starts_with("conversation-") || command == "assert-conversation"
+    command.starts_with("conversation-")
+        || matches!(
+            command,
+            "assert-conversation"
+                | "assert-conversation-shows"
+                | "assert-row-conversation"
+                | "assert-selected-conversation"
+        )
+}
+
+/// The conversation (thread) of the sample message `name`, as the store holds it.
+async fn thread_of(harness: &Harness, name: &str) -> Result<ThreadId, String> {
+    let id = id(name)?;
+    let reply = harness
+        .state
+        .mailbox()
+        .store()
+        .ok_or("the store is not open")?
+        .message(id);
+    reply
+        .recv()
+        .await
+        .map_err(|error| error.to_string())?
+        .value
+        .map(|detail| detail.summary.thread)
+        .ok_or_else(|| format!("the store no longer has {name}"))
+}
+
+/// The conversation of a list row, when it is a conversation's row.
+fn row_thread(row: Option<ListRow>) -> Option<ThreadId> {
+    match row {
+        Some(ListRow::Conversation(row)) => Some(row.thread),
+        _ => None,
+    }
 }
 
 /// Counts GTK's and GObject's criticals from now on, still writing them as GLib does.
@@ -98,7 +148,8 @@ fn reader(harness: &Harness) -> Result<Reader, String> {
 pub(super) fn id(name: &str) -> Result<MessageId, String> {
     NAMES
         .with(|names| names.borrow().get(name).copied())
-        .ok_or_else(|| format!("no message {name}; file it with conversation-add"))
+        .or_else(|| super::notify::named(name))
+        .ok_or_else(|| format!("no message {name}; file it with conversation-add or notify-mail"))
 }
 
 /// The sample name of message `id`, if a sample filed it.
@@ -129,9 +180,25 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
         "conversation-account" => account(harness, arg(0), arg(1)).await,
         "conversation-add" => add(harness, arg(0), args.get(1).map(String::as_str)).await,
         "conversation-show" => show(harness, arg(0)).await,
+        "conversation-open-at" => {
+            let message = id(arg(1))?;
+            mail::list(harness)?.open_at(number(arg(0))? as u32, message);
+            harness.wait_until_settled().await;
+            Ok(())
+        }
         "conversation-click-row" => click_row(harness, number(arg(0))?).await,
         "conversation-click-header" => click_header(harness, arg(0)).await,
         "conversation-click-fold" => click_fold(harness).await,
+        "conversation-focus" => {
+            let target = reader(harness)?
+                .focus_stop(id(arg(0))?)
+                .ok_or_else(|| format!("{} isn't shown", arg(0)))?;
+            if !target.grab_focus() {
+                return Err(format!("{} can't take the focus", arg(0)));
+            }
+            harness.wait_until_settled().await;
+            Ok(())
+        }
         "conversation-scroll" => scroll(harness, arg(0)).await,
         "conversation-scroll-through" => scroll_through(harness, number(arg(0))? as f64).await,
         "conversation-reply" => reply(harness, arg(0)).await,
@@ -144,7 +211,45 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
             REMEMBERED.with(|remembered| remembered.set(Some((id, top))));
             Ok(())
         }
+        "conversation-clock" => {
+            let hours = arg(0)
+                .parse::<i64>()
+                .map_err(|_| format!("expected whole hours, got {}", arg(0)))?;
+            reader(harness)?.set_clock(hours * 3_600);
+            Ok(())
+        }
         "assert-conversation" => check(harness, args).await,
+        "conversation-count-shows" => {
+            let reader = reader(harness)?;
+            let counted = SHOWS.with(Rc::clone);
+            if counted.replace(Some(0)).is_none() {
+                reader.connect_shown(move |_| {
+                    counted.set(counted.get().map(|shows| shows + 1));
+                });
+            }
+            Ok(())
+        }
+        "assert-conversation-shows" => {
+            let shows = SHOWS
+                .with(|shows| shows.get())
+                .ok_or("conversation-count-shows didn't run")?;
+            equal("conversations shown", shows, number(arg(0))? as u32)
+        }
+        "assert-row-conversation" => {
+            let position = number(arg(0))? as u32;
+            let wanted = thread_of(harness, arg(1)).await?;
+            let row = mail::list(harness)?.model().list_row_at(position);
+            equal(
+                &format!("row {position}'s conversation"),
+                row_thread(row),
+                Some(wanted),
+            )
+        }
+        "assert-selected-conversation" => {
+            let wanted = thread_of(harness, arg(0)).await?;
+            let row = mail::list(harness)?.selected_row();
+            equal("the selected conversation", row_thread(row), Some(wanted))
+        }
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -161,6 +266,8 @@ async fn account(harness: &Harness, name: &str, address: &str) -> StepResult {
             address: address.to_owned(),
         });
     let account = reply.recv().await.map_err(|error| error.to_string())?.value;
+    // The account first, then its folders, as after a real setup (`mail::account_read`).
+    mail::account_read(harness, account).await?;
     for (role, folder) in [
         (FolderRole::Inbox, "INBOX"),
         (FolderRole::Drafts, "Drafts"),
@@ -305,6 +412,19 @@ fn column(reader: &Reader) -> Result<gtk::ScrolledWindow, String> {
         .ancestor(gtk::ScrolledWindow::static_type())
         .and_downcast::<gtk::ScrolledWindow>()
         .ok_or_else(|| "the reader isn't in its column".to_owned())
+}
+
+/// Waits until the column has brought the inline reply into view, if it was doing so, and has
+/// laid that out.
+async fn settle_reveal(harness: &Harness, reader: &Reader) -> Result<(), String> {
+    let started = Instant::now();
+    while reader.revealing() {
+        if started.elapsed() > WAIT {
+            return Err("the column is still bringing a widget into view".into());
+        }
+        glib::timeout_future(Duration::from_millis(20)).await;
+    }
+    harness.wait_frames(2).await
 }
 
 /// HTML bodies on screen that show nothing yet: no view, or a view not loaded and drawn.
@@ -623,6 +743,92 @@ async fn check(harness: &Harness, args: &[String]) -> StepResult {
             let above = f64::from(quick) < message;
             equal("quick reply above", above, field == "quick-above")
         }
+        "focus" => {
+            let name = value(1)?;
+            let found = reader.focus_in(id(name)?).unwrap_or("none");
+            equal(&format!("focus in {name}"), found, value(2)?)
+        }
+        "heading-clear" => {
+            // The heading is in the column's view with room above it, or out of it whole: never
+            // cut by the view's top (the toolbar's hairline). Read once the column has brought
+            // the inline reply into view, if it was.
+            settle_reveal(harness, &reader).await?;
+            let column = column(&reader)?;
+            let heading = named(&reader.widget(), "reader-subject")
+                .into_iter()
+                .find(|heading| heading.is_mapped())
+                .ok_or("no heading on the page on screen")?;
+            let bounds = heading
+                .compute_bounds(&column)
+                .ok_or("the heading has no bounds")?;
+            let (top, bottom) = (bounds.y(), bounds.y() + bounds.height());
+            println!("  # the heading from y {top:.0} to {bottom:.0} in the column");
+            // Its box's top: the letters start a few px lower (`live::HEADING_ROOM`).
+            let clear = bottom <= 0.5 || top >= 3.5;
+            equal(
+                "the heading clear of the view's top",
+                clear,
+                script::boolean(value(1)?)?,
+            )
+        }
+        "reply-in-view" => {
+            // The inline reply in the column's view whole, once the column has brought it in,
+            // with room below it.
+            settle_reveal(harness, &reader).await?;
+            let column = column(&reader)?;
+            let quick = named(&reader.widget(), "quick-reply")
+                .into_iter()
+                .find(|quick| quick.is_mapped())
+                .ok_or("no inline reply on the page on screen")?;
+            let bounds = quick
+                .compute_bounds(&column)
+                .ok_or("the inline reply has no bounds")?;
+            let (top, bottom) = (bounds.y(), bounds.y() + bounds.height());
+            let room = column.height() as f32 - bottom;
+            println!(
+                "  # the reply from y {top:.0} to {bottom:.0} in the column, {room:.0} px below"
+            );
+            equal(
+                "the inline reply in view whole, 12 px clear of the column's foot",
+                top >= 0.0 && room >= 11.5,
+                script::boolean(value(1)?)?,
+            )
+        }
+        "date-of" => {
+            let name = value(1)?;
+            let (date, draft) = reader
+                .date_shown(id(name)?)
+                .ok_or_else(|| format!("{name} isn't on the page on screen"))?;
+            println!(
+                "  # {name} says {date:?}{}",
+                if draft { ", a draft" } else { "" }
+            );
+            equal(&format!("{name}'s date"), date.as_str(), value(2)?)
+        }
+        "draft-of" => {
+            let name = value(1)?;
+            let (_, draft) = reader
+                .date_shown(id(name)?)
+                .ok_or_else(|| format!("{name} isn't on the page on screen"))?;
+            equal(
+                &format!("{name} marked a draft"),
+                draft,
+                script::boolean(value(2)?)?,
+            )
+        }
+        "row-date-lacks" => {
+            let name = value(1)?;
+            let date = reader
+                .row_date(id(name)?)
+                .ok_or_else(|| format!("{name} has no row on the page on screen"))?;
+            let unwanted = value(2)?;
+            println!("  # {name}'s row says {date:?}");
+            if date.contains(unwanted) {
+                Err(format!("{name}'s row says {date:?}, with {unwanted:?}"))
+            } else {
+                Ok(())
+            }
+        }
         "top-of" => {
             let name = value(1)?;
             let id = id(name)?;
@@ -706,6 +912,112 @@ async fn check(harness: &Harness, args: &[String]) -> StepResult {
                 true,
             )
         }
+        "ahead" => equal(
+            "conversations laid out ahead",
+            reader.warm().len(),
+            number(value(1)?)?,
+        ),
+        "ahead-has" => {
+            let id = id(value(1)?)?;
+            equal(
+                &format!("{} laid out ahead", value(1)?),
+                reader.warm().contains(&id),
+                script::boolean(value(2)?)?,
+            )
+        }
+        "ahead-drawn" | "warm-drawn" => {
+            // Draws during the next MS ms: of the pages laid out ahead (the reader's stage), or
+            // of the reader kept warm behind a Focused list. Both stop once painted.
+            let ms = number(value(1)?)? as u64;
+            let bound = value(2)?;
+            let (least, most) = match bound.strip_suffix('+') {
+                Some(least) => (number(least)? as u64, u64::MAX),
+                None => (0, number(bound)? as u64),
+            };
+            let window = harness.window()?;
+            let count = || {
+                if field == "ahead-drawn" {
+                    reader.staged_draws()
+                } else {
+                    window.warm_reader_draws()
+                }
+            };
+            let (drawn, skipped) = count();
+            glib::timeout_future(Duration::from_millis(ms)).await;
+            let (drawn_after, skipped_after) = count();
+            let (drawn, skipped) = (drawn_after - drawn, skipped_after - skipped);
+            println!("  # in {ms} ms: drawn {drawn} times, left undrawn {skipped} times");
+            if drawn > most {
+                Err(format!("drawn {drawn} times in {ms} ms, more than {most}"))
+            } else if drawn < least {
+                Err(format!(
+                    "drawn {drawn} times in {ms} ms, fewer than {least}"
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        "ahead-settled" => equal(
+            "the pages laid out ahead settled",
+            reader.ahead_settled(),
+            script::boolean(value(1)?)?,
+        ),
+        "quiet" => equal(
+            "the reader settled",
+            reader.is_quiet(),
+            script::boolean(value(1)?)?,
+        ),
+        "ahead-measured" => {
+            // Measured while it waits unseen, a body laid out ahead swaps in at its height.
+            let least = i32::try_from(number(value(1)?)?).unwrap_or(i32::MAX);
+            let most = match args.get(2) {
+                Some(most) => i32::try_from(number(most)?).unwrap_or(i32::MAX),
+                None => i32::MAX,
+            };
+            let heights = reader.ahead_heights();
+            let shown: Vec<String> = heights
+                .iter()
+                .map(|(id, height)| {
+                    let height = height.map_or_else(|| "unmeasured".to_owned(), |h| h.to_string());
+                    format!("{} {height}", name_of(*id))
+                })
+                .collect();
+            println!("  # bodies laid out ahead: {shown:?}");
+            let tallest = heights.iter().filter_map(|(_, height)| *height).max();
+            if heights.is_empty() {
+                Err("no HTML body is laid out ahead".to_owned())
+            } else if heights.iter().any(|(_, height)| height.is_none()) {
+                Err("a body laid out ahead isn't measured at its width".to_owned())
+            } else if tallest.is_some_and(|tallest| (least..=most).contains(&tallest)) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the tallest is {tallest:?} px, not from {least} to {most}"
+                ))
+            }
+        }
+        "date-lacks" => {
+            // The cards' dates beside their senders, on the page on screen.
+            let dates: Vec<String> = named(&reader.widget(), "reader-date")
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .map(|label| label.label().to_string())
+                .collect();
+            let unwanted = value(1)?;
+            println!("  # dates on screen: {dates:?}");
+            if dates.is_empty() {
+                Err("no card's date is on screen".to_owned())
+            } else if dates.iter().any(|date| date.contains(unwanted)) {
+                Err(format!("a date on screen still says {unwanted}: {dates:?}"))
+            } else {
+                Ok(())
+            }
+        }
+        "shown-ahead" => equal(
+            "shown from a page laid out ahead",
+            reader.last_shown().map(|shown| shown.ahead),
+            Some(script::boolean(value(1)?)?),
+        ),
         "selected" => equal(
             "the reader's message",
             reader.message().map(name_of),

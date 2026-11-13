@@ -5,7 +5,7 @@
 # tests/theme/, swapped into the run's scratch Omarchy state; the desktop's own theme is never
 # read or changed. Not part of tools/ci.sh; it writes into tools/progress/public/. Run from the
 # repository root:
-#   tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/preview-m1-shell.sealwax-test
+#   tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/preview-m1-shell.sealwax-test
 
 desktop tiling
 theme matte-black
@@ -19,7 +19,7 @@ assert-layout wide
 assert-contrast compose 4.5
 screenshot $DIR/../../tools/progress/public/m1-shell-wide-matte-black-square-2026-10-04.png
 resize 1100 900
-assert-layout rail
+assert-layout medium
 screenshot $DIR/../../tools/progress/public/m1-shell-rail-matte-black-square-2026-10-04.png
 resize 800 900
 assert-layout narrow
@@ -29,7 +29,7 @@ theme catppuccin-latte
 corners 8
 screenshot $DIR/../../tools/progress/public/m1-shell-narrow-catppuccin-latte-rounded-2026-10-04.png
 resize 1100 900
-assert-layout rail
+assert-layout medium
 screenshot $DIR/../../tools/progress/public/m1-shell-rail-catppuccin-latte-rounded-2026-10-04.png
 resize 1440 900
 assert-layout wide

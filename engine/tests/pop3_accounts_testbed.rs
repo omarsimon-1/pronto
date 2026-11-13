@@ -7,7 +7,7 @@
 //! mail on the server downloads it all and deletes it there. Sending goes to the testbed's own
 //! user only. Needs the testbed running and seeded, one test at a time (they share popclient):
 //!
-//! SEALWAX_TESTBED_CA=tools/testbed/certs/ca.pem cargo test -p sealwax-engine --release \
+//! PRONTO_TESTBED_CA=tools/testbed/certs/ca.pem cargo test -p sealwax-engine --release \
 //!   --test pop3_accounts_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -170,7 +170,7 @@ impl Running {
             .unwrap(),
         );
         let engine = Engine::start(EngineConfig {
-            application: "io.github.pixdevsapps.Sealwax.Test".into(),
+            application: "io.github.omarsimon1.Pronto.Test".into(),
             store: store.clone(),
             blobs: blobs.clone(),
             paths: AccountPaths::new(&dirs),
@@ -178,6 +178,7 @@ impl Running {
             secrets: SecretBackend::Memory,
             detect: DetectOptions::default(),
             microsoft_client_id: None,
+            google_client: None,
             sign_in: SignInOptions::default(),
             sync: SyncConfig::default(),
         })

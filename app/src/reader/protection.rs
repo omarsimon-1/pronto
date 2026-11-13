@@ -1,4 +1,4 @@
-//! Encrypted and signed mail (ML-064; SECURITY.md "Known limitations"): Sealwax 1.0 neither
+//! Encrypted and signed mail (ML-064; SECURITY.md "Known limitations"): Pronto 1.0 neither
 //! decrypts nor verifies. An encrypted body is replaced by a notice and its ciphertext is never
 //! shown; a signed message shows its content with a quiet "Signed · not checked" line; the
 //! signature parts stay out of the attachment cards (`prepare`). The page places both widgets:
@@ -10,13 +10,13 @@ use gtk4::prelude::*;
 use sealwax_domain::reading::{Encryption, Signature};
 
 /// What the notice says in place of an encrypted body.
-pub const ENCRYPTED: &str = "This message is encrypted. Sealwax can't read encrypted mail yet.";
+pub const ENCRYPTED: &str = "This message is encrypted. Pronto can't read encrypted mail yet.";
 /// In place of an S/MIME message whose content is inside its signature.
 pub const SIGNED_OPAQUE: &str =
-    "This message is signed in a way Sealwax can't open yet, so its text can't be shown.";
+    "This message is signed in a way Pronto can't open yet, so its text can't be shown.";
 /// The quiet line on a signed message, and its tooltip.
 pub const SIGNED: &str = "Signed · not checked";
-pub const SIGNED_TOOLTIP: &str = "Sealwax can't check PGP or S/MIME signatures yet";
+pub const SIGNED_TOOLTIP: &str = "Pronto can't check PGP or S/MIME signatures yet";
 
 /// A body that can't be shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

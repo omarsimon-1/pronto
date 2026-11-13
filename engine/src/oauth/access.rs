@@ -9,7 +9,7 @@ use sealwax_domain::account::{AccountKey, LoginFailure};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use zeroize::Zeroizing;
 
 /// A token with less than this left is refreshed before use.
@@ -18,7 +18,11 @@ pub const MARGIN: Duration = Duration::from_secs(300);
 /// An access token and when it expires. Its debug form shows no token.
 pub struct AccessToken {
     token: Zeroizing<String>,
+    /// By the monotonic clock, which a clock set back can't stretch.
     expires: Instant,
+    /// By the wall clock: the token's life goes on while the machine is suspended, which
+    /// the monotonic clock doesn't count.
+    expires_at: SystemTime,
 }
 
 impl AccessToken {
@@ -27,11 +31,21 @@ impl AccessToken {
         Self {
             token,
             expires: Instant::now() + lifetime,
+            expires_at: SystemTime::now() + lifetime,
         }
     }
 
+    /// More than [`MARGIN`] left by both clocks.
     fn usable(&self) -> bool {
-        self.expires.saturating_duration_since(Instant::now()) > MARGIN
+        self.usable_at(Instant::now(), SystemTime::now())
+    }
+
+    fn usable_at(&self, now: Instant, wall: SystemTime) -> bool {
+        self.expires.saturating_duration_since(now) > MARGIN
+            && self
+                .expires_at
+                .duration_since(wall)
+                .is_ok_and(|left| left > MARGIN)
     }
 }
 
@@ -125,5 +139,25 @@ impl AccessTokens {
         };
         *held = Some(token);
         Ok(fetched)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_expires_by_the_wall_clock_across_a_suspend() {
+        let hour = Duration::from_secs(3600);
+        let token = AccessToken::new(Zeroizing::new("fictional".into()), hour);
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        assert!(token.usable());
+        assert!(token.usable_at(now + hour - 2 * MARGIN, wall + hour - 2 * MARGIN));
+        assert!(!token.usable_at(now + hour, wall + hour));
+        // Two hours asleep: the monotonic clock stood still, the wall clock didn't.
+        assert!(!token.usable_at(now, wall + 2 * hour));
+        assert!(!token.usable_at(now, wall + hour - MARGIN));
+        // A wall clock set back gives the token no longer life.
+        assert!(!token.usable_at(now + hour, wall - hour));
     }
 }

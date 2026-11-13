@@ -18,6 +18,7 @@ pub mod manage;
 pub mod mutf7;
 mod raw;
 pub mod roles;
+pub mod sent_sample;
 mod sync;
 pub mod write;
 

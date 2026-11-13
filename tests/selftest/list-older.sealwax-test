@@ -3,12 +3,14 @@
 # older mail and shows a quiet "Loading older messages…" row until the engine answers. An answer
 # with nothing pauses the asking until the folder is shown again; once the server has nothing
 # older, nothing more is asked. Every message is fictional.
-# Run: tools/headless.sh 31 target/debug/sealwax --self-test tests/selftest/list-older.sealwax-test
+# Run: tools/headless.sh 31 target/debug/pronto --self-test tests/selftest/list-older.sealwax-test
 
 desktop tiling
 resize 1440 900
 engine-attach
 mail-account Older
+# The window opens the account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 mail-add Older:archive today "Hytteplaner for høsten"
 mail-add Older:archive yesterday "Referat fra styremøtet"
 mail-add Older:archive 3d "Bilder fra turen"
@@ -22,7 +24,7 @@ folder archive Older
 engine-expect folder-opened
 engine-expect load-older
 assert-list-count 3
-assert-shown list-older true
+wait-until assert-shown list-older true
 assert-label list-older "Loading older messages…"
 screenshot $DIR/../../.local/selftest/list-older-asking.png
 
@@ -62,3 +64,7 @@ engine-expect none
 folder all-inboxes
 list-scroll-end
 engine-expect none
+
+# No GTK warning on the way, as the "Loading older messages…" row came and went (phase C: the
+# pane gave it -12 px while it was laying itself out).
+assert-gtk-warnings 0

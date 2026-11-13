@@ -2,6 +2,11 @@
 //! 0700 and files 0600. A write goes to a temporary file, is synced, renamed into place and the
 //! directory synced, so after a crash a name holds the whole message or nothing. Identical
 //! content is stored once.
+//!
+//! Nothing here knows which rows refer to a file: the store's writer deletes blobs
+//! (`Store::discard_blobs`), in the transaction that finds them unreferenced. Storing content
+//! that is already present renews its file's age, which keeps the sweep of forgotten files
+//! (`remove_if_older`) away from a blob whose row is about to be committed.
 
 use crate::xdg::ensure_private_dir;
 use sealwax_domain::model::BlobKey;
@@ -10,8 +15,8 @@ use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 const TEMP_DIR: &str = "tmp";
@@ -28,6 +33,9 @@ struct Inner {
     root: PathBuf,
     temp: PathBuf,
     counter: AtomicU64,
+    /// Held while a present blob's age is renewed and while the sweep checks an age and
+    /// deletes, so a blob `put` just returned is never the one the sweep takes.
+    ages: Mutex<()>,
 }
 
 /// What the blob store holds on disk.
@@ -64,6 +72,7 @@ impl BlobStore {
                 root: root.to_owned(),
                 temp,
                 counter: AtomicU64::new(0),
+                ages: Mutex::new(()),
             }),
         })
     }
@@ -87,7 +96,7 @@ impl BlobStore {
     pub fn put(&self, bytes: &[u8]) -> io::Result<BlobKey> {
         let key = Self::key(bytes);
         let path = self.path(&key);
-        if path.exists() {
+        if self.renew(&path) {
             return Ok(key);
         }
         let dir = path.parent().expect("blob paths have a directory");
@@ -120,6 +129,73 @@ impl BlobStore {
     pub fn remove(&self, key: &BlobKey) -> io::Result<bool> {
         match fs::remove_file(self.path(key)) {
             Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Makes a present blob as young as one just written; false when there is none, and the
+    /// caller writes it. A file whose age can't be set (a read-only one) still counts as
+    /// present, as before.
+    fn renew(&self, path: &Path) -> bool {
+        let _ages = self
+            .inner
+            .ages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match OpenOptions::new().write(true).open(path) {
+            Ok(file) => {
+                let _ = file.set_modified(SystemTime::now());
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => path.exists(),
+        }
+    }
+
+    /// The blobs under the fan-out directory `shard` (the key's first byte) that were stored
+    /// or stored again more than `age` ago: what a sweep asks the store about.
+    pub fn older_than(&self, shard: u8, age: Duration) -> io::Result<Vec<BlobKey>> {
+        let now = SystemTime::now();
+        let mut keys = Vec::new();
+        let first = self.inner.root.join(format!("{shard:02x}"));
+        let seconds = match fs::read_dir(&first) {
+            Ok(seconds) => seconds,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(keys),
+            Err(error) => return Err(error),
+        };
+        for second in seconds {
+            let second = second?;
+            if !second.file_type()?.is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(second.path())? {
+                let file = file?;
+                let Some(key) = file.file_name().to_str().and_then(BlobKey::from_hex) else {
+                    continue;
+                };
+                let metadata = file.metadata()?;
+                if metadata.is_file() && self.path(&key) == file.path() && old(&metadata, now, age)
+                {
+                    keys.push(key);
+                }
+            }
+        }
+        Ok(keys)
+    }
+
+    /// `remove`, unless the blob was stored or stored again within `age`; returns whether a
+    /// file was deleted.
+    pub fn remove_if_older(&self, key: &BlobKey, age: Duration) -> io::Result<bool> {
+        let _ages = self
+            .inner
+            .ages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let path = self.path(key);
+        match fs::metadata(&path) {
+            Ok(metadata) if old(&metadata, SystemTime::now(), age) => self.remove(key),
+            Ok(_) => Ok(false),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
@@ -169,6 +245,16 @@ impl BlobStore {
         }
         Ok(())
     }
+}
+
+/// Whether a file was last written more than `age` before `now`. A time in the future or one
+/// the file system can't tell is not old.
+fn old(metadata: &fs::Metadata, now: SystemTime, age: Duration) -> bool {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|since| since > age)
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -271,6 +357,51 @@ mod tests {
         BlobStore::open(&root).unwrap();
         assert!(!stale.exists());
         assert!(fresh.exists());
+    }
+
+    fn set_age(path: &Path, age: Duration) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_sweep_sees_only_blobs_stored_long_ago() {
+        let dir = crate::store::tests::scratch();
+        let blobs = BlobStore::open(&dir.path().join("blobs")).unwrap();
+        let day = Duration::from_secs(24 * 3600);
+        let old = blobs.put(b"forgotten").unwrap();
+        let young = blobs.put(b"just stored").unwrap();
+        let again = blobs.put(b"stored again").unwrap();
+        for key in [&old, &again] {
+            set_age(&blobs.path(key), 2 * day);
+        }
+        // A file that is no blob is never a candidate.
+        fs::write(blobs.path(&old).with_file_name("notes"), b"x").unwrap();
+        set_age(&blobs.path(&old).with_file_name("notes"), 2 * day);
+        let listed = |blobs: &BlobStore| -> Vec<BlobKey> {
+            (0..=u8::MAX)
+                .flat_map(|shard| blobs.older_than(shard, day).unwrap())
+                .collect()
+        };
+        let mut both = vec![old, again];
+        both.sort();
+        let mut found = listed(&blobs);
+        found.sort();
+        assert_eq!(found, both);
+        // Storing the same content again makes it young: its row may be on its way.
+        assert_eq!(blobs.put(b"stored again").unwrap(), again);
+        assert_eq!(listed(&blobs), [old]);
+        assert!(!blobs.remove_if_older(&again, day).unwrap());
+        assert!(!blobs.remove_if_older(&young, day).unwrap());
+        assert!(blobs.contains(&again) && blobs.contains(&young));
+        assert!(blobs.remove_if_older(&old, day).unwrap());
+        assert!(!blobs.remove_if_older(&old, day).unwrap());
+        assert!(!blobs.contains(&old));
+        assert_eq!(blobs.get(&again).unwrap(), b"stored again");
     }
 
     #[test]

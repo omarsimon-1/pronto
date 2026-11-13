@@ -1,11 +1,15 @@
 //! The window's layout between runs (the user's UI tweaks, 2026-10-08): the widths the user
 //! dragged the sidebar and the message list to, the accounts folded in the sidebar, the
 //! accounts whose "More folders" are open, the folders whose subfolders it folds away (M9,
-//! folders; the sidebar comes back as the user left it, their word on 2026-10-09), and the view
-//! the window last showed, which a new window opens on (issue #5, 2026-10-11), in
-//! `$XDG_STATE_HOME/sealwax/layout.toml`. Sealwax writes it; it isn't a setting, so it is read
-//! leniently: anything it doesn't know, or a width out of range, is left out and the default
-//! applies.
+//! folders; the sidebar comes back as the user left it, their word on 2026-10-09), the view
+//! the window last showed, which a new window opens on (issue #5, 2026-10-11), and since the
+//! Superhuman pass (2026-10-28) whether the sidebar shows and whether the reader sits beside
+//! the list ([`ViewMode`]), and whether the list groups messages into conversations and the
+//! composer card shows its formatting toolbar (phase B), and whether the Inbox shows the Split
+//! Inbox's tabs and the contact pane (phase C), in
+//! `$XDG_STATE_HOME/pronto/layout.toml`. Pronto writes it; it
+//! isn't a setting, so it is read leniently: anything it doesn't know, or a width out of range,
+//! is left out and the default applies.
 
 use crate::account::AccountKey;
 use crate::accounts_file::is_valid_key;
@@ -18,12 +22,55 @@ pub const LAYOUT_FILE: &str = "layout.toml";
 pub const SIDEBAR_WIDTHS: RangeInclusive<u32> = 160..=360;
 pub const LIST_WIDTHS: RangeInclusive<u32> = 280..=640;
 
+/// How the message list and the reader share the window (the Superhuman pass, 2026-10-28):
+/// Focused shows one at a time, the conversation in the list's place; Split shows the reader
+/// beside the list (the reading pane).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    #[default]
+    Focused,
+    Split,
+}
+
+impl ViewMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Focused => "focused",
+            Self::Split => "split",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Focused, Self::Split]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Layout {
     /// The full sidebar's width; `None` for the default.
     pub sidebar_width: Option<u32>,
     /// The message list's width beside the reader; `None` for the default.
     pub list_width: Option<u32>,
+    /// Focused or Split, as the user last chose; `None` until they do (the window's default).
+    pub mode: Option<ViewMode>,
+    /// Whether the sidebar shows beside the list in a wide window, as the user last chose;
+    /// `None` until they do (hidden by default).
+    pub sidebar: Option<bool>,
+    /// Whether the list shows one row per conversation (Group by Conversation), as the user
+    /// last chose; `None` until they do (on by default).
+    pub conversations: Option<bool>,
+    /// Whether the composer card shows its formatting toolbar, as the user last chose; `None`
+    /// until they do (hidden by default, the fork's phase B: its keys work all the same).
+    pub formatting: Option<bool>,
+    /// Whether the Inbox shows the Split Inbox's tabs, as the user last switched it (Split
+    /// Inbox in the palette, the fork's phase C); `None` until they do: `config.toml`'s
+    /// `[inbox] split` decides, and a change there forgets this.
+    pub split: Option<bool>,
+    /// Whether an open conversation shows the contact pane where its margin has room (Contact
+    /// Details), as the user last chose; `None` until they do (shown by default, phase C).
+    pub contact: Option<bool>,
     /// The accounts whose folders the sidebar folds away, by key.
     pub collapsed: Vec<AccountKey>,
     /// The accounts whose "More folders" are open, by key.
@@ -113,6 +160,15 @@ impl Layout {
         Self {
             sidebar_width: width("sidebar_width", &SIDEBAR_WIDTHS),
             list_width: width("list_width", &LIST_WIDTHS),
+            mode: table
+                .get("mode")
+                .and_then(Value::as_str)
+                .and_then(ViewMode::from_name),
+            sidebar: table.get("sidebar").and_then(Value::as_bool),
+            conversations: table.get("conversations").and_then(Value::as_bool),
+            formatting: table.get("formatting").and_then(Value::as_bool),
+            split: table.get("split").and_then(Value::as_bool),
+            contact: table.get("contact").and_then(Value::as_bool),
             collapsed: keys("collapsed"),
             more_open: keys("more_open"),
             folded,
@@ -122,9 +178,11 @@ impl Layout {
 
     pub fn to_text(&self) -> String {
         let mut text = String::from(
-            "# Sealwax keeps the window's layout here: the widths the sidebar and the message\n\
-             # list were dragged to, the accounts and folders folded or open in the sidebar, and\n\
-             # the view the window last showed.\n\
+            "# Pronto keeps the window's layout here: the widths the sidebar and the message\n\
+             # list were dragged to, whether the sidebar, the reading pane and the composer's\n\
+             # formatting toolbar and contact pane show, whether the list groups messages into conversations and\n\
+             # splits the Inbox, the accounts and folders folded or open in the sidebar, and the\n\
+             # view the window last showed.\n\
              # It isn't a setting; delete the file to go back to the defaults.\n",
         );
         if let Some(width) = self.sidebar_width {
@@ -132,6 +190,24 @@ impl Layout {
         }
         if let Some(width) = self.list_width {
             text.push_str(&format!("list_width = {width}\n"));
+        }
+        if let Some(mode) = self.mode {
+            text.push_str(&format!("mode = \"{}\"\n", mode.name()));
+        }
+        if let Some(shown) = self.sidebar {
+            text.push_str(&format!("sidebar = {shown}\n"));
+        }
+        if let Some(grouped) = self.conversations {
+            text.push_str(&format!("conversations = {grouped}\n"));
+        }
+        if let Some(shown) = self.formatting {
+            text.push_str(&format!("formatting = {shown}\n"));
+        }
+        if let Some(split) = self.split {
+            text.push_str(&format!("split = {split}\n"));
+        }
+        if let Some(shown) = self.contact {
+            text.push_str(&format!("contact = {shown}\n"));
         }
         let keys: Vec<String> = self
             .collapsed
@@ -271,6 +347,12 @@ mod tests {
         let layout = Layout {
             sidebar_width: Some(240),
             list_width: Some(420),
+            mode: Some(ViewMode::Split),
+            sidebar: Some(true),
+            conversations: Some(false),
+            formatting: Some(true),
+            split: Some(false),
+            contact: Some(false),
             collapsed: vec![AccountKey("work".into()), AccountKey("k3j5x8m2q9wa".into())],
             more_open: vec![AccountKey("home".into())],
             folded: BTreeMap::from([(
@@ -301,6 +383,12 @@ mod tests {
             Layout {
                 sidebar_width: None,
                 list_width: None,
+                mode: None,
+                sidebar: None,
+                conversations: None,
+                formatting: None,
+                split: None,
+                contact: None,
                 collapsed: vec![AccountKey("work".into()), AccountKey("home".into())],
                 more_open: Vec::new(),
                 folded: BTreeMap::new(),
@@ -324,6 +412,98 @@ mod tests {
         );
         assert_eq!(Layout::parse("list_width = 280").list_width, Some(280));
         assert_eq!(Layout::parse("list_width = 279").list_width, None);
+    }
+
+    #[test]
+    fn the_sidebar_and_the_reading_pane_round_trip_and_unknown_values_are_left_out() {
+        for (mode, sidebar) in [
+            (Some(ViewMode::Focused), Some(false)),
+            (Some(ViewMode::Split), Some(true)),
+            (None, Some(true)),
+            (Some(ViewMode::Split), None),
+        ] {
+            let layout = Layout {
+                mode,
+                sidebar,
+                ..Layout::default()
+            };
+            assert_eq!(Layout::parse(&layout.to_text()), layout);
+        }
+        let written = Layout {
+            sidebar_width: Some(300),
+            list_width: Some(500),
+            mode: Some(ViewMode::Split),
+            sidebar: Some(true),
+            ..Layout::default()
+        }
+        .to_text();
+        assert!(
+            written.contains(
+                "sidebar_width = 300\nlist_width = 500\nmode = \"split\"\nsidebar = true\n"
+            ),
+            "{written}"
+        );
+        assert!(!Layout::default().to_text().contains("mode"));
+        assert!(!Layout::default().to_text().contains("sidebar ="));
+        for broken in [
+            "mode = \"wide\"",
+            "mode = 1",
+            "mode = true",
+            "sidebar = \"yes\"",
+            "sidebar = 1",
+        ] {
+            let layout = Layout::parse(broken);
+            assert_eq!((layout.mode, layout.sidebar), (None, None), "{broken}");
+        }
+        assert_eq!(ViewMode::default(), ViewMode::Focused);
+        assert_eq!(ViewMode::from_name("split"), Some(ViewMode::Split));
+        assert_eq!(ViewMode::from_name("Split"), None);
+    }
+
+    #[test]
+    fn grouping_round_trips_and_is_left_out_until_chosen() {
+        for conversations in [Some(true), Some(false), None] {
+            let layout = Layout {
+                conversations,
+                ..Layout::default()
+            };
+            assert_eq!(Layout::parse(&layout.to_text()), layout);
+        }
+        assert!(
+            Layout {
+                conversations: Some(false),
+                ..Layout::default()
+            }
+            .to_text()
+            .contains("conversations = false\n")
+        );
+        assert!(!Layout::default().to_text().contains("conversations ="));
+        for broken in ["conversations = \"yes\"", "conversations = 1"] {
+            assert_eq!(Layout::parse(broken).conversations, None, "{broken}");
+        }
+    }
+
+    #[test]
+    fn the_contact_pane_round_trips_and_is_left_out_until_chosen() {
+        for contact in [Some(true), Some(false), None] {
+            let layout = Layout {
+                contact,
+                ..Layout::default()
+            };
+            assert_eq!(Layout::parse(&layout.to_text()), layout);
+        }
+        assert!(
+            Layout {
+                contact: Some(false),
+                ..Layout::default()
+            }
+            .to_text()
+            .contains("contact = false\n")
+        );
+        assert!(!Layout::default().to_text().contains("contact ="));
+        for broken in ["contact = \"no\"", "contact = 0"] {
+            assert_eq!(Layout::parse(broken).contact, None, "{broken}");
+        }
     }
 
     #[test]

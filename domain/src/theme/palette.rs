@@ -202,51 +202,79 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// Built-in GNOME-palette colours for running outside Omarchy, and for keys a theme lacks.
+    /// The default look, libadwaita's own (GNOME 50's `Adwaita` stylesheet and palette), with
+    /// the text a step brighter for HiDPI panels: white on dark, near-black on light. The
+    /// reader sits on the view colour, the folders and the list on the secondary sidebar's,
+    /// popovers on the popover colour. Also the colours for keys an Omarchy theme lacks.
     pub const DARK: Self = Self {
         mode: Mode::Dark,
         accent: Rgb::from_hex(0x3584e4),
         background: Rgb::from_hex(0x1d1d20),
-        dark_background: Rgb::from_hex(0x161618),
-        darker_background: Rgb::from_hex(0x0f0f10),
-        lighter_background: Rgb::from_hex(0x2e2e32),
-        foreground: Rgb::from_hex(0xdeddda),
+        dark_background: Rgb::from_hex(0x28282c),
+        darker_background: Rgb::from_hex(0x36363a),
+        lighter_background: Rgb::from_hex(0x2f2f33),
+        foreground: Rgb::from_hex(0xffffff),
         dark_foreground: Rgb::from_hex(0x9a9996),
-        light_foreground: Rgb::from_hex(0xdeddda),
+        light_foreground: Rgb::from_hex(0xf6f5f4),
         bright_foreground: Rgb::from_hex(0xffffff),
         muted: Rgb::from_hex(0x77767b),
         selection_background: Rgb::from_hex(0x254165),
         selection_foreground: Rgb::from_hex(0xffffff),
-        red: Rgb::from_hex(0xf66151),
+        red: Rgb::from_hex(0xff7b63),
         yellow: Rgb::from_hex(0xf8e45c),
         orange: Rgb::from_hex(0xffa348),
-        green: Rgb::from_hex(0x57e389),
+        green: Rgb::from_hex(0x78e9ab),
         cyan: Rgb::from_hex(0x5bc8af),
-        blue: Rgb::from_hex(0x62a0ea),
+        blue: Rgb::from_hex(0x78aeed),
         magenta: Rgb::from_hex(0xdc8add),
     };
 
     pub const LIGHT: Self = Self {
         mode: Mode::Light,
-        accent: Rgb::from_hex(0x3584e4),
+        accent: Rgb::from_hex(0x1c71d8),
         background: Rgb::from_hex(0xffffff),
-        dark_background: Rgb::from_hex(0xf5f5f5),
-        darker_background: Rgb::from_hex(0xdedede),
-        lighter_background: Rgb::from_hex(0xebebed),
-        foreground: Rgb::from_hex(0x241f31),
-        dark_foreground: Rgb::from_hex(0x77767b),
+        dark_background: Rgb::from_hex(0xf3f3f5),
+        darker_background: Rgb::from_hex(0xffffff),
+        lighter_background: Rgb::from_hex(0xf0f0f2),
+        foreground: Rgb::from_hex(0x1c1c20),
+        dark_foreground: Rgb::from_hex(0x5e5c64),
         light_foreground: Rgb::from_hex(0x3d3846),
         bright_foreground: Rgb::from_hex(0x000000),
-        muted: Rgb::from_hex(0x9a9996),
+        muted: Rgb::from_hex(0x77767b),
         selection_background: Rgb::from_hex(0xcde0f8),
-        selection_foreground: Rgb::from_hex(0x241f31),
+        selection_foreground: Rgb::from_hex(0x1c1c20),
         red: Rgb::from_hex(0xc01c28),
         yellow: Rgb::from_hex(0x9c6e03),
         orange: Rgb::from_hex(0xc64600),
-        green: Rgb::from_hex(0x26a269),
+        green: Rgb::from_hex(0x1b8553),
         cyan: Rgb::from_hex(0x218787),
         blue: Rgb::from_hex(0x1a5fb4),
         magenta: Rgb::from_hex(0x813d9c),
+    };
+
+    /// Tokyo Night: Omarchy's `tokyo-night` surfaces (folke/tokyonight.nvim's "night"), with
+    /// its brightest text colour as the foreground for contrast: `palette = "tokyo-night"`.
+    pub const TOKYO_NIGHT: Self = Self {
+        mode: Mode::Dark,
+        accent: Rgb::from_hex(0x7aa2f7),
+        background: Rgb::from_hex(0x1a1b26),
+        dark_background: Rgb::from_hex(0x13141c),
+        darker_background: Rgb::from_hex(0x0e0e14),
+        lighter_background: Rgb::from_hex(0x24283b),
+        foreground: Rgb::from_hex(0xc0caf5),
+        dark_foreground: Rgb::from_hex(0x565f89),
+        light_foreground: Rgb::from_hex(0xb4bee6),
+        bright_foreground: Rgb::from_hex(0xc8d3f5),
+        muted: Rgb::from_hex(0x414868),
+        selection_background: Rgb::from_hex(0x292e42),
+        selection_foreground: Rgb::from_hex(0xc0caf5),
+        red: Rgb::from_hex(0xf7768e),
+        yellow: Rgb::from_hex(0xe0af68),
+        orange: Rgb::from_hex(0xff9e64),
+        green: Rgb::from_hex(0x9ece6a),
+        cyan: Rgb::from_hex(0x7dcfff),
+        blue: Rgb::from_hex(0x7aa2f7),
+        magenta: Rgb::from_hex(0xbb9af7),
     };
 
     pub const fn builtin(mode: Mode) -> Self {

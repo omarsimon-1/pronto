@@ -2,13 +2,16 @@
 //! with a filter, ordered by `(date, id)` descending; readers page through it and the writer
 //! computes positions in it for change events.
 
-use super::api::{ViewFilter, ViewId, ViewScope, ViewSpec};
+use super::api::{ViewFilter, ViewGrouping, ViewId, ViewScope, ViewSpec};
+use super::conversations;
+use super::fork;
 use super::fts::Expression;
 use super::overlay;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, Statement, ToSql, params};
 use sealwax_domain::model::{FolderId, FolderRole, MessageId, MessageSummary, ThreadId};
 use sealwax_domain::search::{Date, Query};
+use sealwax_domain::split::Split;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
@@ -91,28 +94,80 @@ impl Registry {
     }
 }
 
-/// The partial index each filter reads, and the condition that selects it. Every index leaves
-/// out rows hidden by a pending move or expunge (256) and rows flagged `\Deleted` (8).
-fn filter_sql(filter: ViewFilter) -> (&'static str, &'static str) {
-    match filter {
-        ViewFilter::All => ("messages_folder_date", " AND flags & 264 = 0"),
-        ViewFilter::Unread => ("messages_unread", " AND flags & 265 = 0"),
-        ViewFilter::Starred => ("messages_flagged", " AND flags & 268 = 4"),
-        ViewFilter::Attachments => (
-            "messages_attachments",
-            " AND has_attachments <> 0 AND flags & 264 = 0",
-        ),
+/// What a view keeps of its folders' rows: a filter, and the side of the Split Inbox when it
+/// has one (`ViewSpec::side`; the fork's phase C combines the two: the Important side's unread
+/// mail). `filter` is never a split filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Kept {
+    pub(crate) filter: ViewFilter,
+    pub(crate) side: Option<Split>,
+}
+
+impl Kept {
+    pub(crate) fn of(spec: ViewSpec) -> Self {
+        Self {
+            filter: spec.base_filter(),
+            side: spec.side(),
+        }
     }
 }
 
-/// Whether a row with these values passes `filter`.
-pub(crate) fn passes(filter: ViewFilter, flags: u32, has_attachments: bool) -> bool {
+impl From<ViewFilter> for Kept {
+    fn from(filter: ViewFilter) -> Self {
+        Self::of(ViewSpec::unified_inbox().with_filter(filter))
+    }
+}
+
+/// The table and partial index a view reads, and the condition that selects it. Every index
+/// leaves out rows hidden by a pending move or expunge (256) and rows flagged `\Deleted` (8).
+/// A side alone walks the fork's split rows (`fork.rs`), which name their messages' folders and
+/// dates as the last commit published them; a side under another filter walks that filter's
+/// index and looks each row's side up (by id), so its pages cost what the filter's do.
+fn filter_sql(kept: Kept) -> (&'static str, &'static str, String) {
+    let (table, index, condition) = match (kept.filter, kept.side) {
+        (ViewFilter::All, Some(Split::Important)) => (
+            "fork_message_split",
+            "fork_message_split_important",
+            " AND split = 1",
+        ),
+        (ViewFilter::All, Some(Split::Other)) => (
+            "fork_message_split",
+            "fork_message_split_other",
+            " AND split = 2",
+        ),
+        (ViewFilter::All | ViewFilter::Important | ViewFilter::Other, _) => {
+            ("messages", "messages_folder_date", " AND flags & 264 = 0")
+        }
+        (ViewFilter::Unread, _) => ("messages", "messages_unread", " AND flags & 265 = 0"),
+        (ViewFilter::Starred, _) => ("messages", "messages_flagged", " AND flags & 268 = 4"),
+        (ViewFilter::Attachments, _) => (
+            "messages",
+            "messages_attachments",
+            " AND has_attachments <> 0 AND flags & 264 = 0",
+        ),
+    };
+    let side = match (kept.filter, kept.side) {
+        (ViewFilter::All, _) | (_, None) => String::new(),
+        (_, Some(side)) => format!(
+            " AND EXISTS (SELECT 1 FROM fork_message_split s \
+             WHERE s.id = messages.id AND s.split = {})",
+            fork::code(side)
+        ),
+    };
+    (table, index, format!("{condition}{side}"))
+}
+
+/// Whether a row with these values passes `filter`; `split` is where the Split Inbox placed it
+/// (`fork_message_split.split`), which only its filters read.
+pub(crate) fn passes(filter: ViewFilter, flags: u32, has_attachments: bool, split: u8) -> bool {
     overlay::shown(flags)
         && match filter {
             ViewFilter::All => true,
             ViewFilter::Unread => flags & 1 == 0,
             ViewFilter::Starred => flags & 4 != 0,
             ViewFilter::Attachments => has_attachments,
+            ViewFilter::Important => split == fork::IMPORTANT,
+            ViewFilter::Other => split == fork::OTHER,
         }
 }
 
@@ -130,21 +185,31 @@ pub(crate) fn folders(conn: &Connection, scope: ViewScope) -> rusqlite::Result<V
     }
 }
 
-/// Rows in the view.
+/// Rows in the view: from the folders' maintained counts, or, for a side under another
+/// filter, the filter's index walked.
 pub(crate) fn count(
     conn: &Connection,
     folders: &[FolderId],
-    filter: ViewFilter,
+    kept: impl Into<Kept>,
 ) -> rusqlite::Result<u32> {
-    let sql = match filter {
-        ViewFilter::All => "SELECT coalesce(sum(total_count), 0) FROM folders WHERE id = ?1".into(),
-        ViewFilter::Unread => {
+    let kept = kept.into();
+    let sql = match (kept.filter, kept.side) {
+        (_, Some(Split::Important)) if kept.filter == ViewFilter::All => {
+            "SELECT coalesce(sum(important), 0) FROM fork_folder_split WHERE folder_id = ?1".into()
+        }
+        (_, Some(Split::Other)) if kept.filter == ViewFilter::All => {
+            "SELECT coalesce(sum(other), 0) FROM fork_folder_split WHERE folder_id = ?1".into()
+        }
+        (ViewFilter::All, None) => {
+            "SELECT coalesce(sum(total_count), 0) FROM folders WHERE id = ?1".into()
+        }
+        (ViewFilter::Unread, None) => {
             "SELECT coalesce(sum(unread_count), 0) FROM folders WHERE id = ?1".into()
         }
-        ViewFilter::Starred | ViewFilter::Attachments => {
-            let (index, condition) = filter_sql(filter);
+        _ => {
+            let (table, index, condition) = filter_sql(kept);
             format!(
-                "SELECT count(*) FROM messages INDEXED BY {index} WHERE folder_id = ?1{condition}"
+                "SELECT count(*) FROM {table} INDEXED BY {index} WHERE folder_id = ?1{condition}"
             )
         }
     };
@@ -160,12 +225,12 @@ pub(crate) fn count(
 pub(crate) fn count_since(
     conn: &Connection,
     folders: &[FolderId],
-    filter: ViewFilter,
+    kept: impl Into<Kept>,
     start: i64,
 ) -> rusqlite::Result<u32> {
-    let (index, condition) = filter_sql(filter);
+    let (table, index, condition) = filter_sql(kept.into());
     let sql = format!(
-        "SELECT count(*) FROM messages INDEXED BY {index} \
+        "SELECT count(*) FROM {table} INDEXED BY {index} \
          WHERE folder_id = ?1{condition} AND date >= ?2"
     );
     let mut statement = conn.prepare_cached(&sql)?;
@@ -183,19 +248,20 @@ pub(crate) fn count_since(
 pub(crate) fn position(
     conn: &Connection,
     folders: &[FolderId],
-    filter: ViewFilter,
+    kept: impl Into<Kept>,
     date: i64,
     id: MessageId,
     home: FolderId,
 ) -> rusqlite::Result<u32> {
-    let (index, condition) = filter_sql(filter);
+    let kept = kept.into();
+    let (table, index, condition) = filter_sql(kept);
     let count = |comparison: &str, tie: &str, folder: FolderId| -> rusqlite::Result<i64> {
         let newer = format!(
-            "SELECT count(*) FROM messages INDEXED BY {index} \
+            "SELECT count(*) FROM {table} INDEXED BY {index} \
              WHERE folder_id = ?1{condition} AND date {comparison} ?2"
         );
         let same = format!(
-            "SELECT count(*) FROM messages INDEXED BY {index} \
+            "SELECT count(*) FROM {table} INDEXED BY {index} \
              WHERE folder_id = ?1{condition} AND date = ?2 AND id {tie} ?3"
         );
         Ok(conn
@@ -207,7 +273,7 @@ pub(crate) fn position(
     };
     let edge = |order: &str, folder: FolderId| -> rusqlite::Result<Option<i64>> {
         conn.prepare_cached(&format!(
-            "SELECT date FROM messages INDEXED BY {index} \
+            "SELECT date FROM {table} INDEXED BY {index} \
              WHERE folder_id = ?1{condition} AND date > 0 ORDER BY date {order} LIMIT 1"
         ))?
         .query_row([folder.0], |row| row.get(0))
@@ -220,7 +286,7 @@ pub(crate) fn position(
         };
         let deep = newest > oldest && (newest - date) * 2 > newest - oldest;
         position += if deep {
-            let total = i64::from(count_in(conn, *folder, filter)?);
+            let total = i64::from(count_in(conn, *folder, kept)?);
             total - count("<", "<", *folder)? - i64::from(*folder == home)
         } else {
             count(">", ">", *folder)?
@@ -229,8 +295,74 @@ pub(crate) fn position(
     Ok(position as u32)
 }
 
-fn count_in(conn: &Connection, folder: FolderId, filter: ViewFilter) -> rusqlite::Result<u32> {
-    count(conn, &[folder], filter)
+fn count_in(conn: &Connection, folder: FolderId, kept: Kept) -> rusqlite::Result<u32> {
+    count(conn, &[folder], kept)
+}
+
+/// The number of rows of the view whose key `(date, id)` is greater than `key`, which needn't
+/// be a row's (`position` takes one that is): what the Split Inbox's message views are diffed
+/// with (`writer/split.rs`). Each folder is counted from the end the key is nearer to.
+pub(crate) fn rank(
+    conn: &Connection,
+    folders: &[FolderId],
+    kept: impl Into<Kept>,
+    key: (i64, MessageId),
+) -> rusqlite::Result<u32> {
+    let kept = kept.into();
+    let (date, id) = (key.0, key.1.0);
+    let (table, index, condition) = filter_sql(kept);
+    // Rows on one side of the key (`>` or `<`), or at it (`=`).
+    let count = |comparison: &str, folder: FolderId| -> rusqlite::Result<i64> {
+        let same = conn
+            .prepare_cached(&format!(
+                "SELECT count(*) FROM {table} INDEXED BY {index} \
+                 WHERE folder_id = ?1{condition} AND date = ?2 AND id {comparison} ?3"
+            ))?
+            .query_row(params![folder.0, date, id], |row| row.get::<_, i64>(0))?;
+        if comparison == "=" {
+            return Ok(same);
+        }
+        let away = conn
+            .prepare_cached(&format!(
+                "SELECT count(*) FROM {table} INDEXED BY {index} \
+                 WHERE folder_id = ?1{condition} AND date {comparison} ?2"
+            ))?
+            .query_row(params![folder.0, date], |row| row.get::<_, i64>(0))?;
+        Ok(same + away)
+    };
+    let edge = |order: &str, folder: FolderId| -> rusqlite::Result<Option<i64>> {
+        conn.prepare_cached(&format!(
+            "SELECT date FROM {table} INDEXED BY {index} \
+             WHERE folder_id = ?1{condition} AND date > 0 ORDER BY date {order} LIMIT 1"
+        ))?
+        .query_row([folder.0], |row| row.get(0))
+        .optional()
+    };
+    let mut above = 0i64;
+    for folder in folders {
+        let deep = match (edge("ASC", *folder)?, edge("DESC", *folder)?) {
+            (Some(oldest), Some(newest)) => {
+                newest > oldest && (newest - date) * 2 > newest - oldest
+            }
+            _ => false,
+        };
+        above += if deep {
+            i64::from(count_in(conn, *folder, kept)?) - count("<", *folder)? - count("=", *folder)?
+        } else {
+            count(">", *folder)?
+        };
+    }
+    Ok(above as u32)
+}
+
+/// The rows a view lists now, messages or conversations by its grouping: a reload's total.
+pub(crate) fn total(conn: &Connection, spec: ViewSpec) -> rusqlite::Result<u32> {
+    match spec.grouping {
+        ViewGrouping::Messages => count(conn, &folders(conn, spec.scope)?, Kept::of(spec)),
+        ViewGrouping::Conversations => {
+            conversations::count(conn, &conversations::Shape::of(conn, spec)?)
+        }
+    }
 }
 
 pub(crate) const SUMMARY_COLUMNS: &str = "m.id, m.folder_id, m.thread_id, m.from_name, \
@@ -270,11 +402,12 @@ pub(crate) fn summary(conn: &Connection, id: MessageId) -> rusqlite::Result<Mess
 pub(crate) fn page(
     conn: &Connection,
     folders: &[FolderId],
-    filter: ViewFilter,
+    kept: impl Into<Kept>,
     total: u32,
     offset: u32,
     limit: u32,
 ) -> rusqlite::Result<Vec<MessageSummary>> {
+    let kept = kept.into();
     if offset >= total || limit == 0 || folders.is_empty() {
         return Ok(Vec::new());
     }
@@ -285,14 +418,14 @@ pub(crate) fn page(
     } else {
         ("DESC", offset)
     };
-    let (index, condition) = filter_sql(filter);
+    let (table, index, condition) = filter_sql(kept);
     let inner = if let [folder] = folders {
         format!(
-            "SELECT id FROM messages INDEXED BY {index} WHERE folder_id = {}{condition} \
+            "SELECT id FROM {table} INDEXED BY {index} WHERE folder_id = {}{condition} \
              ORDER BY date {order}, id {order} LIMIT ?1 OFFSET ?2",
             folder.0
         )
-    } else if filter == ViewFilter::All && u64::from(total) * 2 >= stored(conn)? {
+    } else if kept == Kept::from(ViewFilter::All) && u64::from(total) * 2 >= stored(conn)? {
         let list: Vec<String> = folders.iter().map(|folder| folder.0.to_string()).collect();
         format!(
             "SELECT id FROM messages INDEXED BY messages_date \
@@ -308,7 +441,7 @@ pub(crate) fn page(
             }
             let _ = write!(
                 walks,
-                "SELECT id, date FROM messages INDEXED BY {index} WHERE folder_id = {}{condition}",
+                "SELECT id, date FROM {table} INDEXED BY {index} WHERE folder_id = {}{condition}",
                 folder.0
             );
         }
@@ -346,7 +479,10 @@ pub(crate) const UNSEARCHED: [FolderRole; 2] = [FolderRole::Trash, FolderRole::J
 
 /// The folders a search looks in: `folder`, or every folder of an attached account but the
 /// [`UNSEARCHED`] ones.
-fn searched(conn: &Connection, folder: Option<FolderId>) -> rusqlite::Result<Vec<FolderId>> {
+pub(crate) fn searched(
+    conn: &Connection,
+    folder: Option<FolderId>,
+) -> rusqlite::Result<Vec<FolderId>> {
     if let Some(folder) = folder {
         return Ok(vec![folder]);
     }

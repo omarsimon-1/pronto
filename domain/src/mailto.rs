@@ -41,7 +41,7 @@ impl std::fmt::Debug for Mailto {
 
 impl Mailto {
     /// Fills `draft` (a new one, [`compose::new_draft`], with its signature) from the link: its
-    /// recipients after any the draft has (each once; addresses Sealwax can't send to are left
+    /// recipients after any the draft has (each once; addresses Pronto can't send to are left
     /// out), its subject, its body as the editor's lines in place of the empty line to type in,
     /// and its In-Reply-To.
     pub fn fill(&self, draft: &mut Draft) {

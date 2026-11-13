@@ -10,6 +10,8 @@ The user approved the [design mock](https://claude.ai/artifact/TU2jwqgJu1YxTXFLL
 
 ## Principles
 
+*Changed after approval, 2026-10-22 (the owner's visual polish, "the sexiest email client of all time"; [ADR-004 amendment](DECISIONS.md#adr-004-amendment--adwaitas-look-by-default-tokyo-night-omarchy-on-request-2026-10-22)):* the colours come from the palette `config.toml` chooses: **Adwaita's look by default**, a built-in **Tokyo Night**, or the live Omarchy theme (`palette = "omarchy"`, principle 1 as written). Principles 2–6 are unchanged.
+
 1. **The theme is the only style.** Every colour comes from the live Omarchy palette; the app ships no palette of its own except the fallbacks for running outside Omarchy ([ADR-004](DECISIONS.md#adr-004--follow-the-live-omarchy-theme-2026-10-04)).
 2. **Content first, chrome quiet.** Messages get the space and the contrast; toolbars, borders and counts recede.
 3. **Keyboard first, mouse complete.** Everything is reachable from the keyboard and the palette, and everything a mouse user expects is visible and clickable.
@@ -75,6 +77,7 @@ The window is often tiled, so the layout adapts to width (AdwBreakpoints), not t
 - Search field and filter chips on top, then sections (Today, Yesterday, This week, This month, Older).
 - Row anatomy: unread dot · avatar (32 px) · sender (bold when unread) and time · subject · one- or two-line snippet · indicators (attachment, star, thread count).
 - Selection mode with checkboxes for batch actions; hover shows quick actions (archive, delete, star).
+- *Changed after approval, 2026-10-22 (the visual polish):* **denser rows**: 8 px above and below the row's text (10 before), the dot, avatar and text 8 px apart (10), rows 6 px from the list's edges (8) and section headings tighter. The sender is medium weight and bold when unread; times use tabular figures. **The selected row** keeps the selected fill and gains a 3 px accent edge inside its start. The snippet still keeps its two lines' height, so rows never change size.
 - Rules from S3 (2026-10-04) — GtkListView keeps about 205 row widgets realized whatever the window size, so one row's layout cost sets the cost of every jump, first paint and fast drag:
   - no ligatures in list text (`font-feature-settings: "liga" 0, "calt" 0`): 30–36 % less layout with JetBrains Mono;
   - cut text to what fits before setting it (−15 %);
@@ -243,6 +246,8 @@ The window is often tiled, so the layout adapts to width (AdwBreakpoints), not t
 
 ## Theme tokens
 
+*Changed after approval, 2026-10-22:* "the resolved palette" below is the one `palette` chooses ([Principles](#principles)): Adwaita's (`#1d1d20` reader, `#28282c` folders and list, `#36363a` popovers, `#2f2f33` cards, white text and `#3584e4` accent on dark; white, `#f3f3f5`, white, `#f0f0f2`, `#1c1c20` and `#1c71d8` on light), Tokyo Night's (`#1a1b26`, `#13141c`, `#0e0e14`, `#24283b`, `#c0caf5` text, `#7aa2f7` accent) or the live Omarchy theme's. Secondary text starts at a **25 %** mix toward the background (35 % before), still held to 4.5:1. The table's roles are unchanged.
+
 All colours come from the resolved palette (`omarchy-theme-color --all`), mapped once in the theme layer. Widgets never reference palette keys directly. The UI roles are Stet's ([its DESIGN.md](../../notes/docs/DESIGN.md)); the mail roles are new.
 
 | Role | Applied through | Omarchy key |
@@ -276,6 +281,8 @@ Roles map to palette positions, never hue names: matte-black's `green` is amber 
 
 ## Typography
 
+*Changed after approval, 2026-10-22 (the visual polish):* the chrome and message text use **Adwaita Sans** by default (`chrome_font` / `reading_font = "adwaita"`); the Omarchy font and fontconfig's sans-serif stay as choices. Weights come from the theme as `--sw-weight-regular`, `-medium`, `-bold` and `-heavy`: 450, 550, 700 and 800 on dark themes and 500, 600, 700 and 800 on light ones, a shade heavier than Pango's 400 so text holds up on dense HiDPI panels (light text on dark reads heavier, so dark themes take less). Headings (the pane titles, the reader's subject, the composer's title, empty states) are heavy with slightly tightened letter-spacing; message text in the reader takes the regular weight too.
+
 - **Chrome** (sidebar, list, toolbars, chips): the Omarchy font, `fc-match monospace` (JetBrainsMono Nerd Font here), re-resolved when `~/.config/fontconfig/` changes, as in Stet and omarchy-shell.
 - **Scale** follows omarchy-shell (base 12 px, or `[font] base-size` from `~/.config/omarchy/shell.toml`): caption 10, small 11, body 12, subtitle 13, title 14, heading 16, display 24.
 - **Message text**: sans-serif (`fc-match sans-serif`, Liberation Sans here) at a comfortable reading size: 15 px at base 12, scaled with the base size, line height 1.55; code in messages at 13/15 of it. WebKit's default fonts are set explicitly, because it would otherwise pick its own.
@@ -307,6 +314,10 @@ Initials from the display name (or the address), on a tint chosen by hashing the
 ## Motion
 
 Short fades (≤ 150 ms) for toasts and banners; no sliding lists, no bounce. Animations follow `gtk-enable-animations`.
+
+*Changed after approval, 2026-10-22 (the visual polish):* hover, press, focus and selection fills, borders and text colours **fade in over 120 ms** (`--sw-motion`); leaving a state is instant, so recycled list rows never fade while the list scrolls, and nothing moves or changes size. Focus shows on the docked composer card and the quick reply as an accent border, and a hovered attachment card's border takes the accent. **Reduced motion:** while `gtk-enable-animations` is off or GTK 4.20's `gtk-interface-reduced-motion` asks to reduce, the theme loads a stylesheet that turns every CSS transition and animation off (the self-tests check it with `assert-motion`).
+
+**The window is opaque:** every pane paints the palette's solid surfaces. Hyprland's own `default-opacity` tag is the compositor's; [INTEGRATIONS.md](INTEGRATIONS.md#hyprland) has the line that turns it off for Sealwax.
 
 ## Keyboard
 

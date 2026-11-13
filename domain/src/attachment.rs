@@ -102,7 +102,7 @@ pub const DANGEROUS_TYPES: &[&str] = &[
     "application/vnd.snap",
 ];
 
-/// The longest file name Sealwax writes, in bytes; Linux allows 255, and the rest leaves room
+/// The longest file name Pronto writes, in bytes; Linux allows 255, and the rest leaves room
 /// for " (12)" when a name is taken.
 pub const MAX_NAME_BYTES: usize = 200;
 

@@ -11,7 +11,7 @@ use crate::window::panes::{classed, icon, icon_button, named};
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use sealwax_domain::account::{Endpoint, HelpLink, Protocol, Security};
+use sealwax_domain::account::{Endpoint, HelpLink, OAuthProvider, Protocol, Security};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -163,7 +163,7 @@ pub(super) struct Widgets {
     pub(super) address: gtk::Entry,
     pub(super) name_field: gtk::Box,
     pub(super) name: gtk::Entry,
-    /// What Sealwax calls the account; the address when left empty.
+    /// What Pronto calls the account; the address when left empty.
     label_field: gtk::Box,
     pub(super) label: gtk::Entry,
     color_field: gtk::Box,
@@ -172,7 +172,10 @@ pub(super) struct Widgets {
     pub(super) found: gtk::Box,
     pub(super) found_lines: [gtk::Label; 4],
     pub(super) found_note: gtk::Label,
+    /// The browser sign-in step (Microsoft's or Google's; its widget names stay Microsoft's).
     pub(super) microsoft: gtk::Box,
+    microsoft_title: gtk::Label,
+    microsoft_text: gtk::Label,
     pub(super) microsoft_button: gtk::Button,
     /// The Microsoft account signed in with isn't the address typed: which to send from.
     identity: gtk::Box,
@@ -186,6 +189,9 @@ pub(super) struct Widgets {
     pub(super) trust: gtk::Button,
     pub(super) dont_trust: gtk::Button,
     microsoft_unavailable: gtk::Box,
+    microsoft_note: gtk::Label,
+    microsoft_hint: gtk::Label,
+    microsoft_footnote: gtk::Label,
     waiting: gtk::Box,
     /// After a minute: why Microsoft may never send the browser back.
     pub(super) still_waiting: gtk::Label,
@@ -465,12 +471,9 @@ impl Widgets {
             column(&["sw-setup-card", "sw-setup-microsoft"]),
             "setup-microsoft",
         );
+        let microsoft_text = label(&text::sign_in_card(OAuthProvider::Microsoft), &[]);
         microsoft_card.append(&microsoft_title);
-        microsoft_card.append(&label(
-            "Your browser opens Microsoft's sign-in page. Sealwax never sees your password; it \
-             keeps a sign-in token in your keyring.",
-            &[],
-        ));
+        microsoft_card.append(&microsoft_text);
         microsoft_card.append(&microsoft_button);
 
         // The mock's "Waiting for the browser…" box: Cancel goes back to the button, and the
@@ -527,14 +530,16 @@ impl Widgets {
             column(&["sw-setup-note", "sw-setup-unavailable"]),
             "setup-microsoft-unavailable",
         );
-        microsoft_unavailable.append(&named(
+        let microsoft_note = named(
             label(text::MICROSOFT_UNAVAILABLE, &[]),
             "setup-microsoft-note",
-        ));
-        microsoft_unavailable.append(&named(
+        );
+        let microsoft_hint = named(
             label(text::MICROSOFT_CLIENT_ID_HINT, &["sw-setup-hint"]),
             "setup-microsoft-client-id",
-        ));
+        );
+        microsoft_unavailable.append(&microsoft_note);
+        microsoft_unavailable.append(&microsoft_hint);
         let microsoft_footnote = named(
             label(
                 "Outlook.com and Microsoft 365 accept only Microsoft sign-in for mail apps.",
@@ -798,6 +803,8 @@ impl Widgets {
             found_lines,
             found_note,
             microsoft: microsoft_box,
+            microsoft_title,
+            microsoft_text,
             microsoft_button,
             identity,
             identity_text,
@@ -809,6 +816,9 @@ impl Widgets {
             send_from,
             keep_address,
             microsoft_unavailable,
+            microsoft_note,
+            microsoft_hint,
+            microsoft_footnote,
             waiting,
             still_waiting,
             open_again,
@@ -839,8 +849,8 @@ impl Widgets {
     }
 
     /// Shows `state`: the sections of the screen on view, its texts, and whether its button
-    /// can be pressed (`problem`). `microsoft`: a client ID is in use, so Microsoft sign-in can
-    /// start.
+    /// can be pressed (`problem`). `microsoft`: a client is in use for the provider the sign-in
+    /// step is for ([`State::oauth_provider`]), so its sign-in can start.
     pub(super) fn draw(
         &self,
         state: &State,
@@ -941,8 +951,11 @@ impl Widgets {
         w.microsoft.set_visible(shown == Step::Microsoft);
         w.identity.set_visible(shown == Step::Identity);
         if let (Some(signed_in), Some(typed)) = (state.signed_in_as(), state.typed_address()) {
-            w.identity_text
-                .set_label(&text::identity_body(signed_in, typed));
+            w.identity_text.set_label(&text::identity_body(
+                signed_in,
+                typed,
+                state.oauth_provider(),
+            ));
             for (button, text) in [
                 (&w.send_from, text::send_from(signed_in)),
                 (&w.keep_address, text::keep_address(typed)),
@@ -963,13 +976,27 @@ impl Widgets {
             w.fingerprint
                 .set_label(&text::fingerprint_lines(&untrusted.pin));
         }
+        let oauth = state.oauth_provider();
+        let sign_in_with = text::sign_in_with(oauth);
+        w.microsoft_title.set_label(&sign_in_with);
+        w.microsoft_button.set_label(&sign_in_with);
+        w.microsoft_text.set_label(&text::sign_in_card(oauth));
+        let (note, hint) = text::sign_in_unavailable(oauth);
+        w.microsoft_note.set_label(note);
+        w.microsoft_hint.set_label(hint);
+        w.microsoft_footnote
+            .set_label(text::sign_in_footnote(oauth));
         w.microsoft_button
-            .set_tooltip_text((!microsoft).then_some("Not available in this build yet"));
+            .set_tooltip_text((!microsoft).then_some(match oauth {
+                OAuthProvider::Microsoft => "Not available in this build yet",
+                OAuthProvider::Google => "No Google OAuth client is set up yet",
+            }));
         w.microsoft_unavailable.set_visible(!microsoft);
         w.waiting.set_visible(step == Step::SigningIn);
         // Cancel keeps the focus while the browser signs in, so it carries the note as its
-        // description too.
-        let still_waiting = step == Step::SigningIn && state.still_waiting;
+        // description too. The note is about Microsoft's admin approval.
+        let still_waiting =
+            step == Step::SigningIn && state.still_waiting && oauth == OAuthProvider::Microsoft;
         w.still_waiting.set_visible(still_waiting);
         if still_waiting {
             w.cancel
@@ -1152,7 +1179,7 @@ fn heading_for(state: &State, step: Step) -> (String, &'static str) {
         Step::Microsoft => match &state.again {
             Some(again) => (
                 again.name.clone(),
-                "Sealwax keeps your mail; nothing syncs until you sign in.",
+                "Pronto keeps your mail; nothing syncs until you sign in.",
             ),
             None => (
                 format!(
@@ -1160,7 +1187,7 @@ fn heading_for(state: &State, step: Step) -> (String, &'static str) {
                     state
                         .found()
                         .and_then(|settings| settings.provider.as_deref())
-                        .unwrap_or("Microsoft")
+                        .unwrap_or(state.oauth_provider().name())
                 ),
                 "",
             ),
@@ -1171,7 +1198,7 @@ fn heading_for(state: &State, step: Step) -> (String, &'static str) {
                 .as_ref()
                 .map(|again| again.name.clone())
                 .unwrap_or_default(),
-            "The server stopped accepting the password Sealwax has. Type it again; nothing \
+            "The server stopped accepting the password Pronto has. Type it again; nothing \
              syncs until you do.",
         ),
         Step::Blocked => ("Can't add this address".to_owned(), ""),
@@ -1188,7 +1215,7 @@ fn heading_for(state: &State, step: Step) -> (String, &'static str) {
         Step::Failed => ("Couldn't sign in".to_owned(), ""),
         _ => (
             "Type your address".to_owned(),
-            "Sealwax finds the server settings for you.",
+            "Pronto finds the server settings for you.",
         ),
     }
 }

@@ -1,0 +1,62 @@
+# New mail and conversations (the Superhuman pass, phase B; docs/superhuman/conversations.md):
+# one notification a conversation, showing its newest new message; more mail in a conversation
+# whose notification shows replaces it; a click opens the conversation's row at that message,
+# and Archive on a notification takes the conversation's messages in its Inbox. Every name and
+# subject is fictional.
+# Run: tools/headless.sh 63 target/debug/pronto --self-test tests/selftest/notify-conversations.sealwax-test
+
+desktop tiling
+resize 1440 900
+engine-attach
+notify-server
+mail-account Personal
+grouping conversations
+folder archive Personal
+
+# Three messages, two conversations: two notifications, each its conversation's newest.
+notify-mail a Personal:inbox "Hyttetur" "from=Ingrid Solberg" ago=5
+notify-mail b Personal:inbox "Re: Hyttetur" "from=Tomas Berg" ago=4 reply=a
+notify-mail c Personal:inbox "Middag" "from=Leah Kim" ago=3
+notify-arrive a b c
+wait-until assert-notify-count 2
+assert-notify 1 summary "Tomas Berg"
+assert-notify 1 body "Re: Hyttetur"
+assert-notify 2 summary "Leah Kim"
+assert-notified a alone
+assert-notified b alone
+assert-notified c alone
+
+# A reply in the first conversation replaces its notification.
+notify-mail d Personal:inbox "Re: Hyttetur" "from=Sana Malik" ago=1 reply=b
+notify-arrive d
+wait-until assert-notify-count 3
+assert-notify 3 replaces 1
+assert-notify 3 summary "Sana Malik"
+assert-notified d alone
+assert-notify-open 2
+
+# A click opens the conversation in its Inbox, its row selected, at the new message.
+notify-click 3 default
+wait-until assert-notify-opened d had-window
+assert-list-count 2
+assert-list-selected 0
+assert-list-row 0 count 3
+assert-notified a none
+assert-notified d none
+
+# Archive on the other notification takes its conversation from the Inbox (a folder the
+# window shows keeps its new mail quiet: the window shows the Archive meanwhile).
+folder archive Personal
+notify-mail e Personal:inbox "Re: Middag" "from=Marius Dahl" ago=0 reply=c
+notify-arrive e
+wait-until assert-notify-count 4
+assert-notify 4 replaces 2
+assert-notify 4 summary "Marius Dahl"
+notify-click 4 Archive
+wait-until assert-toast "Archived 1 conversation"
+folder inbox Personal
+assert-list-count 1
+assert-list-row 0 count 3
+folder archive Personal
+assert-list-count 1
+assert-list-row 0 members 2

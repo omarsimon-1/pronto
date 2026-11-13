@@ -2,17 +2,17 @@
 # week (from Monday), This month and Older, from local midnights, under GTK's section headers;
 # they regroup when the day changes. The list's clock is fixed to a Wednesday, so every section
 # exists whatever day the test runs. Every message is fictional.
-# Run: tools/headless.sh 36 target/debug/sealwax --self-test tests/selftest/list-sections.sealwax-test
+# Run: tools/headless.sh 36 target/debug/pronto --self-test tests/selftest/list-sections.sealwax-test
 
 desktop tiling
 resize 1440 1000
 
-# An empty store: "No accounts yet", and nothing to list.
+# An empty store: "No accounts yet", and nothing to list: an empty Inbox is Inbox Zero.
 assert-shown welcome true
 mail-account Personal
 assert-shown welcome false
 assert-folder-shown inbox false
-assert-list-empty "No messages"
+assert-list-empty "Inbox Zero"
 
 # One message in every section, on Wednesday 2026-10-07 at noon.
 list-clock 2026-10-07T12:00:00
@@ -28,7 +28,9 @@ assert-list-sections "Today:2,Yesterday:1,This week:1,This month:1,Older:1"
 assert-list-headers "TODAY,YESTERDAY,THIS WEEK,THIS MONTH,OLDER"
 assert-list-top true
 
-# Rows: newest first (the same date: the newer message first), today's at their time of day.
+# Rows: newest first (the same date: the newer message first), today's at their time of day,
+# yesterday's and older ones as the locale's month and the day (the Superhuman pass's date
+# column; since phase B yesterday is a date too, under its header).
 assert-list-row 0 subject "Saturday ride"
 assert-list-row 0 sender Fjord-Cycling-Club
 assert-list-row 0 unread false
@@ -37,15 +39,17 @@ assert-list-row 1 subject "Cabin weekend — final plan"
 assert-list-row 1 unread true
 assert-list-row 2 section Yesterday
 assert-list-row 2 starred true
-assert-list-row 2 time 12:00
+assert-list-row 2 time "OCT 6"
 assert-list-row 3 section "This week"
 assert-list-row 3 attachment true
 assert-list-row 4 section "This month"
 assert-list-row 5 section Older
 
-# The account came before its folders, so the window started on All Inboxes; the Inbox lists
-# the same messages.
-assert-folder all-inboxes
+# The window opened the account's Inbox once its folders were there, though the account came
+# before them (phase C's first view); All Inboxes lists the same messages.
+assert-label list-title Inbox
+assert-label list-subtitle "4 unread · Personal"
+folder all-inboxes
 assert-label list-title "All Inboxes"
 assert-label list-subtitle "4 unread · 1 account"
 folder inbox

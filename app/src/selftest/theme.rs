@@ -1,12 +1,14 @@
-//! Omarchy themes and corners for self-tests (`theme`, `corners`). The harness points the theme
-//! follower at a scratch Omarchy state directory (`SEALWAX_OMARCHY_STATE`, set before the app
-//! starts), so a run never depends on the desktop's theme, and swaps the fixtures of
-//! `tests/theme/` into it the way `omarchy-theme-set` does (as `app/examples/theme_switch.rs`
-//! does), then waits for the follower to apply them.
+//! Omarchy themes, palettes and corners for self-tests (`theme`, `palette`, `corners`). The
+//! harness points the theme follower at a scratch Omarchy state directory
+//! (`PRONTO_OMARCHY_STATE`, set before the app starts), so a run never depends on the desktop's
+//! theme, and swaps the fixtures of `tests/theme/` into it the way `omarchy-theme-set` does (as
+//! `app/examples/theme_switch.rs` does), then waits for the follower to apply them. `theme`
+//! pins the Omarchy palette, so the fixture shows whatever `config.toml` says; `palette` pins
+//! another one (or `config` unpins it).
 
 use super::{Harness, StepResult, WAIT_TIMEOUT};
 use gtk4::glib;
-use sealwax_domain::theme::{CornerRadius, ThemeOptions, ThemeSource};
+use sealwax_domain::theme::{CornerRadius, PaletteChoice, ThemeOptions, ThemeSource};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -81,6 +83,7 @@ impl Harness {
             .state
             .theme()
             .ok_or("the theme follower isn't running")?;
+        controller.pin_palette(Some(PaletteChoice::Omarchy));
         let state = state_dir(&self.root);
         let before = controller.reloads();
         let swapped = Instant::now();
@@ -122,6 +125,44 @@ impl Harness {
         match controller.css_errors() {
             0 => Ok(()),
             errors => Err(format!("{errors} CSS errors (see the log)")),
+        }
+    }
+
+    /// `palette adwaita|tokyo-night|omarchy|config`: pins that palette, as `config.toml`'s
+    /// `palette` would choose it, or (`config`) goes back to the file's.
+    pub(super) fn set_palette(&self, value: &str) -> StepResult {
+        let controller = self
+            .state
+            .theme()
+            .ok_or("the theme follower isn't running")?;
+        let pinned = match value {
+            "config" => None,
+            other => Some(other.parse::<PaletteChoice>()?),
+        };
+        controller.pin_palette(pinned);
+        let theme = controller.theme();
+        println!("  # {} ({})", theme.name(), theme.mode().as_str());
+        match controller.css_errors() {
+            0 => Ok(()),
+            errors => Err(format!("{errors} CSS errors (see the log)")),
+        }
+    }
+
+    /// `motion`: whether the theme turned motion off (`reduced` or `full`), for checks.
+    pub(super) fn assert_motion(&self, value: &str) -> StepResult {
+        let controller = self
+            .state
+            .theme()
+            .ok_or("the theme follower isn't running")?;
+        let got = if controller.reduced_motion() {
+            "reduced"
+        } else {
+            "full"
+        };
+        if got == value {
+            Ok(())
+        } else {
+            Err(format!("motion is {got}, not {value}"))
         }
     }
 

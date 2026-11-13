@@ -1,0 +1,64 @@
+# An earlier session's inline reply comes back as it was (the fork's phase B): its text, how it
+# answered (Reply All too: the store found only Reply's drafts before), and whom it went to when
+# the user chose that: a recipient taken out of a Reply All doesn't come back after a restart,
+# and the reply goes to whom its draft says. A draft to whom the compose rules plan (the same
+# addresses, whatever their names) stays planned: Reply All then still adds the others. The
+# drafts are in the store as a closed quick reply left them; the account's address isn't the
+# samples' Alex Berg, so Reply All answers Alex too. The stand-in backend; every name, address
+# and text is fictional. A reply that answers another way after its draft was first saved, with
+# the store backend: reply-restore-kind.
+# Run: tools/headless.sh 65 target/debug/pronto --self-test tests/selftest/reply-restore.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+composer-backend stand-in
+triage-mark-read-on-open false
+conversation-account Personal ola.nordmann@example.test
+# The Archive first: in Focused the list's cursor takes the Inbox's first row as soon as it
+# arrives, and the reader lays its conversation out behind the list then, before the drafts below
+# are in the store (an earlier session's drafts are there when Pronto starts).
+folder archive
+conversation-add trip
+conversation-add links
+quick-store-draft trip-6 "Ser dere fredag." reply-all tomas@example.test
+quick-store-draft links-6 "Takk for lenkene." reply tomas@example.test
+folder inbox Personal
+list-wait
+focus list
+
+# Reply All with someone taken out: it comes back so, the choice kept.
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Ser dere fredag."
+assert-quick-reply kind reply-all
+wait-until assert-quick-reply to tomas@example.test
+assert-quick-reply cc none
+assert-quick-reply chosen true
+assert-quick-reply label "Reply to tomas@example.test"
+# Sent, it goes to whom the box says.
+action win.quick-reply
+key <Control>Return
+wait-until assert-quick-sends 1
+assert-quick-send-last trip-6 "Ser dere fredag." reply-all tomas@example.test
+
+# A reply to whom the rules plan: not a choice, so Reply All adds the others.
+key Escape
+wait-until assert-reader-on-screen false
+conversation-show links-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Takk for lenkene."
+assert-quick-reply kind reply
+wait-until assert-quick-reply to tomas@example.test
+assert-quick-reply chosen false
+key a
+assert-quick-reply kind reply-all
+assert-quick-reply chosen false
+assert-quick-reply to tomas@example.test,alex.berg@example.test
+assert-labelled

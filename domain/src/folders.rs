@@ -83,7 +83,7 @@ pub enum NameProblem {
     Control,
     /// A folder beside it has this name, whatever the case.
     Taken,
-    /// Sealwax leaves folders with this name out of the list (other mail programs').
+    /// Pronto leaves folders with this name out of the list (other mail programs').
     Hidden,
 }
 
@@ -99,7 +99,7 @@ impl NameProblem {
             NameProblem::Control => "A folder name can't contain a line break.".to_owned(),
             NameProblem::Taken => "There is a folder with this name here already.".to_owned(),
             NameProblem::Hidden => {
-                "Sealwax hides folders with this name: other mail programs keep their own \
+                "Pronto hides folders with this name: other mail programs keep their own \
                  things in them."
                     .to_owned()
             }
@@ -117,7 +117,7 @@ pub struct Placement<'a> {
     pub siblings: Vec<&'a str>,
 }
 
-/// Checks `typed` as the last level of a folder at `placement`; `hidden` says whether Sealwax
+/// Checks `typed` as the last level of a folder at `placement`; `hidden` says whether Pronto
 /// would leave a folder of that whole name out of the list. Returns the name trimmed.
 pub fn check_name(
     typed: &str,

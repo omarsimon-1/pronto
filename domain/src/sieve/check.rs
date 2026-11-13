@@ -1,4 +1,4 @@
-//! The subset of Sieve Sealwax runs (docs/m9/sieve.md): [`check`] turns a parsed [`Tree`] into a
+//! The subset of Sieve Pronto runs (docs/m9/sieve.md): [`check`] turns a parsed [`Tree`] into a
 //! [`Script`] of typed commands and tests, or names the first thing outside the subset.
 
 use super::parser::{self, Argument, Tests, Tree, Value};
@@ -46,7 +46,7 @@ const ADDRESS_HEADERS: [&str; 22] = [
     "return-receipt-to",
 ];
 
-/// A script Sealwax can run: its commands checked and typed.
+/// A script Pronto can run: its commands checked and typed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Script {
     pub(super) commands: Vec<Command>,
@@ -212,8 +212,8 @@ pub(super) enum AddressPart {
     Domain,
 }
 
-/// Checks a parsed script against the subset Sealwax runs: `require` names only [`EXTENSIONS`]
-/// and comes first; every command, test and tag is one Sealwax knows, with the arguments it
+/// Checks a parsed script against the subset Pronto runs: `require` names only [`EXTENSIONS`]
+/// and comes first; every command, test and tag is one Pronto knows, with the arguments it
 /// takes, and its extension is required. The error names what is outside the subset.
 pub fn check(tree: &Tree) -> Result<Script, Error> {
     let mut checker = Checker {
@@ -456,7 +456,7 @@ impl Checker {
                             command.position,
                             format!(
                                 "`{name}` with a variable name needs the variables extension, \
-                                 which Sealwax doesn't support"
+                                 which Pronto doesn't support"
                             ),
                         ));
                     }
@@ -607,7 +607,7 @@ impl Checker {
                     [_, _] => Err(Error::at(
                         test.position,
                         "`hasflag` with a variable name needs the variables extension, which \
-                         Sealwax doesn't support",
+                         Pronto doesn't support",
                     )),
                     _ => Err(Error::at(
                         test.position,
@@ -676,7 +676,7 @@ impl Checker {
                             return Err(Error::at(
                                 value.position,
                                 format!(
-                                    "Sealwax supports the comparators \"i;ascii-casemap\" and \
+                                    "Pronto supports the comparators \"i;ascii-casemap\" and \
                                      \"i;octet\", not {}",
                                     shown_name(other, "that one")
                                 ),
@@ -835,7 +835,7 @@ fn split_flags(strings: &[String]) -> Vec<String> {
 }
 
 /// The flags of `addflag`, `setflag` or `removeflag`, split at spaces and spelled as RFC 5232
-/// spells them; each must be a system flag Sealwax sets or an IMAP keyword. `setting`: `\Deleted`
+/// spells them; each must be a system flag Pronto sets or an IMAP keyword. `setting`: `\Deleted`
 /// is refused (rules never delete; `discard` moves to Trash).
 fn set_flags(strings: &[String], setting: bool, position: Position) -> Result<Vec<String>, Error> {
     split_flags(strings)
@@ -850,7 +850,7 @@ fn set_flags(strings: &[String], setting: bool, position: Position) -> Result<Ve
                     "deleted" if !setting => Ok("\\Deleted".to_owned()),
                     "deleted" => Err(Error::at(
                         position,
-                        "Sealwax's rules never set \\Deleted; use `discard`, which moves the \
+                        "Pronto's rules never set \\Deleted; use `discard`, which moves the \
                          message to Trash",
                     )),
                     _ => Err(Error::at(
@@ -900,21 +900,21 @@ fn shown_name(name: &str, instead: &str) -> String {
 fn unsupported_extension(name: &str) -> String {
     let shown = shown_name(name, "");
     if shown.is_empty() {
-        return "an extension Sealwax doesn't know".to_owned();
+        return "an extension Pronto doesn't know".to_owned();
     }
     match name {
         "vacation" | "vacation-seconds" | "reject" | "ereject" | "enotify" | "notify"
-        | "redirect" => format!(
-            "Sealwax doesn't support the Sieve extension {shown}: its rules never send mail"
-        ),
-        _ => format!("Sealwax doesn't support the Sieve extension {shown}"),
+        | "redirect" => {
+            format!("Pronto doesn't support the Sieve extension {shown}: its rules never send mail")
+        }
+        _ => format!("Pronto doesn't support the Sieve extension {shown}"),
     }
 }
 
 fn unsupported_command(name: &str) -> String {
     let extension = match name {
         "redirect" | "reject" | "ereject" | "vacation" | "notify" | "denotify" => {
-            return format!("Sealwax doesn't support `{name}`: its rules never send mail");
+            return format!("Pronto doesn't support `{name}`: its rules never send mail");
         }
         "set" => "variables",
         "include" | "return" | "global" => "include",
@@ -925,7 +925,7 @@ fn unsupported_command(name: &str) -> String {
         "fileinto" | "keep" | "discard" | "stop" => unreachable!("supported"),
         _ => return format!("unknown command `{name}`"),
     };
-    format!("Sealwax doesn't support `{name}` (the {extension} extension)")
+    format!("Pronto doesn't support `{name}` (the {extension} extension)")
 }
 
 fn unsupported_test(name: &str) -> String {
@@ -944,7 +944,7 @@ fn unsupported_test(name: &str) -> String {
         "specialuse_exists" => "special-use",
         _ => return format!("unknown test `{name}`"),
     };
-    format!("Sealwax doesn't support the `{name}` test (the {extension} extension)")
+    format!("Pronto doesn't support the `{name}` test (the {extension} extension)")
 }
 
 fn unsupported_tag(name: &str, tag: &str) -> String {
@@ -961,10 +961,10 @@ fn unsupported_tag(name: &str, tag: &str) -> String {
         "list" => "extlists",
         "flags" => {
             return format!(
-                "Sealwax doesn't support `:flags` on `{name}`; use addflag before `{name}`"
+                "Pronto doesn't support `:flags` on `{name}`; use addflag before `{name}`"
             );
         }
         _ => return format!("`{name}` has no tag `:{tag}`"),
     };
-    format!("Sealwax doesn't support `:{tag}` (the {extension} extension)")
+    format!("Pronto doesn't support `:{tag}` (the {extension} extension)")
 }

@@ -1,0 +1,191 @@
+# The Superhuman pass's toggles (2026-10-28, docs/superhuman/layout.md), from the app's own
+# defaults (Focused, the sidebar hidden): Toggle Sidebar (Ctrl+Shift+S, the list bar's button)
+# shows the sidebar beside the list in a wide window and over it in a narrower one, closing as a
+# folder is picked; the Reading Pane puts the reader beside the list (Split); layout.toml
+# remembers both, and a new window comes back as it was left. The list bar's dot points out an
+# account that needs the user while the sidebar is hidden; the filter shows as a pill that
+# removes it; the search field shows only while a search is asked for or runs. Every name,
+# address and host is fictional.
+# Run: tools/headless.sh 30 target/debug/pronto --self-test tests/selftest/layout-toggles.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open false
+engine-attach
+triage-account Work work
+# The window opens the account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
+mail-add Work:inbox 10m "Hyttetur i oktober" "from=Ingrid Solberg" "text=Skal vi dra fredag?"
+mail-add Work:inbox 20m "Styremøte torsdag" "from=Marius Dahl" "text=Agendaen kommer." read
+mail-add Work:inbox 30m "Kvittering" "from=Leah Kim" "text=Takk." starred
+# Its first rows in, the list has the Inbox's end in view and asks for older mail.
+engine-expect load-older
+# A second account, through the assistant, whose state the scripted engine reports.
+action win.add-account
+setup-type setup-address ola@example.test
+setup-type setup-name "Ola Hansen"
+setup-key enter
+engine-expect detect
+engine-reply detected fjordpost
+setup-type setup-password fictional-password-1
+setup-key enter
+engine-expect verify
+engine-reply verified ok
+engine-expect add-account
+engine-reply added ok
+assert-setup open false
+write-file $TMP/config/pronto/accounts.toml "[[account]]\nkey = \"ola\"\nname = \"Ola Hansen\"\naddress = \"ola@example.test\"\n\n[account.imap]\nhost = \"imap.ola.example.test\"\n\n[account.smtp]\nhost = \"smtp.ola.example.test\"\n"
+wait-until assert-label sidebar-summary "2 accounts · all synced"
+setup-dismiss-toasts
+folder inbox Work
+list-wait
+assert-view-mode focused
+assert-sidebar hidden
+assert-file-lacks $TMP/state/pronto/layout.toml "mode ="
+
+# Toggle Sidebar beside a wide window's list, from the keyboard: remembered.
+focus list
+key <Control><Shift>s
+assert-sidebar inline
+assert-action-state win.toggle-sidebar true
+assert-accessible-state list-sidebar pressed true
+assert-width sidebar 220
+assert-width list 1220
+assert-shown sidebar-handle true
+assert-shown status-text:account-2 false
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "sidebar = true"
+assert-accessible window
+screenshot $DIR/../../.local/selftest/layout-sidebar.png
+# The list bar's button hides it again.
+click list-sidebar
+assert-sidebar hidden
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "sidebar = false"
+click list-sidebar
+assert-sidebar inline
+
+# The Reading Pane: Split, the reader beside the list, remembered; the list keeps its width.
+action win.toggle-reading-pane
+assert-view-mode split
+assert-action-state win.toggle-reading-pane true
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "mode = \"split\""
+focus list
+list-select 0
+wait-until assert-reader-page message
+assert-reader-on-screen true
+assert-width list 380
+assert-shown reader-back false
+screenshot $DIR/../../.local/selftest/layout-split.png
+
+# A new window comes back as it was left: Split, the sidebar shown.
+close-window
+wait-until assert-window false
+bus-activate
+wait-until assert-window true
+resize 1440 900
+assert-view-mode split
+assert-sidebar inline
+assert-action-state win.toggle-reading-pane true
+assert-action-state win.toggle-sidebar true
+
+# Back to Focused, with the conversation the focus was in kept open.
+focus list
+list-select 0
+wait-until assert-reader-selected
+focus reader
+view-mode focused
+assert-pane reader
+assert-shown list false
+wait-until assert-file-contains $TMP/state/pronto/layout.toml "mode = \"focused\""
+key Escape
+assert-pane list
+assert-reader-warm true
+
+# Below 1280 px the sidebar lies over the list, until a folder is picked or Escape; it isn't
+# remembered there, and comes back beside the list at 1440.
+resize 1100 900
+assert-layout medium
+assert-sidebar hidden
+assert-action-state win.toggle-sidebar false
+assert-width list 1100
+key <Control><Shift>s
+assert-sidebar overlay
+assert-pane folders
+assert-width sidebar 220
+screenshot $DIR/../../.local/selftest/layout-overlay.png
+key Down
+key Return
+assert-sidebar hidden
+assert-pane list
+assert-folder all-inboxes
+wait-until assert-list-focus list
+# Escape closes it too, the focus back in the list.
+key <Control><Shift>s
+assert-sidebar overlay
+key Escape
+assert-sidebar hidden
+wait-until assert-list-focus list
+assert-file-contains $TMP/state/pronto/layout.toml "sidebar = true"
+resize 1440 900
+assert-sidebar inline
+folder inbox Work
+
+# The dot on the sidebar button: an account that needs the user, while the sidebar is hidden;
+# its tooltip says which, never the colour alone.
+sidebar hidden
+assert-shown list-attention false
+assert-tooltip list-sidebar "Toggle Sidebar (Ctrl+Shift+S)"
+engine-reply status ola@example.test offline
+wait-until assert-shown list-attention true
+wait-until assert-label sidebar-summary "2 accounts · offline"
+assert-tooltip list-sidebar "ola@example.test: offline\nToggle Sidebar (Ctrl+Shift+S)"
+screenshot $DIR/../../.local/selftest/layout-attention.png
+sidebar shown
+assert-shown list-attention false
+assert-shown sidebar-summary true
+assert-shown status-text:account-2 true
+sidebar hidden
+assert-shown list-attention true
+engine-reply status ola@example.test synced
+wait-until assert-shown list-attention false
+assert-tooltip list-sidebar "Toggle Sidebar (Ctrl+Shift+S)"
+sidebar shown
+assert-shown sidebar-summary false
+assert-shown status-text:account-2 false
+
+# The filter as a pill in the bar; a click on it shows every message again.
+assert-shown list-filter false
+chip unread
+assert-shown list-filter true
+assert-label list-filter-name Unread
+assert-list-count 2
+assert-accessible window
+screenshot $DIR/../../.local/selftest/layout-filter.png
+click list-filter
+assert-shown list-filter false
+assert-list-count 3
+action win.go-to-starred
+assert-label list-filter-name Starred
+assert-list-count 1
+action win.go-to-inbox
+assert-shown list-filter false
+
+# Search on demand: / shows the field and puts the focus in it; Escape hides it again; a
+# search that runs keeps it.
+assert-search-shown false
+focus list
+key slash
+assert-search-shown true
+assert-list-focus search
+key Escape
+assert-search-shown false
+assert-list-focus list
+click list-search-button
+assert-search-shown true
+type "Hyttetur"
+wait-until assert-list-count 1
+focus list
+assert-search-shown true
+search-escape
+assert-search-shown false
+assert-list-count 3

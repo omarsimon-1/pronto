@@ -6,7 +6,7 @@ use crate::html_depth;
 use html2text::render::TextDecorator;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-/// The most HTML Sealwax parses into a tree (html5ever, beneath html2text and the cleaner) for
+/// The most HTML Pronto parses into a tree (html5ever, beneath html2text and the cleaner) for
 /// anything but the reader: the tree builder's time grows with the square of the nesting depth,
 /// so 1 MB of nested lists took 37.9 s and 256 KiB 2.56 s (M9, F14). HTML beyond it is cut
 /// before [`html_to_text`] reads it, and a reply or forward quotes a larger original as text.

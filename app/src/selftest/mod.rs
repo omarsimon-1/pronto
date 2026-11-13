@@ -1,19 +1,22 @@
-//! `sealwax --self-test <script>`: runs the real app (window and all) in a scratch directory,
+//! `pronto --self-test <script>`: runs the real app (window and all) in a scratch directory,
 //! executes a `.sealwax-test` script against it and prints a TAP report; exits non-zero when a
 //! step fails. Ported from Stet. It refuses to run on a live display unless
-//! `SEALWAX_SELFTEST_ALLOW_LIVE=1`: run it through `tools/headless.sh`. The format and the
+//! `PRONTO_SELFTEST_ALLOW_LIVE=1`: run it through `tools/headless.sh`. The format and the
 //! commands are in docs/m1/shell.md and docs/m1/polish.md (and TESTING.md once merged). The
 //! theme follower reads a scratch Omarchy state, never the desktop's: the built-in palette
 //! until a script installs a theme from `tests/theme/` (`theme`).
 
 mod a11y;
+mod ai;
 mod background;
 mod bodies;
 mod broadway;
 mod composer;
+mod contact;
 mod conversation;
 mod files;
 mod folders;
+mod layout;
 mod mail;
 mod notify;
 mod outbox;
@@ -21,6 +24,8 @@ mod perf;
 mod probe;
 mod processes;
 mod reader;
+mod remind;
+mod replay;
 mod reply;
 mod rules;
 mod sample;
@@ -28,12 +33,14 @@ mod screenshot;
 mod script;
 mod search;
 mod setup;
+mod split;
 mod theme;
 mod triage;
+mod writing;
 
-use crate::application::{APP_ID_ENV, AppConfig, AppState, SealwaxApplication};
+use crate::application::{APP_ID_ENV, AppConfig, AppState, ProntoApplication};
 use crate::config::APP_ID;
-use crate::window::{self, Pane, SidebarModel, Window};
+use crate::window::{self, Pane, SidebarModel, ViewMode, Window};
 use gtk4 as gtk;
 use gtk4::{gio, glib};
 use libadwaita as adw;
@@ -50,12 +57,12 @@ use std::process::{Child, Command};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-pub const ALLOW_LIVE_ENV: &str = "SEALWAX_SELFTEST_ALLOW_LIVE";
+pub const ALLOW_LIVE_ENV: &str = "PRONTO_SELFTEST_ALLOW_LIVE";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// A step that runs longer has hung: it fails and the rest of the script is not run.
-/// `SEALWAX_SELFTEST_STEP_TIMEOUT` overrides it, in seconds.
+/// `PRONTO_SELFTEST_STEP_TIMEOUT` overrides it, in seconds.
 const STEP_TIMEOUT: Duration = Duration::from_secs(120);
-const STEP_TIMEOUT_ENV: &str = "SEALWAX_SELFTEST_STEP_TIMEOUT";
+const STEP_TIMEOUT_ENV: &str = "PRONTO_SELFTEST_STEP_TIMEOUT";
 /// Pixels a measured size may differ from the wanted one.
 const TOLERANCE: f32 = 1.0;
 
@@ -70,15 +77,15 @@ pub fn run(script_path: &Path, started: Instant) -> glib::ExitCode {
     let allowed = std::env::var_os(ALLOW_LIVE_ENV).is_some_and(|value| value == "1");
     if !broadway && !allowed {
         eprintln!(
-            "sealwax: --self-test opens windows; run it headless with \
-             tools/headless.sh <display> sealwax --self-test <script> (or set {ALLOW_LIVE_ENV}=1)"
+            "pronto: --self-test opens windows; run it headless with \
+             tools/headless.sh <display> pronto --self-test <script> (or set {ALLOW_LIVE_ENV}=1)"
         );
         return glib::ExitCode::from(2);
     }
     let text = match fs::read_to_string(script_path) {
         Ok(text) => text,
         Err(error) => {
-            eprintln!("sealwax: cannot read {}: {error}", script_path.display());
+            eprintln!("pronto: cannot read {}: {error}", script_path.display());
             return glib::ExitCode::from(2);
         }
     };
@@ -90,16 +97,16 @@ pub fn run(script_path: &Path, started: Instant) -> glib::ExitCode {
     let root = match TempRoot::create() {
         Ok(root) => root,
         Err(error) => {
-            eprintln!("sealwax: cannot create a scratch directory: {error}");
+            eprintln!("pronto: cannot create a scratch directory: {error}");
             return glib::ExitCode::from(2);
         }
     };
     // The configuration home exists, as `~/.config` does, so the settings folder's watch sees
-    // `sealwax/` appear when a script writes `keys.toml`.
+    // `pronto/` appear when a script writes `keys.toml`.
     let omarchy = theme::state_dir(&root.path);
     for dir in [omarchy.clone(), root.path.join("config")] {
         if let Err(error) = fs::create_dir_all(&dir) {
-            eprintln!("sealwax: cannot create {}: {error}", dir.display());
+            eprintln!("pronto: cannot create {}: {error}", dir.display());
             return glib::ExitCode::from(2);
         }
     }
@@ -111,12 +118,12 @@ pub fn run(script_path: &Path, started: Instant) -> glib::ExitCode {
     let steps = match script::parse(&text, &[("TMP", &tmp), ("DIR", &dir)]) {
         Ok(steps) => steps,
         Err(error) => {
-            eprintln!("sealwax: {}: {error}", script_path.display());
+            eprintln!("pronto: {}: {error}", script_path.display());
             return glib::ExitCode::from(2);
         }
     };
     if let Err(error) = reply::before_start(&steps, &root.path) {
-        eprintln!("sealwax: {}: {error}", script_path.display());
+        eprintln!("pronto: {}: {error}", script_path.display());
         return glib::ExitCode::from(2);
     }
     let tiling = match steps.first() {
@@ -124,14 +131,14 @@ pub fn run(script_path: &Path, started: Instant) -> glib::ExitCode {
             "tiling" => true,
             "other" => false,
             other => {
-                eprintln!("sealwax: desktop takes tiling or other, not {other}");
+                eprintln!("pronto: desktop takes tiling or other, not {other}");
                 return glib::ExitCode::from(2);
             }
         },
         _ => window::tiling_desktop(),
     };
     if broadway && let Err(error) = broadway::connect() {
-        eprintln!("sealwax: cannot reach the Broadway daemon: {error}");
+        eprintln!("pronto: cannot reach the Broadway daemon: {error}");
         return glib::ExitCode::from(2);
     }
 
@@ -141,9 +148,20 @@ pub fn run(script_path: &Path, started: Instant) -> glib::ExitCode {
         .unwrap_or_else(|| format!("{APP_ID}.SelfTest"));
     let mut dirs = SealwaxDirs::under(&root.path);
     if let Err(error) = mail::before_start(&steps, &mut dirs) {
-        eprintln!("sealwax: {}: {error}", script_path.display());
+        eprintln!("pronto: {}: {error}", script_path.display());
         return glib::ExitCode::from(2);
     }
+    if let Err(error) = split::before_start(&steps, &dirs) {
+        eprintln!("pronto: {}: {error}", script_path.display());
+        return glib::ExitCode::from(2);
+    }
+    let app_defaults = match layout::app_defaults(&steps) {
+        Ok(app_defaults) => app_defaults,
+        Err(error) => {
+            eprintln!("pronto: {}: {error}", script_path.display());
+            return glib::ExitCode::from(2);
+        }
+    };
     let config = AppConfig {
         app_id: app_id.clone(),
         dirs,
@@ -151,9 +169,22 @@ pub fn run(script_path: &Path, started: Instant) -> glib::ExitCode {
         tiling,
         engine: None,
         microsoft_client_id: None,
+        google_client: None,
     };
     crate::accessibility::record_announcements();
-    let app = SealwaxApplication::new(config, started);
+    let app = ProntoApplication::new(config, started);
+    // The scripts were written for the reader beside the list, the sidebar shown and one row a
+    // message; those about the Superhuman pass's own defaults (Focused, no sidebar, one row a
+    // conversation) ask for them.
+    if !app_defaults {
+        app.state().set_layout_defaults(ViewMode::Split, true);
+        app.state()
+            .set_grouping_default(sealwax_infrastructure::store::ViewGrouping::Messages);
+    }
+    // One Inbox, as every script before the Split Inbox (phase C) was written for, whatever
+    // the defaults; `split-inbox on` shows the sides (a leading one from the start).
+    app.state()
+        .set_split_default(split::startup_default(&steps));
     let outcome: Rc<Cell<Option<bool>>> = Rc::new(Cell::new(None));
     let harness_root = root.path.clone();
     app.state().connect_first_window(glib::clone!(
@@ -182,13 +213,13 @@ pub fn run(script_path: &Path, started: Instant) -> glib::ExitCode {
             });
         }
     ));
-    app.run_with_args(&["sealwax"]);
+    app.run_with_args(&["pronto"]);
     drop(root);
     match outcome.get() {
         Some(true) => glib::ExitCode::SUCCESS,
         Some(false) => glib::ExitCode::FAILURE,
         None => {
-            eprintln!("sealwax: the self-test never finished");
+            eprintln!("pronto: the self-test never finished");
             glib::ExitCode::FAILURE
         }
     }
@@ -202,8 +233,8 @@ struct TempRoot {
 }
 
 /// A scratch directory to use, and keep, instead of a fresh one: the kill -9 harness
-/// (`tools/kill9-compose.sh`) runs Sealwax twice on the same store.
-pub const ROOT_ENV: &str = "SEALWAX_SELFTEST_ROOT";
+/// (`tools/kill9-compose.sh`) runs Pronto twice on the same store.
+pub const ROOT_ENV: &str = "PRONTO_SELFTEST_ROOT";
 
 impl TempRoot {
     fn create() -> std::io::Result<Self> {
@@ -236,11 +267,11 @@ impl Drop for TempRoot {
 }
 
 struct Harness {
-    app: SealwaxApplication,
+    app: ProntoApplication,
     state: Rc<AppState>,
     root: PathBuf,
     app_id: String,
-    /// Background `sealwax` processes, by name.
+    /// Background `pronto` processes, by name.
     processes: RefCell<HashMap<String, Child>>,
     bus: RefCell<Option<TestBus>>,
 }
@@ -322,28 +353,65 @@ impl Harness {
                 Ok(())
             }
             "theme" => self.switch_theme(arg(0)).await,
+            "palette" => self.set_palette(arg(0)),
+            "animations" => {
+                let on = script::boolean(match arg(0) {
+                    "on" => "true",
+                    "off" => "false",
+                    other => other,
+                })?;
+                let settings = gtk::Settings::default().ok_or("GTK has no settings")?;
+                settings.set_gtk_enable_animations(on);
+                Ok(())
+            }
+            "text-scale" => {
+                let factor = arg(0)
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|factor| (0.5..=3.0).contains(factor))
+                    .ok_or_else(|| {
+                        format!("expected a text scale from 0.5 to 3, got {}", arg(0))
+                    })?;
+                let settings = gtk::Settings::default().ok_or("GTK has no settings")?;
+                // GTK's unit: 1024ths of a dot per inch.
+                settings.set_gtk_xft_dpi((96.0 * 1024.0 * factor).round() as i32);
+                self.wait_until_settled().await;
+                Ok(())
+            }
             "corners" => self.set_corners(arg(0)),
             "write-file" => self.write_file(arg(0), arg(1)),
             "sidebar" => {
                 let model = match arg(0) {
                     "sample" => sample::model(),
                     "none" => SidebarModel::default(),
-                    other => return Err(format!("use sample or none, not {other}")),
+                    "shown" | "hidden" => {
+                        return layout::set_toggle(self, "toggle-sidebar", arg(0) == "shown").await;
+                    }
+                    other => {
+                        return Err(format!("use sample, none, shown or hidden, not {other}"));
+                    }
                 };
                 self.window()?.set_sidebar(model);
                 Ok(())
             }
             "list" => {
-                let list = match arg(0) {
-                    "sample" => sample::list(),
-                    "empty" => {
-                        window::empty::folder("No messages", "Messages in this folder appear here.")
-                            .widget()
-                            .clone()
-                    }
+                let (list, empty) = match arg(0) {
+                    "sample" => (sample::list(), false),
+                    "empty" => (
+                        window::empty::folder(
+                            "No messages",
+                            "Messages in this folder appear here.",
+                        )
+                        .widget()
+                        .clone(),
+                        true,
+                    ),
                     other => return Err(format!("use sample or empty, not {other}")),
                 };
-                self.window()?.set_list(&list);
+                // In place of the real list, which may be empty: the window lays out this one.
+                let window = self.window()?;
+                window.set_list(&list);
+                window.set_list_empty(empty);
                 Ok(())
             }
             "reader" => {
@@ -427,6 +495,7 @@ impl Harness {
             "test-bus-signal" => self.test_bus_signal(arg(0)).await,
             "test-bus-stop" => self.stop_test_bus().await,
             command if a11y::handles(command) => a11y::step(self, command, args).await,
+            command if layout::handles(command) => layout::step(self, command, args).await,
             command if folders::handles(command) => folders::step(self, command, args).await,
             command if rules::handles(command) => rules::step(self, command, args).await,
             command if conversation::handles(command) => {
@@ -439,10 +508,15 @@ impl Harness {
             command if search::handles(command) => search::step(self, command, args).await,
             command if background::handles(command) => background::step(self, command, args).await,
             command if bodies::handles(command) => bodies::step(self, command, args).await,
+            command if split::handles(command) => split::step(self, command, args).await,
+            command if remind::handles(command) => remind::step(self, command, args).await,
+            command if contact::handles(command) => contact::step(self, command, args).await,
             command if setup::handles(command) => setup::step(self, command, args).await,
             command if triage::handles(command) => triage::step(self, command, args).await,
             command if files::handles(command) => files::step(self, command, args).await,
             command if composer::handles(command) => composer::step(self, command, args).await,
+            command if ai::handles(command) => ai::step(self, command, args).await,
+            command if writing::handles(command) => writing::step(self, command, args).await,
             command => self.check(command, args).await,
         }
     }
@@ -633,9 +707,36 @@ impl Harness {
                 let tooltip = self.widget(arg(0))?.tooltip_text().unwrap_or_default();
                 equal(&format!("{}'s tooltip", arg(0)), tooltip.as_str(), arg(1))
             }
+            "assert-icon" => {
+                let widget = self.widget(arg(0))?;
+                let image = std::iter::successors(Some(widget), |widget| widget.first_child())
+                    .find_map(|widget| widget.downcast::<gtk::Image>().ok())
+                    .ok_or_else(|| format!("{} shows no icon", arg(0)))?;
+                // A glyph drawn at full strength stands for the theme icon it replaces
+                // (`assert-glyph` tells them apart).
+                let name = image
+                    .icon_name()
+                    .map(|name| name.to_string())
+                    .or_else(|| {
+                        image
+                            .gicon()
+                            .and_downcast::<gio::ThemedIcon>()
+                            .and_then(|icon| icon.names().first().map(|name| name.to_string()))
+                    })
+                    .or_else(|| {
+                        crate::window::glyph::shown(&image)
+                            .map(|glyph| glyph.icon_name().to_owned())
+                    });
+                equal(
+                    &format!("{}'s icon", arg(0)),
+                    name.unwrap_or_default().as_str(),
+                    arg(1),
+                )
+            }
             "assert-color" | "assert-contrast" | "assert-radius" | "assert-font" => {
                 self.check_look(assertion, args)
             }
+            "assert-motion" => self.assert_motion(arg(0)),
             "assert-max-width" => {
                 let width = self.bounds(arg(0))?.width();
                 let limit = number(arg(1))? as f32;
@@ -655,6 +756,31 @@ impl Harness {
                     Ok(())
                 } else {
                     Err(format!("{} overlaps {} by {} px", arg(0), arg(1), -gap))
+                }
+            }
+            "assert-aligned" => {
+                let (first, second) = (self.bounds(arg(0))?, self.bounds(arg(1))?);
+                let (a, b) = match arg(2) {
+                    "left" => (first.x(), second.x()),
+                    "right" => (first.x() + first.width(), second.x() + second.width()),
+                    other => return Err(format!("use left or right, not {other}")),
+                };
+                println!(
+                    "  # {}'s {} edge at {a} px, {}'s at {b} px",
+                    arg(0),
+                    arg(2),
+                    arg(1)
+                );
+                if (a - b).abs() <= 2.0 * TOLERANCE {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{}'s {} edge is {} px from {}'s",
+                        arg(0),
+                        arg(2),
+                        a - b,
+                        arg(1)
+                    ))
                 }
             }
             "assert-sensitive" => {
@@ -768,8 +894,13 @@ impl Harness {
                 }
             }
             "assert-reader" => reader::check(self, args).await,
-            "assert-web-sandbox" => blocking(processes::web_sandbox).await?,
+            "assert-reader-more" => reader::more(self, args),
+            "assert-web-sandbox" => {
+                let wanted = args.first().map(|count| number(count)).transpose()?;
+                blocking(move || processes::web_sandbox(wanted)).await?
+            }
             assertion if a11y::handles(assertion) => a11y::step(self, assertion, args).await,
+            assertion if layout::handles(assertion) => layout::step(self, assertion, args).await,
             assertion if folders::handles(assertion) => folders::step(self, assertion, args).await,
             assertion if rules::handles(assertion) => rules::step(self, assertion, args).await,
             assertion if conversation::handles(assertion) => {
@@ -786,19 +917,35 @@ impl Harness {
             assertion if background::handles(assertion) => {
                 background::step(self, assertion, args).await
             }
+            assertion if ai::handles(assertion) => ai::step(self, assertion, args).await,
+            assertion if writing::handles(assertion) => writing::step(self, assertion, args).await,
             assertion if composer::handles(assertion) => {
                 composer::step(self, assertion, args).await
             }
+            assertion if split::handles(assertion) => split::step(self, assertion, args).await,
+            assertion if remind::handles(assertion) => remind::step(self, assertion, args).await,
+            assertion if contact::handles(assertion) => contact::step(self, assertion, args).await,
             other => Err(format!("unknown command {other}")),
         }
     }
 
-    /// On screen: mapped, with a size, inside the window.
+    /// On screen: mapped, with a size, not see-through, not in the reader warm behind a Focused
+    /// list (mapped, but drawn into nothing), inside the window.
     fn shown(&self, widget: &gtk::Widget) -> Result<bool, String> {
         if !widget.is_mapped() || widget.width() <= 0 || widget.height() <= 0 {
             return Ok(false);
         }
+        let mut current = Some(widget.clone());
+        while let Some(part) = current {
+            if part.opacity() <= 0.0 {
+                return Ok(false);
+            }
+            current = part.parent();
+        }
         let window = self.window()?;
+        if window.is_behind_list(widget) {
+            return Ok(false);
+        }
         let window = window.window();
         let Some(bounds) = widget.compute_bounds(window) else {
             return Ok(false);
@@ -905,6 +1052,10 @@ async fn blocking<T: Send + 'static>(
 
 /// Calls `visit` for `widget` and everything under it.
 fn collect(widget: &gtk::Widget, visit: &mut impl FnMut(&gtk::Widget)) {
+    // A conversation the reader laid out unseen (ahead of the selection) isn't on screen.
+    if widget.has_css_class(crate::reader::STAGED) {
+        return;
+    }
     visit(widget);
     let mut child = widget.first_child();
     while let Some(current) = child {
@@ -1034,7 +1185,7 @@ mod tests {
     #[test]
     fn layout_names() {
         use crate::window::Layout;
-        assert_eq!(Layout::Rail.name(), "rail");
+        assert_eq!(Layout::Medium.name(), "medium");
         assert_eq!(Pane::from_name("reader"), Some(Pane::Reader));
         assert_eq!(Pane::from_name("other"), None);
     }

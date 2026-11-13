@@ -38,13 +38,13 @@ const SERVER_TEXT: usize = 200;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context {
     pub account: AccountId,
-    /// What Sealwax calls the account.
+    /// What Pronto calls the account.
     pub account_name: String,
     /// The account's folders as the store holds them.
     pub folders: Vec<Folder>,
     /// A POP3 account: its folders are on this computer and change at once.
     pub local: bool,
-    /// On Microsoft's servers, whose Notes and Outbox Sealwax hides.
+    /// On Microsoft's servers, whose Notes and Outbox Pronto hides.
     pub microsoft: bool,
     /// An IMAP account that isn't connected: its folders can't change now.
     pub offline: bool,
@@ -564,7 +564,7 @@ fn confirm_delete(window: &Window, engine: &EngineLink, context: Context, folder
 /// them, for good."
 fn delete_text(name: &str, subfolders: usize, messages: u32, local: bool) -> String {
     let (who, place) = if local {
-        ("Sealwax deletes", " from this computer")
+        ("Pronto deletes", " from this computer")
     } else {
         ("The server deletes", "")
     };
@@ -610,7 +610,7 @@ fn why(error: &FolderError) -> String {
             format!("the server said “{}”", text.trim())
         }
         FolderError::Lost => {
-            "the connection was lost; Sealwax reads the folders again when it reconnects".to_owned()
+            "the connection was lost; Pronto reads the folders again when it reconnects".to_owned()
         }
         FolderError::Store => "the local store failed".to_owned(),
     }
@@ -695,7 +695,7 @@ pub fn install(state: &Rc<AppState>, window: &Window, actions: &crate::actions::
     window.sidebar().connect_folder_commands(
         move |id, key| match applies_to.upgrade() {
             Some(state) => applies(&state, id, key),
-            None => Err("Sealwax is closing"),
+            None => Err("Pronto is closing"),
         },
         move |id, key| {
             if let Some(state) = activate.upgrade() {
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(
             context.check("Synkroniseringsfeil", &context.placement(None, None)),
             Err(NameProblem::Hidden),
-            "a name Sealwax would hide at the top"
+            "a name Pronto would hide at the top"
         );
         assert_eq!(
             context.check("Synkroniseringsfeil", &context.placement(kunder, None)),
@@ -831,7 +831,7 @@ mod tests {
         );
         assert_eq!(
             delete_text("Acme", 0, 0, true),
-            "Sealwax deletes “Acme” from this computer for good. It holds no messages."
+            "Pronto deletes “Acme” from this computer for good. It holds no messages."
         );
         assert_eq!(
             delete_text("Kunder", 1, 0, false),
@@ -839,7 +839,7 @@ mod tests {
         );
         assert_eq!(
             delete_text("Kunder", 1, 3, true),
-            "Sealwax deletes “Kunder”, its subfolder and the 3 messages in them from this \
+            "Pronto deletes “Kunder”, its subfolder and the 3 messages in them from this \
              computer, for good."
         );
     }

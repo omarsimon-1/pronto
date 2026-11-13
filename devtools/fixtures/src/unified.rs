@@ -316,7 +316,7 @@ impl Inserts<'_> {
             inserted.extend(ingested.ids.iter().flatten());
             for change in &event.views {
                 match change.diff {
-                    ViewDiff::Splice { .. } => splices += 1,
+                    ViewDiff::Splice { .. } | ViewDiff::ConversationSplice { .. } => splices += 1,
                     ViewDiff::Reload { .. } => reloads += 1,
                 }
             }

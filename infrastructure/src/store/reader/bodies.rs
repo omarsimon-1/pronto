@@ -1,11 +1,21 @@
 //! The reads behind body downloads (ML-044): where each message is on the server, where one
-//! attachment is, which Inbox messages the prefetch may download, and what the bodies take.
+//! attachment is, which messages of Inbox conversations the prefetch may download, and what the
+//! bodies take.
 
 use super::Reader;
 use crate::store::StoreError;
 use crate::store::api::{BodyCandidate, BodyState, BodyTarget, BodyUsage, PartSource};
 use rusqlite::OptionalExtension;
 use sealwax_domain::model::{AccountId, BlobKey, FolderId, FolderRole, MessageId};
+
+/// `conversation::rank` in SQL, of the folder role in the column `role` (Trash and Junk, which
+/// the prefetch leaves out, rank with the other folders here).
+fn rank_sql(role: &str) -> String {
+    format!(
+        "CASE {role} WHEN 'inbox' THEN 0 WHEN 'archive' THEN 1 WHEN 'all' THEN 2 \
+         WHEN 'sent' THEN 3 WHEN 'drafts' THEN 5 ELSE 4 END"
+    )
+}
 
 impl Reader {
     /// The stored messages of `ids`, in that order; ids the store doesn't hold are left out.
@@ -61,23 +71,48 @@ impl Reader {
             .optional()?)
     }
 
-    /// Messages without a body that arrived since `since` in the Inboxes of server accounts
-    /// (`accounts.toml` lists them), newest first; hidden ones are left out.
+    /// Messages without a body that arrived since `since`, in the Inboxes of server accounts
+    /// (`accounts.toml` lists them) and, since the fork's Superhuman pass, in the rest of those
+    /// Inboxes' conversations (a reply in Sent, a copy in the Archive; never the Trash or
+    /// Junk): the Inbox's first, each part newest first; hidden ones are left out. A message
+    /// the account holds in several folders (sent to oneself, a Gmail label) comes once, as the
+    /// copy the conversation shows (`conversation::rank`: Inbox, Archive, All Mail, Sent, other
+    /// folders, Drafts, then the oldest stored), and not at all when that copy has its body:
+    /// Gmail counts every download against its daily IMAP limit.
     pub(super) fn body_candidates(
         &self,
         since: i64,
         limit: u32,
     ) -> Result<Vec<BodyCandidate>, StoreError> {
+        // From the Inboxes' conversations (`messages_thread`), so only they are read; a
+        // message's other copies by `messages_message_id`.
+        let sql = format!(
+            "WITH inbox(thread_id) AS ( \
+               SELECT DISTINCT i.thread_id FROM folders fi \
+                 JOIN accounts ai ON ai.id = fi.account_id \
+                 JOIN messages i ON i.folder_id = fi.id \
+               WHERE fi.role = 'inbox' AND ai.key IS NOT NULL AND ai.detached = 0 \
+                 AND i.flags & 264 = 0) \
+             SELECT m.id, f.account_id, m.folder_id, f.role, m.date, m.size \
+             FROM inbox t JOIN messages m ON m.thread_id = t.thread_id \
+               JOIN folders f ON f.id = m.folder_id \
+               JOIN accounts a ON a.id = f.account_id \
+             WHERE a.key IS NOT NULL AND a.detached = 0 \
+               AND f.role NOT IN ('trash', 'junk') \
+               AND m.blob_key IS NULL AND m.date >= ?1 AND m.flags & 264 = 0 \
+               AND (f.role = 'inbox' OR coalesce(m.message_id, '') = '' OR NOT EXISTS ( \
+                 SELECT 1 FROM messages c JOIN folders cf ON cf.id = c.folder_id \
+                 WHERE c.message_id = m.message_id AND c.id <> m.id \
+                   AND cf.account_id = f.account_id AND cf.role NOT IN ('trash', 'junk') \
+                   AND c.flags & 264 = 0 \
+                   AND ({copy} < {this} OR ({copy} = {this} AND c.id < m.id)))) \
+             ORDER BY f.role = 'inbox' DESC, m.date DESC, m.id DESC LIMIT ?2",
+            copy = rank_sql("cf.role"),
+            this = rank_sql("f.role"),
+        );
         let candidates = self
             .conn
-            .prepare_cached(
-                "SELECT m.id, f.account_id, m.folder_id, f.role, m.date, m.size \
-                 FROM folders f JOIN accounts a ON a.id = f.account_id \
-                   JOIN messages m ON m.folder_id = f.id \
-                 WHERE f.role = 'inbox' AND a.key IS NOT NULL AND a.detached = 0 \
-                   AND m.blob_key IS NULL AND m.date >= ?1 AND m.flags & 264 = 0 \
-                 ORDER BY m.date DESC, m.id DESC LIMIT ?2",
-            )?
+            .prepare_cached(&sql)?
             .query_map(rusqlite::params![since, limit], |row| {
                 Ok(BodyCandidate {
                     message: MessageId(row.get(0)?),
@@ -103,5 +138,29 @@ impl Reader {
                 })
             },
         )?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rank_sql;
+    use sealwax_domain::model::FolderRole;
+
+    #[test]
+    fn the_prefetch_ranks_copies_as_the_conversation_does() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for role in FolderRole::ALL {
+            if matches!(role, FolderRole::Trash | FolderRole::Junk) {
+                continue;
+            }
+            let ranked: u8 = conn
+                .query_row(
+                    &format!("SELECT {}", rank_sql("?1")),
+                    [role.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(ranked, crate::store::conversation::rank(role), "{role:?}");
+        }
     }
 }

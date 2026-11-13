@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Build a deterministic source tarball of the committed tree (HEAD) and a PKGBUILD for it.
 
-Writes .local/package/sealwax-<version>.tar.gz and .local/package/PKGBUILD from
+Writes .local/package/pronto-<version>.tar.gz and .local/package/PKGBUILD from
 packaging/PKGBUILD.in, filling in the version, the tarball's SHA-256, SOURCE_DATE_EPOCH (the
-commit time of HEAD) and the Microsoft client ID the package builds in: SEALWAX_MICROSOFT_CLIENT_ID
-if set, else the builder's ~/.config/sealwax/config.toml ([oauth.microsoft] client_id), else none
+commit time of HEAD) and the Microsoft client ID the package builds in: PRONTO_MICROSOFT_CLIENT_ID
+if set, else ~/.config/pronto/config.toml ([oauth.microsoft] client_id), with legacy
+dispatchy and sealwax settings as migration fallbacks, else none
 (--no-client-id leaves it out). The ID is a public client's, not a secret, and never committed:
 only the generated PKGBUILD under .local/ holds it, and this script doesn't print it.
-Uncommitted changes are not packaged; the script says so. Building the package (makepkg) and
-installing it need the user's authorization (AGENTS.md).
+Uncommitted changes are not packaged; the script says so. Installation is a separate step.
 """
 import gzip
 import hashlib
@@ -33,18 +33,22 @@ def client_id() -> tuple[str, str]:
     """The Microsoft client ID to build in and where it came from; ("", why) for none."""
     if "--no-client-id" in sys.argv[1:]:
         return "", "left out (--no-client-id)"
-    from_env = os.environ.get("SEALWAX_MICROSOFT_CLIENT_ID", "").strip()
+    from_env = os.environ.get("PRONTO_MICROSOFT_CLIENT_ID", "").strip()
     if from_env:
-        source, value = "SEALWAX_MICROSOFT_CLIENT_ID", from_env
+        source, value = "PRONTO_MICROSOFT_CLIENT_ID", from_env
     else:
         home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-        config = pathlib.Path(home) / "sealwax" / "config.toml"
-        try:
-            value = tomllib.loads(config.read_text()).get("oauth", {}).get("microsoft", {}).get(
-                "client_id", ""
-            ).strip()
-        except (OSError, tomllib.TOMLDecodeError):
-            value = ""
+        value = ""
+        for folder in ("pronto", "dispatchy", "sealwax"):
+            config = pathlib.Path(home) / folder / "config.toml"
+            try:
+                value = tomllib.loads(config.read_text()).get("oauth", {}).get(
+                    "microsoft", {}
+                ).get("client_id", "").strip()
+            except (OSError, tomllib.TOMLDecodeError):
+                value = ""
+            if value:
+                break
         if not value:
             return "", "none (Sign in with Microsoft then needs config.toml's client_id)"
         source = str(config)
@@ -63,8 +67,8 @@ def main() -> int:
 
     out = root / ".local" / "package"
     out.mkdir(parents=True, exist_ok=True)
-    tar = git("archive", "--format=tar", f"--prefix=sealwax-{version}/", "HEAD")
-    archive = out / f"sealwax-{version}.tar.gz"
+    tar = git("archive", "--format=tar", f"--prefix=pronto-{version}/", "HEAD")
+    archive = out / f"pronto-{version}.tar.gz"
     with archive.open("wb") as output, gzip.GzipFile(
         filename="", fileobj=output, mode="wb", mtime=0
     ) as compressed:
@@ -89,7 +93,7 @@ def main() -> int:
     print(f"SHA256 {digest}")
     print(f"SOURCE_DATE_EPOCH {epoch}")
     print(f"Microsoft client ID: {microsoft_source}")
-    print(f"Build: cd {out} && makepkg --cleanbuild --force (--nodeps where Rust comes from rustup; -si also installs; an agent needs authorization)")
+    print(f"Build: cd {out} && makepkg --cleanbuild --force (--nodeps where Rust comes from rustup)")
     return 0
 
 

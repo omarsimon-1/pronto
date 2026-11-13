@@ -28,7 +28,8 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub enum Failure {
-    No,
+    /// The server refused, in its words (test data only), for a failing run's diagnosis.
+    No(String),
     Bad,
     Other(String),
 }
@@ -42,7 +43,7 @@ impl From<std::io::Error> for Failure {
 impl From<async_imap::error::Error> for Failure {
     fn from(error: async_imap::error::Error) -> Self {
         match error {
-            async_imap::error::Error::No(_) => Failure::No,
+            async_imap::error::Error::No(text) => Failure::No(text),
             async_imap::error::Error::Bad(_) => Failure::Bad,
             other => Failure::Other(format!("{other:?}").chars().take(80).collect()),
         }
@@ -66,6 +67,15 @@ pub struct Client {
 
 fn quote(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// A tagged NO's text and code, as the server put it.
+fn refusal(outcome: &async_imap::imap_proto::rfc3501::Outcome<'_>) -> String {
+    format!(
+        "{:?} {}",
+        outcome.code,
+        outcome.information.as_deref().unwrap_or_default()
+    )
 }
 
 fn uid_set(uids: &[u32]) -> String {
@@ -135,10 +145,14 @@ impl Client {
                 .map_err(|_| Failure::Other("timeout".into()))??
                 .ok_or(Failure::Other("connection lost".into()))?;
             match response.parsed() {
-                Response::Done { tag, status, .. } if tag == id => {
+                Response::Done {
+                    tag,
+                    status,
+                    outcome,
+                } if tag == id => {
                     return match status {
                         Status::Ok => Ok(()),
-                        Status::No => Err(Failure::No),
+                        Status::No => Err(Failure::No(refusal(outcome))),
                         _ => Err(Failure::Bad),
                     };
                 }
@@ -179,7 +193,7 @@ impl Client {
                     let tagged = matches!(outcome.code, Some(ResponseCode::CopyUid(..)));
                     return match status {
                         Status::Ok => Ok((untagged, tagged)),
-                        Status::No => Err(Failure::No),
+                        Status::No => Err(Failure::No(refusal(outcome))),
                         _ => Err(Failure::Bad),
                     };
                 }
@@ -218,7 +232,7 @@ impl Client {
                 .map_err(|_| Failure::Other("timeout".into()))??
                 .ok_or(Failure::Other("connection lost".into()))?;
             if !matches!(response.parsed(), Response::Continue { .. }) {
-                return Err(Failure::No);
+                return Err(Failure::No("no continuation for the literal".into()));
             }
         }
         let stream = self.session.as_mut();
@@ -291,7 +305,7 @@ impl Client {
             .run(&format!("CREATE {}", quote(name_raw)), |_| {})
             .await
         {
-            Ok(()) | Err(Failure::No) => Ok(()),
+            Ok(()) | Err(Failure::No(_)) => Ok(()),
             Err(error) => Err(error),
         }
     }

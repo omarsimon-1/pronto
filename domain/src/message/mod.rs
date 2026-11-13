@@ -6,6 +6,7 @@ mod html;
 
 use crate::model::{Address, Attachment, BodyKind, Headers, ThreadIndex};
 use crate::snippet::{self, SNIPPET_CHARS};
+use crate::split;
 use mail_parser::decoders::base64::base64_decode;
 use mail_parser::{HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -196,36 +197,79 @@ pub struct Part {
     pub data: Vec<u8>,
 }
 
-/// The part at `index`, as [`ParsedMessage`]'s part references name it.
+/// The part at `index`, as [`ParsedMessage`]'s part references name it. Parses the whole
+/// message; to read several parts of one message, parse it once with [`Parsed`].
 pub fn part(raw: &[u8], index: u32) -> Option<Part> {
-    let message = MessageParser::default().parse(raw)?;
-    let part = message.parts.get(index as usize)?;
-    if part.is_multipart() {
-        return None;
+    Parsed::new(raw).part(index)
+}
+
+/// A raw message parsed once, for reading several of its parts and what the reader needs to
+/// know of it ([`crate::reading::inspect`]): the reader prepares an HTML message with five
+/// inline images from one parse instead of seven, and one parse of a message with a 10 MB
+/// attachment takes about 16 ms.
+pub struct Parsed<'a> {
+    message: Option<Message<'a>>,
+}
+
+impl<'a> Parsed<'a> {
+    pub fn new(raw: &'a [u8]) -> Self {
+        Self {
+            message: MessageParser::default().parse(raw),
+        }
     }
-    Some(Part {
-        mime_type: mime_type(part),
-        text: match &part.body {
-            PartType::Text(text) | PartType::Html(text) => Some(text.to_string()),
-            _ => None,
-        },
-        data: part.contents().to_vec(),
-    })
+
+    /// The part at `index`, as [`part`] reads it.
+    pub fn part(&self, index: u32) -> Option<Part> {
+        let part = self.message.as_ref()?.parts.get(index as usize)?;
+        if part.is_multipart() {
+            return None;
+        }
+        Some(Part {
+            mime_type: mime_type(part),
+            text: match &part.body {
+                PartType::Text(text) | PartType::Html(text) => Some(text.to_string()),
+                _ => None,
+            },
+            data: part.contents().to_vec(),
+        })
+    }
+
+    /// The parts at `indexes`, in order; `None` for an index that names no single part.
+    pub fn parts(&self, indexes: &[u32]) -> Vec<Option<Part>> {
+        indexes.iter().map(|index| self.part(*index)).collect()
+    }
+
+    /// [`crate::reading::inspect`] of the message.
+    pub fn inspect(&self) -> crate::reading::Inspection {
+        self.message
+            .as_ref()
+            .map(crate::reading::inspect_message)
+            .unwrap_or_default()
+    }
 }
 
 /// The part whose Content-ID is `content_id` (without angle brackets), for `cid:` links.
 pub fn part_by_content_id(raw: &[u8], content_id: &str) -> Option<Part> {
-    let message = MessageParser::default().parse(raw)?;
-    let index = message.parts.iter().position(|part| {
+    let parsed = Parsed::new(raw);
+    let index = parsed.message.as_ref()?.parts.iter().position(|part| {
         !part.is_multipart()
             && part.content_id().and_then(normalize_id).as_deref() == Some(content_id)
     })?;
-    part(raw, u32::try_from(index).ok()?)
+    parsed.part(u32::try_from(index).ok()?)
 }
 
 fn headers(message: &Message<'_>) -> Headers {
+    let from = addresses(message.from());
+    let list_id = list_id(message.list_id());
+    let facts = split::facts(
+        list_id.is_some(),
+        message.header_raw("List-Unsubscribe"),
+        message.header_raw("Precedence"),
+        message.header_raw("Auto-Submitted"),
+        from.first().map_or("", |sender| sender.email.as_str()),
+    );
     Headers {
-        from: addresses(message.from()),
+        from,
         to: addresses(message.to()),
         cc: addresses(message.cc()),
         reply_to: addresses(message.reply_to()),
@@ -238,8 +282,9 @@ fn headers(message: &Message<'_>) -> Headers {
         message_id: message.message_id().and_then(normalize_id),
         in_reply_to: ids(message.in_reply_to()),
         references: limit_references(ids(message.references())),
-        list_id: list_id(message.list_id()),
+        list_id,
         thread_index: message.header_raw("Thread-Index").and_then(thread_index),
+        facts,
     }
 }
 

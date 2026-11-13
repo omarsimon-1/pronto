@@ -9,15 +9,20 @@ mod check;
 mod codec;
 mod compose;
 mod compose_api;
+mod contact_api;
 mod contacts;
 mod conversation;
+mod conversations;
 mod folders_api;
+mod fork;
 pub mod fts;
 mod maintenance;
 mod ops_api;
 mod overlay;
 mod pop3_api;
 mod reader;
+mod remind;
+mod remind_api;
 mod schema;
 mod sync_api;
 mod views;
@@ -45,6 +50,8 @@ mod count_tests;
 
 #[cfg(test)]
 mod conversation_tests;
+#[cfg(test)]
+mod conversation_view_tests;
 
 #[cfg(test)]
 mod ops_prop_tests;
@@ -68,14 +75,25 @@ mod remote_tests;
 mod search_tests;
 
 #[cfg(test)]
+mod split_tests;
+
+#[cfg(test)]
+mod remind_tests;
+
+#[cfg(test)]
+mod contact_tests;
+
+#[cfg(test)]
 mod pop3_tests;
 
 pub use api::*;
 pub use compose_api::*;
+pub use contact_api::*;
 pub use conversation::{Conversation, ConversationMessage};
 pub use folders_api::*;
 pub use ops_api::*;
 pub use pop3_api::*;
+pub use remind_api::*;
 pub use schema::VERSION as SCHEMA_VERSION;
 pub use sync_api::*;
 pub use views::ViewHandle;
@@ -86,7 +104,9 @@ use reader::{ReadJob, Reader};
 use sealwax_domain::account::AccountKey;
 use sealwax_domain::model::{
     Account, AccountId, BlobKey, Flags, Folder, FolderId, MessageDetail, MessageId, MessageSummary,
+    ThreadId,
 };
+use sealwax_domain::split::Split;
 use std::fs::{self, OpenOptions, Permissions};
 use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -100,7 +120,10 @@ use writer::{WriteJob, Writer};
 pub enum StoreError {
     #[error("the database has schema version {found}; this build supports up to {supported}")]
     NewerSchema { found: i64, supported: i64 },
-    #[error("SQLite {0} lacks FTS5 with contentless delete; Sealwax needs SQLite 3.43 or newer")]
+    /// The fork's own schema track (`fork.rs`) is newer than this build's.
+    #[error("the database has fork schema {found}; this build supports up to {supported}")]
+    NewerForkSchema { found: i64, supported: i64 },
+    #[error("SQLite {0} lacks FTS5 with contentless delete; Pronto needs SQLite 3.43 or newer")]
     MissingFts5(String),
     #[error("database: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -117,6 +140,9 @@ pub enum StoreError {
     NotPop3(AccountId),
     #[error("the store is closed")]
     Closed,
+    /// Another process (or another `Store` of this one) holds the store's lock file.
+    #[error("the mail store {0} is open in another Pronto; quit it, then start Pronto again")]
+    Locked(PathBuf),
 }
 
 /// How a store runs.
@@ -236,6 +262,35 @@ pub struct Store {
     readers: Vec<JoinHandle<()>>,
     writers: Vec<JoinHandle<()>>,
     path: PathBuf,
+    /// Held until the store is dropped: after `close` that is once its threads have stopped.
+    _lock: StoreLock,
+}
+
+/// The advisory lock on a store, `<store>.lock` beside it, for as long as the value lives. Two
+/// builds share the XDG directories (debug and release), and each would run its own writer,
+/// outbox and blob sweep over the same mail; SQLite's own locks only keep the pages whole.
+#[derive(Debug)]
+pub(crate) struct StoreLock(#[allow(dead_code)] fs::File);
+
+impl StoreLock {
+    /// Takes the lock of the store at `path` without waiting; [`StoreError::Locked`] when
+    /// another open file holds it. The kernel releases it when the file closes, also after a
+    /// crash, so a leftover lock file never blocks anything.
+    pub(crate) fn acquire(path: &Path) -> Result<StoreLock, StoreError> {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&name)?;
+        match file.try_lock() {
+            Ok(()) => Ok(StoreLock(file)),
+            Err(fs::TryLockError::WouldBlock) => Err(StoreError::Locked(path.to_owned())),
+            Err(fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
 }
 
 impl Store {
@@ -249,6 +304,7 @@ impl Store {
         {
             ensure_private_dir(parent)?;
         }
+        let lock = StoreLock::acquire(path)?;
         private_files(path)?;
         let writer = schema::open_writer(path)?;
         let readers = (0..options.readers.max(1))
@@ -301,6 +357,7 @@ impl Store {
             readers: reader_threads,
             writers,
             path: path.to_owned(),
+            _lock: lock,
         })
     }
 
@@ -397,6 +454,39 @@ impl Store {
             text,
             folder,
             limit,
+            reply,
+        })
+    }
+
+    /// The newest `limit` conversations what the user typed finds, as `search` finds
+    /// messages, newest match first: each conversation's row as a conversation view of the
+    /// searched folders shows it, with its newest match (docs/superhuman/store.md).
+    pub fn search_conversations(
+        &self,
+        text: &str,
+        folder: Option<FolderId>,
+        limit: u32,
+    ) -> Reply<Versioned<Vec<ConversationHit>>> {
+        let text = text.to_owned();
+        self.read(|reply| ReadJob::SearchConversations {
+            text,
+            folder,
+            limit,
+            reply,
+        })
+    }
+
+    /// The shown members of `threads` in the folders of `spec`'s scope that pass its filter,
+    /// each conversation's oldest first: what triage on conversation rows acts on, one target
+    /// per member, all queued as one batch (docs/superhuman/store.md).
+    pub fn conversation_members(
+        &self,
+        threads: Vec<ThreadId>,
+        spec: ViewSpec,
+    ) -> Reply<Versioned<Vec<ConversationMember>>> {
+        self.read(|reply| ReadJob::ConversationMembers {
+            threads,
+            spec,
             reply,
         })
     }
@@ -553,13 +643,41 @@ impl Store {
         self.write(|reply| WriteJob::EvictBodies { limit, keep, reply })
     }
 
+    /// Deletes those of `keys` from `blobs` that no message, draft or outbox entry refers to:
+    /// on the writer, in the transaction that looks, so no commit can add a reference between
+    /// the look and the deletion. The lists other replies carry (`orphaned_blobs`,
+    /// `Evicted::blobs`) are as old as their commit; identical content that arrived since
+    /// shares the file. With `older_than`, a file stored (or stored again) more recently
+    /// stays as well: the sweep's guard for a blob whose row isn't committed yet.
+    pub fn discard_blobs(
+        &self,
+        blobs: BlobStore,
+        keys: Vec<BlobKey>,
+        older_than: Option<std::time::Duration>,
+    ) -> Reply<BlobsDiscarded> {
+        self.write(|reply| WriteJob::DiscardBlobs {
+            blobs,
+            keys,
+            older_than,
+            reply,
+        })
+    }
+
+    /// Replies once every commit so far is on disk. Commits are `synchronous=NORMAL`: after a
+    /// power cut the store is whole, but may lack its last transactions. A caller about to
+    /// destroy the only other copy of what it stored (POP3's DELE and QUIT) waits for this.
+    pub fn flush(&self) -> Reply<()> {
+        self.write(|reply| WriteJob::Flush { reply })
+    }
+
     /// What the downloaded bodies take.
     pub fn body_usage(&self) -> Reply<BodyUsage> {
         self.read(|reply| ReadJob::BodyUsage { reply })
     }
 
     /// Up to `limit` messages without a body that arrived since `since` in the Inboxes of
-    /// server accounts, newest first: the prefetch's candidates.
+    /// server accounts and the rest of their conversations, the Inbox's first, newest first:
+    /// the prefetch's candidates.
     pub fn body_candidates(&self, since: i64, limit: u32) -> Reply<Vec<BodyCandidate>> {
         self.read(|reply| ReadJob::BodyCandidates {
             since,
@@ -592,6 +710,59 @@ impl Store {
     /// Images from `address` are hidden again until the user allows them.
     pub fn forget_remote_sender(&self, address: String) -> Reply<()> {
         self.write(|reply| WriteJob::ForgetRemoteSender { address, reply })
+    }
+
+    /// The user's choice for a sender in the Split Inbox (docs/superhuman/split.md): `Some`
+    /// puts every message from `address` (exact address, any account, stored or to come) on
+    /// that side, whatever else says; `None` forgets the choice. The sender's conversations are
+    /// classified again, each transaction's change event carrying the views' diffs; the reply
+    /// comes with the last ([`Store::set_sender_split_first`]).
+    pub fn set_sender_split(&self, address: String, split: Option<Split>) -> Reply<StoreVersion> {
+        self.set_sender_split_first(address, split, Vec::new())
+    }
+
+    /// [`Store::set_sender_split`], classifying `first` again in the first transaction (the
+    /// conversations the user acted on: they move at once). A sender with much mail is
+    /// classified again in transactions of a few hundred messages, the conversations the open
+    /// views show first, with other writes between them; the reply comes with the last.
+    pub fn set_sender_split_first(
+        &self,
+        address: String,
+        split: Option<Split>,
+        first: Vec<ThreadId>,
+    ) -> Reply<StoreVersion> {
+        self.write(|reply| WriteJob::SetSenderSplit {
+            address,
+            split,
+            first,
+            reply,
+        })
+    }
+
+    /// Every sender the user chose a side for, by address (lower case), in order.
+    pub fn sender_splits(&self) -> Reply<Vec<(String, Split)>> {
+        self.read(|reply| ReadJob::SenderSplits { reply })
+    }
+
+    /// The server's own categories of stored messages (Gmail's Primary tab is Important): they
+    /// win over the header rules. The conversations that changed are classified again.
+    pub fn set_categories(&self, categories: Vec<(MessageId, Split)>) -> Reply<StoreVersion> {
+        self.write(|reply| WriteJob::SetCategories { categories, reply })
+    }
+
+    /// The shown messages of `folder` the server gave no category for yet, newest first, at
+    /// most `limit`: what the engine asks Gmail about.
+    pub fn uncategorized(&self, folder: FolderId, limit: u32) -> Reply<Vec<Uncategorized>> {
+        self.read(|reply| ReadJob::Uncategorized {
+            folder,
+            limit,
+            reply,
+        })
+    }
+
+    /// How many rows of `spec` (its scope and grouping) each side of the Split Inbox holds.
+    pub fn split_counts(&self, spec: ViewSpec) -> Reply<Versioned<SplitCounts>> {
+        self.read(|reply| ReadJob::SplitCounts { spec, reply })
     }
 
     /// Stops accepting requests, lets queued requests finish and waits for the threads. The

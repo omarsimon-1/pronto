@@ -207,7 +207,7 @@ fn sync_steps_keep_list_models_exact() {
             let event = events.recv_blocking().unwrap();
             for change in &event.views {
                 match change.diff {
-                    ViewDiff::Splice { .. } => splices += 1,
+                    ViewDiff::Splice { .. } | ViewDiff::ConversationSplice { .. } => splices += 1,
                     ViewDiff::Reload { .. } => reloads += 1,
                 }
             }

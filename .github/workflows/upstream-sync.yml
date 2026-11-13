@@ -1,0 +1,100 @@
+# Weekly upstream sync: OPT-IN, off by default. See docs/UPSTREAM-SYNC.md.
+#
+# The scheduled run does nothing unless the repository variable PRONTO_UPSTREAM_SYNC is set
+# to "true" (Settings → Secrets and variables → Actions → Variables). "Run workflow" on the
+# Actions tab runs it by hand whatever the variable says.
+#
+# It runs tools/sync-upstream.sh: fetch upstream Sealwax, and when the fork is behind, merge
+# upstream into a new upstream-sync/<date> branch, push that branch and open a pull request
+# into main. It never pushes main. On conflicts it pushes nothing and fails, with the
+# instructions in the run's summary; resolve them locally (docs/UPSTREAM-SYNC.md).
+#
+# Only git runs here: nothing is built or installed (no Qt, no GTK). Triggers are schedule
+# and workflow_dispatch only; there is no push or pull_request trigger.
+name: Upstream sync (opt-in)
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "merge (default) or rebase"
+        required: false
+        default: merge
+        type: choice
+        options: [merge, rebase]
+      check_only:
+        description: "Only report how far behind upstream the fork is"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || vars.PRONTO_UPSTREAM_SYNC == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync upstream into a sync branch
+        id: sync
+        env:
+          MODE: ${{ inputs.mode || 'merge' }}
+          CHECK_ONLY: ${{ inputs.check_only || false }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="upstream-sync/$(date -u +%Y-%m-%d)"
+          args=(--branch "$branch")
+          [[ $MODE == rebase ]] && args+=(--rebase)
+          if [[ $CHECK_ONLY == true ]]; then
+            args+=(--check)
+          elif git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "Branch $branch already exists on origin; nothing pushed." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          else
+            args+=(--push)
+          fi
+          set +e
+          tools/sync-upstream.sh "${args[@]}" 2>&1 | tee sync.log
+          status=${PIPESTATUS[0]}
+          set -e
+          { echo '```'; cat sync.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [[ $CHECK_ONLY != true ]] && git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+
+      - name: Open a pull request into main
+        if: steps.sync.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.sync.outputs.branch }}
+        run: |
+          if [[ -n $(gh pr list --head "$BRANCH" --base main --json number --jq '.[].number') ]]; then
+            echo "A pull request from $BRANCH already exists."
+            exit 0
+          fi
+          {
+            echo "Automated upstream sync by .github/workflows/upstream-sync.yml."
+            echo
+            echo "Before merging: run \`bash tools/ci.sh\` on this branch; this workflow builds nothing."
+            echo
+            echo '```'
+            cat sync.log
+            echo '```'
+          } > body.md
+          gh pr create --base main --head "$BRANCH" --title "Pronto: Upstream sync ($BRANCH)" --body-file body.md

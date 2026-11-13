@@ -99,6 +99,7 @@ pub fn window(app: &adw::Application, reader: &Reader, size: (i32, i32)) -> Wind
                 folded: false,
             }],
             more: Vec::new(),
+            reminders: None,
         }],
     });
     window.set_reader(&reader.widget());

@@ -62,7 +62,7 @@ pub(crate) struct CopyUid {
     pub pairs: Vec<(u32, u32)>,
 }
 
-/// UIDs a COPYUID may name: far more than any command Sealwax sends, so a hostile set can't make
+/// UIDs a COPYUID may name: far more than any command Pronto sends, so a hostile set can't make
 /// it allocate gigabytes.
 const COPYUID_LIMIT: u64 = 100_000;
 
@@ -99,7 +99,7 @@ pub(crate) fn copy_uid(code: Option<&ResponseCode<'_>>) -> Option<CopyUid> {
     })
 }
 
-/// What a tagged OK's response code says, where Sealwax reads it.
+/// What a tagged OK's response code says, where Pronto reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Code {
     CopyUid(CopyUid),

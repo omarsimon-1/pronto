@@ -1,0 +1,62 @@
+# Conversations laid out unseen stop being drawn once they have settled: loaded, painted,
+# measured at their width and unchanged for a second (the Superhuman pass's battery item,
+# docs/superhuman/polish.md). WebKit makes a view's next frame only once the last one was drawn,
+# so drawing them into nothing kept an animation in a neighbour running, and the web process
+# and the frame clock busy, while another conversation was read. A page that has settled is
+# drawn once more and then left; shown again it animates. The same holds for the reader kept
+# warm behind a Focused list. reader-late.sealwax-test covers what changes after it settles.
+# Every message is fictional.
+# Run: tools/headless.sh 71 target/debug/pronto --self-test tests/selftest/reader-quiet.sealwax-test
+
+desktop tiling
+resize 1440 900
+engine-attach
+mail-account Personal
+mail-add inbox 30m "Lunch on Friday" html "from=Leah Kim" "text=Shall we try the new place by the harbour?"
+mail-add inbox 40m "The agenda is loading" html "from=Marius Dahl" "text=<style>@keyframes pulse{from{opacity:1}to{opacity:0.2}}.pulse{animation:pulse 0.3s linear infinite alternate}</style><span class=pulse>Loading the agenda for Thursday</span>"
+mail-add inbox 50m "Train tickets" html "from=Sana Malik" "text=The tickets for Saturday are booked."
+assert-list-count 3
+
+# Train tickets shown beside the list: the animated message, its neighbour, is laid out ahead,
+# drawn while it settles (every frame: it animates), and then no longer drawn.
+focus list
+list-select 2
+wait-until assert-reader-selected
+wait-until assert-conversation ahead 1
+assert-conversation ahead-settled false
+assert-conversation ahead-drawn 300 5+
+wait-until assert-conversation ahead-settled true
+assert-conversation ahead-drawn 1000 1
+
+# Shown, it is drawn again (it animates on screen), and Train tickets, which the selection
+# left, waits laid out ahead, undrawn once settled.
+key k
+wait-until assert-reader-selected
+assert-conversation shown-ahead true
+assert-body-text "Loading the agenda"
+wait-until assert-conversation ahead 2
+wait-until assert-conversation ahead-settled true
+assert-conversation ahead-drawn 1000 1
+
+# Focused: the list alone, the animated conversation laid out behind it with its neighbours.
+# Once all have settled, the reader behind the list is no longer drawn either.
+view-mode focused
+assert-pane list
+assert-reader-warm true
+wait-until assert-conversation ahead 2
+wait-until assert-conversation quiet true
+assert-conversation warm-drawn 1000 1
+assert-conversation ahead-drawn 1000 1
+
+# Enter shows it (animating, drawn every frame); Escape leaves it warm behind the list, where it
+# goes quiet again.
+key Return
+assert-pane reader
+assert-reader-on-screen true
+assert-body-text "Loading the agenda"
+key Escape
+assert-pane list
+assert-reader-warm true
+wait-until assert-conversation quiet true
+assert-conversation warm-drawn 1000 1
+assert-conversation criticals 0

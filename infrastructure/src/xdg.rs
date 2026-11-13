@@ -1,5 +1,5 @@
-//! Sealwax's own XDG directories (ADR-010): `$XDG_CONFIG_HOME/sealwax`, `$XDG_DATA_HOME/sealwax`,
-//! `$XDG_STATE_HOME/sealwax` and `$XDG_CACHE_HOME/sealwax`. Directories Sealwax creates for
+//! Pronto's own XDG directories (ADR-010): `$XDG_CONFIG_HOME/pronto`, `$XDG_DATA_HOME/pronto`,
+//! `$XDG_STATE_HOME/pronto` and `$XDG_CACHE_HOME/pronto`. Directories Pronto creates for
 //! private data are mode 0700.
 
 use std::ffi::OsStr;
@@ -8,7 +8,7 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const APP_DIR: &str = "sealwax";
+pub const APP_DIR: &str = "pronto";
 
 /// An XDG base directory: the variable when it holds an absolute path, else `home/fallback`.
 pub fn base_dir(value: Option<&OsStr>, home: &Path, fallback: &str) -> PathBuf {
@@ -39,10 +39,10 @@ pub fn cache_home() -> PathBuf {
     from_env("XDG_CACHE_HOME", ".cache")
 }
 
-/// Where Sealwax keeps its files.
+/// Where Pronto keeps its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealwaxDirs {
-    /// `config.toml`, `keys.toml` and `accounts.toml` (ADR-009).
+    /// `config.toml`, `keys.toml`, `accounts.toml` (ADR-009) and `snippets.toml`.
     pub config: PathBuf,
     /// The message store and the blob store (ADR-005).
     pub data: PathBuf,
@@ -82,6 +82,11 @@ impl SealwaxDirs {
 
     pub fn accounts_file(&self) -> PathBuf {
         self.config.join("accounts.toml")
+    }
+
+    /// The user's snippets (the fork's phase B, `domain::snippets`).
+    pub fn snippets_file(&self) -> PathBuf {
+        self.config.join(sealwax_domain::snippets::SNIPPETS_FILE)
     }
 
     /// The accounts' rules, one Sieve script each (ADR-020).
@@ -140,22 +145,22 @@ mod tests {
         let dirs = SealwaxDirs::under(Path::new("/tmp/x"));
         assert_eq!(
             dirs.config_file(),
-            Path::new("/tmp/x/config/sealwax/config.toml")
+            Path::new("/tmp/x/config/pronto/config.toml")
         );
         assert_eq!(
             dirs.keys_file(),
-            Path::new("/tmp/x/config/sealwax/keys.toml")
+            Path::new("/tmp/x/config/pronto/keys.toml")
         );
         assert_eq!(
             dirs.accounts_file(),
-            Path::new("/tmp/x/config/sealwax/accounts.toml")
+            Path::new("/tmp/x/config/pronto/accounts.toml")
         );
         assert_eq!(
             dirs.store_file(),
-            Path::new("/tmp/x/data/sealwax/store.sqlite")
+            Path::new("/tmp/x/data/pronto/store.sqlite")
         );
-        assert_eq!(dirs.blobs_dir(), Path::new("/tmp/x/data/sealwax/blobs"));
-        assert!(SealwaxDirs::from_env().data.ends_with("sealwax"));
+        assert_eq!(dirs.blobs_dir(), Path::new("/tmp/x/data/pronto/blobs"));
+        assert!(SealwaxDirs::from_env().data.ends_with("pronto"));
     }
 
     #[test]

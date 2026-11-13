@@ -178,7 +178,7 @@ fn serve(
                     invocation.return_value(Some(&(capabilities.clone(),).to_variant()));
                 }
                 "GetServerInformation" => invocation.return_value(Some(
-                    &("sealwax-stand-in", "Sealwax self-test", "0.1", "1.2").to_variant(),
+                    &("sealwax-stand-in", "Pronto self-test", "0.1", "1.2").to_variant(),
                 )),
                 "Notify" => {
                     let id = notify(&record, sender.unwrap_or_default(), &parameters);

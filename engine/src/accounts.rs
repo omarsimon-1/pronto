@@ -57,7 +57,7 @@ fn secret_kind(auth: AuthMethod) -> SecretKind {
 
 /// What keyring browsers show for an account's secret.
 pub(crate) fn secret_label(address: &str) -> String {
-    format!("Sealwax: {address}")
+    format!("Pronto: {address}")
 }
 
 /// What account operations work on. The engine service owns these and lends them per command.
@@ -188,8 +188,7 @@ impl<S: SecretStore> Accounts<'_, S> {
         }
     }
 
-    /// Removes the account with `key`: its entry, store rows, orphaned blobs and secrets.
-    /// Sets the account's `label` and `color` lines in `accounts.toml` (`None` takes one
+    /// Sets the account's `label`, `color` and `signature` lines in `accounts.toml` (`None` takes one
     /// out), keeping the rest of the file. The store's name follows with `reconcile`, once the
     /// app has read the file.
     pub async fn edit(
@@ -197,10 +196,15 @@ impl<S: SecretStore> Accounts<'_, S> {
         key: &AccountKey,
         label: Option<String>,
         color: Option<AccountColor>,
+        signature: Option<String>,
     ) -> Result<(), AccountError> {
         let path = self.paths.settings.clone();
         let key = key.clone();
-        match blocking(move || files::relabel(&path, &key, label.as_deref(), color)).await? {
+        match blocking(move || {
+            files::relabel(&path, &key, label.as_deref(), color, signature.as_deref())
+        })
+        .await?
+        {
             Ok(true) => Ok(()),
             Ok(false) => Err(AccountError::Missing),
             Err(error) => Err(file_error(error)),
@@ -264,14 +268,11 @@ impl<S: SecretStore> Accounts<'_, S> {
                     AccountError::Store
                 })?;
             let orphaned = removed.orphaned_blobs.len();
-            if let Some(blobs) = self.blobs.cloned() {
-                let keys = removed.orphaned_blobs;
-                let failed = blocking(move || {
-                    keys.iter()
-                        .filter(|blob| blobs.remove(blob).is_err())
-                        .count()
-                })
-                .await?;
+            if let Some(blobs) = self.blobs {
+                let failed =
+                    crate::bodies::discard_blobs(self.store, blobs, removed.orphaned_blobs)
+                        .await
+                        .failed;
                 if failed > 0 {
                     tracing::warn!(
                         failed,
@@ -769,18 +770,24 @@ mod tests {
         let bench = Bench::new();
         let accounts = bench.accounts();
         let (key, _) = run(accounts.add(settings("ada@example.test"), &password())).unwrap();
-        run(accounts.edit(&key, Some("Work".to_owned()), Some(AccountColor::Mauve))).unwrap();
+        run(accounts.edit(
+            &key,
+            Some("Work".to_owned()),
+            Some(AccountColor::Mauve),
+            None,
+        ))
+        .unwrap();
         let listed = files::read(&bench.paths.settings).unwrap();
         assert_eq!(
             (listed[0].title(), listed[0].color),
             ("Work", Some(AccountColor::Mauve))
         );
         assert_eq!(listed[0].name, "Test Person", "the sender name stays");
-        run(accounts.edit(&key, None, None)).unwrap();
+        run(accounts.edit(&key, None, None, None)).unwrap();
         let listed = files::read(&bench.paths.settings).unwrap();
         assert_eq!((listed[0].label.as_deref(), listed[0].color), (None, None));
         assert_eq!(
-            run(accounts.edit(&AccountKey("gone".into()), None, None)),
+            run(accounts.edit(&AccountKey("gone".into()), None, None, None)),
             Err(AccountError::Missing)
         );
     }

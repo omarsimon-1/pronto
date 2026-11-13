@@ -2,14 +2,14 @@
 # says what to do next, on the step itself, whose button signs in again. A declined sign-in
 # names the admin approval a work account may need. Every address and link is fictional.
 # Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 61 target/debug/sealwax --self-test tests/selftest/setup-microsoft-failures.sealwax-test
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/setup-microsoft-failures.sealwax-test
 
 desktop tiling
 resize 1440 900
 theme matte-black
 corners 0
 engine-attach
-write-file $TMP/config/sealwax/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
+write-file $TMP/config/pronto/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
 wait-until assert-setup client-id set
 action win.add-account
 setup-type setup-address kari@example.test
@@ -27,7 +27,7 @@ engine-reply signed-in sign-in-declined
 assert-setup step microsoft
 assert-shown setup-alert true
 assert-label setup-alert-title "The sign-in was declined"
-assert-label setup-alert-body "Microsoft didn't let Sealwax in. Sign in again and approve Sealwax; for a work account, your organization's admin may have to approve it first."
+assert-label setup-alert-body "Microsoft didn't let Pronto in. Sign in again and approve Pronto; for a work account, your organization's admin may have to approve it first."
 assert-shown setup-alert-link false
 assert-shown setup-waiting false
 assert-shown setup-open-again false
@@ -47,7 +47,7 @@ assert-shown setup-alert false
 engine-reply signed-in timeout
 assert-setup step microsoft
 assert-label setup-alert-title "The sign-in didn't finish in time"
-assert-label setup-alert-body "Sealwax stopped waiting for the browser or for Microsoft's servers. Check that you're online, then sign in again."
+assert-label setup-alert-body "Pronto stopped waiting for the browser or for Microsoft's servers. Check that you're online, then sign in again."
 assert-setup focus setup-microsoft-button
 
 # The server refused the token: sign in with the account the address belongs to.
@@ -96,7 +96,7 @@ setup-click setup-microsoft-button
 engine-expect sign-in
 engine-reply signed-in other
 assert-label setup-alert-title "The sign-in didn't work"
-assert-label setup-alert-body "The incoming mail server (IMAP) reported a problem Sealwax doesn't recognise. Sign in again, or try later."
+assert-label setup-alert-body "The incoming mail server (IMAP) reported a problem Pronto doesn't recognise. Sign in again, or try later."
 assert-setup focus setup-microsoft-button
 engine-expect none
 
@@ -124,5 +124,7 @@ engine-expect sign-in address=kari@example.test
 engine-reply signed-in ok kari@example.test
 engine-expect add-account address=kari@example.test username=kari@example.test auth=microsoft sign-in=last password=
 engine-reply added ok
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 assert-setup open false
 engine-expect none

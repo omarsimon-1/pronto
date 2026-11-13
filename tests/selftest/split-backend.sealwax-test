@@ -1,0 +1,47 @@
+# The Split Inbox's backend (the fork's Superhuman pass, docs/superhuman/split.md): the store
+# sorts every message into Important or Other by its header (a List-Id, a robot's address),
+# the list filters to either side, and a choice for a sender moves its mail over at once, with
+# the store's counts following. Message rows, as the harness has them; the tabs are phase C's.
+# Every message is fictional.
+# Run: tools/headless.sh 68 target/debug/pronto --self-test tests/selftest/split-backend.sealwax-test
+
+desktop tiling
+resize 1440 900
+mail-account Personal
+folder inbox Personal
+list-clock 2026-10-07T12:00:00
+mail-add Personal:inbox today "Lunch on Friday?" from=Kari
+mail-add Personal:inbox today "Ukens turer" from=Turlaget list=turlaget.example.test
+mail-add Personal:inbox yesterday "Your receipt #4411" from=Receipts
+mail-add Personal:inbox yesterday "The contract"
+assert-list-count 4
+assert-split-counts 2 2
+
+# Each side alone: a person's mail in Important, the list's and the robot's in Other.
+split important
+assert-list-count 2
+assert-list-row 0 subject "Lunch on Friday?"
+assert-list-row 1 subject "The contract"
+split other
+assert-list-count 2
+assert-list-row 0 subject "Ukens turer"
+assert-list-row 1 subject "Your receipt #4411"
+
+# Always Important for the list's sender: its message leaves Other at once.
+mail-sender-split Turlaget@Example.test important
+assert-split-choice turlaget@example.test important
+assert-list-count 1
+assert-list-row 0 subject "Your receipt #4411"
+assert-split-counts 3 1
+split important
+assert-list-count 3
+assert-list-row 0 subject "Ukens turer"
+assert-list-row 1 subject "Lunch on Friday?"
+
+# Forgetting the choice puts it back.
+mail-sender-split turlaget@example.test none
+assert-split-choice turlaget@example.test none
+assert-list-count 2
+assert-split-counts 2 2
+split all
+assert-list-count 4

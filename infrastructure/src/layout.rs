@@ -40,6 +40,12 @@ mod tests {
         let layout = Layout {
             sidebar_width: Some(250),
             list_width: None,
+            mode: Some(sealwax_domain::layout::ViewMode::Split),
+            sidebar: Some(true),
+            conversations: Some(false),
+            formatting: Some(true),
+            split: Some(true),
+            contact: Some(false),
             collapsed: vec![AccountKey("work".into())],
             more_open: vec![AccountKey("work".into())],
             folded: Default::default(),

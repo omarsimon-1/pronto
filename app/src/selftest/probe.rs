@@ -34,6 +34,9 @@ fn role(theme: &Theme, name: &str) -> Result<Rgb, String> {
         "error-soft" => theme.ui.error_soft,
         "warning-soft" => theme.ui.warning_soft,
         "card" => theme.ui.card,
+        // The command palette's card and the composer card (the fork's phase B).
+        "raised" => theme.ui.raised,
+        "composer" => theme.ui.composer,
         other => {
             let color = other
                 .strip_prefix("account-")
@@ -76,14 +79,14 @@ fn family(widget: &gtk::Widget) -> String {
 }
 
 /// The widget drawn on its own, as straight (not premultiplied) RGBA.
-struct Drawing {
-    width: usize,
-    height: usize,
+pub(super) struct Drawing {
+    pub(super) width: usize,
+    pub(super) height: usize,
     pixels: Vec<(Rgb, u8)>,
 }
 
 impl Drawing {
-    fn of(widget: &gtk::Widget) -> Result<Self, String> {
+    pub(super) fn of(widget: &gtk::Widget) -> Result<Self, String> {
         let paintable = gtk::WidgetPaintable::new(Some(widget));
         let (width, height) = (paintable.intrinsic_width(), paintable.intrinsic_height());
         if width <= 0 || height <= 0 {
@@ -134,6 +137,11 @@ impl Drawing {
 
     fn alpha(&self, x: usize, y: usize) -> u8 {
         self.pixels[y * self.width + x].1
+    }
+
+    /// The pixel at `x`, `y`, straight RGB and its alpha.
+    pub(super) fn pixel(&self, x: usize, y: usize) -> (Rgb, u8) {
+        self.pixels[y * self.width + x]
     }
 
     fn opaque(&self) -> impl Iterator<Item = Rgb> + '_ {

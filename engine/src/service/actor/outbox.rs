@@ -6,7 +6,7 @@
 //! **A send:** the message is built from the draft and its parts' bytes off the async threads
 //! (or the bytes an earlier start recorded are read back), the store recording that it is being
 //! built until the build returns: a start that finds it so gives the send back to its draft as
-//! failed instead of building it again, as the build may be what stopped Sealwax (a Drafts-folder
+//! failed instead of building it again, as the build may be what stopped Pronto (a Drafts-folder
 //! copy left so waits for the draft to change). Then the Sent folder's mark is taken, and
 //! one SMTP connection per round carries every due send: MAIL FROM and RCPT TO, then the store's
 //! durable `send_started`, then DATA. Only a missing answer after the data started is uncertain;
@@ -28,13 +28,13 @@
 
 use super::ops::{MAX_ATTEMPTS, instant_at, unix_ms};
 use super::{
-    Interrupt, Jitter, Poller, Shared, Signal, Status, SyncConfig, backoff_delay, discard, race,
+    Interrupt, Jitter, Poller, SENT_SAVED, Shared, Signal, Status, SyncConfig, backoff_delay,
+    discard, race,
 };
 use crate::accounts::secret_label;
 use crate::api::{Event, SendError, SyncStatus, UncertainReason};
 use crate::imap::Credentials;
 use crate::imap::write::{self, Append, Mark, OpFolder, WriteError, WriteFailure};
-use crate::secrets::{SecretKind, SecretStore};
 use crate::smtp::submit::{self, Envelope, SubmitError, SubmitFailure, Submitter};
 use sealwax_domain::account::{AccountSettings, AuthMethod, LoginFailure};
 use sealwax_domain::compose::mime::{self, BuildError, Field};
@@ -47,10 +47,10 @@ use sealwax_infrastructure::store::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-/// Whether the account's server keeps its own copy of what it sends, so Sealwax appends none:
+/// Whether the account's server keeps its own copy of what it sends, so Pronto appends none:
 /// Outlook.com and Microsoft 365 (and Gmail, for accounts added by hand). Hosts by suffix.
 pub(super) fn server_saves_sent(settings: &AccountSettings) -> bool {
     if matches!(settings.auth, AuthMethod::OAuth(_)) {
@@ -69,6 +69,18 @@ pub(super) fn server_saves_sent(settings: &AccountSettings) -> bool {
     ]
     .iter()
     .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// When the Sent folder is passed after a Sent copy's step, and how many times while it finds
+/// nothing new, so the message sent joins its conversation now rather than at the next account
+/// pass (the fork's Superhuman pass): at once for a copy appended or found there, a moment
+/// later, twice, for one the server files itself (Gmail).
+pub(super) fn sent_look(done: SentCopyDone) -> Option<(Duration, u8)> {
+    match done {
+        SentCopyDone::Appended { .. } => Some((Duration::ZERO, 1)),
+        SentCopyDone::ServerSaves => Some((SENT_SAVED, 2)),
+        SentCopyDone::GaveUp | SentCopyDone::Filed => None,
+    }
 }
 
 /// The message as it goes out: what the store records at the start, and its bytes.
@@ -145,7 +157,7 @@ pub(super) fn build_drafts_copy(
 }
 
 /// Runs `build`, the making of `upload`'s Drafts-folder copy, on a blocking thread, recorded as
-/// being built first so that a build that stops Sealwax isn't run again at the next start
+/// being built first so that a build that stops Pronto isn't run again at the next start
 /// (`Store::recover_sends`). `None` when it shouldn't run now: the draft is gone or in the
 /// outbox, or the store couldn't record it (try again shortly).
 pub(super) async fn build_copy<T: Send + 'static>(
@@ -421,7 +433,7 @@ impl Submission {
         result
     }
 
-    /// Records that `send`'s message is about to be built, so that a build that stops Sealwax
+    /// Records that `send`'s message is about to be built, so that a build that stops Pronto
     /// isn't run again at the next start (`Store::recover_sends`); `false` when it is no longer
     /// queued, or the store couldn't record it (tried again shortly).
     async fn building(&mut self, send: &DueSend) -> bool {
@@ -469,28 +481,34 @@ impl Submission {
         let settings = &self.settings;
         let shared = &self.shared;
         let timeouts = shared.sync.submission;
-        let secrets = shared.secrets().await;
         match settings.auth {
             AuthMethod::Password => {
-                let password = secrets
-                    .read(&settings.key.0, SecretKind::Password)
-                    .await
-                    .map_err(|error| {
-                        tracing::warn!(%error, "the account's password couldn't be read");
-                        SubmitError::Connect(LoginFailure::Other)
-                    })?
-                    .ok_or(SubmitError::Auth(LoginFailure::WrongPassword))?;
+                // Held for the session (`Passwords`): the keyring is read once, not per send.
+                let password =
+                    crate::service::password(shared, settings)
+                        .await
+                        .map_err(|failure| match failure {
+                            LoginFailure::WrongPassword => SubmitError::Auth(failure),
+                            other => SubmitError::Connect(other),
+                        })?;
                 let password = std::str::from_utf8(&password)
                     .map_err(|_| SubmitError::Auth(LoginFailure::WrongPassword))?;
                 let credentials = Credentials::Password {
                     username: &settings.username,
                     password,
                 };
-                Submitter::connect_with(&settings.smtp, credentials, &shared.trust, timeouts).await
+                let connected =
+                    Submitter::connect_with(&settings.smtp, credentials, &shared.trust, timeouts)
+                        .await;
+                if let Err(SubmitError::Auth(failure)) = &connected {
+                    crate::service::password_failed(shared, settings, *failure);
+                }
+                connected
             }
             AuthMethod::OAuth(_) => {
+                let secrets = shared.secrets().await;
                 let label = secret_label(&settings.address);
-                let client = shared.oauth();
+                let client = shared.oauth_for(settings);
                 submit::connect_oauth(
                     &settings.smtp,
                     &settings.username,
@@ -880,6 +898,9 @@ impl Poller {
                 tracing::warn!(account = self.account.0, %error, "a Sent copy couldn't be recorded");
             }
         }
+        if let Some((after, tries)) = sent_look(done) {
+            self.look_in_sent_after(after, tries);
+        }
     }
 
     async fn copy_failed(&mut self, copy: &DueSentCopy, error: &WriteError) {
@@ -1224,6 +1245,32 @@ mod tests {
             signature: None,
             identities: Vec::new(),
         }
+    }
+
+    #[test]
+    fn sent_is_looked_in_soon_after_a_send() {
+        assert_eq!(
+            sent_look(SentCopyDone::Appended { uid: Some(7) }),
+            Some((Duration::ZERO, 1)),
+            "appended: there now"
+        );
+        assert_eq!(
+            sent_look(SentCopyDone::ServerSaves),
+            Some((SENT_SAVED, 2)),
+            "Gmail files its own a moment later"
+        );
+        assert!(SENT_SAVED <= Duration::from_secs(2));
+        assert_eq!(sent_look(SentCopyDone::GaveUp), None);
+        assert_eq!(sent_look(SentCopyDone::Filed), None);
+        let now = Instant::now();
+        let later = now + SENT_SAVED;
+        let waiting = super::super::SentLook::merged(None, later, 2);
+        let both = super::super::SentLook::merged(Some(waiting), now, 1);
+        assert_eq!(
+            (both.at, both.tries),
+            (now, 2),
+            "the sooner, the more tries"
+        );
     }
 
     #[test]

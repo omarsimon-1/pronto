@@ -8,7 +8,7 @@
 //! testbed on 127.0.0.1; every address is a testbed user or a dummy at example.com, .org or
 //! .net, which Mailpit catches and never relays.
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test send_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -251,7 +251,7 @@ fn fixtures_through_mailpit_round_trip() {
             let prefix = prepended(&raw, &bytes)
                 .unwrap_or_else(|| panic!("{}: not byte for byte", fixture.name));
             assert_eq!(seen(&raw), seen(&bytes), "{}", fixture.name);
-            assert!(!has_bcc_header(&bytes), "{}: Sealwax's bytes", fixture.name);
+            assert!(!has_bcc_header(&bytes), "{}: Pronto's bytes", fixture.name);
             assert!(!contains(&bytes, host.as_bytes()), "{}", fixture.name);
             println!(
                 "{} ({} bytes, {} recipients, {} Bcc): byte for byte after Mailpit's {:?}; \
@@ -332,9 +332,9 @@ fn refusals_on_stalwart() {
     });
 }
 
-/// Seeds per fault scenario: `SEALWAX_SEND_SEEDS`, else 5.
+/// Seeds per fault scenario: `PRONTO_SEND_SEEDS`, else 5.
 fn seeds() -> u64 {
-    std::env::var("SEALWAX_SEND_SEEDS")
+    std::env::var("PRONTO_SEND_SEEDS")
         .ok()
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(5)
@@ -424,14 +424,16 @@ fn faults_on_stalwart() {
                     assert_eq!(tally.delivered_after_cut, 0);
                     assert_eq!(tally.delivered_at_end, tally.runs);
                 }
+                // An uncertain send says why (issue #2): here the message's end never had a
+                // reply, because the connection broke or timed out.
                 "cut while the data goes out" => {
-                    assert_eq!(tally.first, ["Uncertain"]);
+                    assert_eq!(tally.first, ["Uncertain(NoReply)"]);
                     assert_eq!(
                         tally.delivered_at_end, 0,
                         "a partial message isn't delivered"
                     );
                 }
-                _ => assert_eq!(tally.first, ["Uncertain"]),
+                _ => assert_eq!(tally.first, ["Uncertain(NoReply)"]),
             }
         }
 

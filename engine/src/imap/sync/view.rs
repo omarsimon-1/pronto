@@ -8,8 +8,9 @@ use crate::imap::error::{ImapError, SyncError};
 use crate::imap::fetch::{self, Fetched};
 use crate::imap::raw::{self, quote};
 use async_imap::imap_proto::{AttributeValue, MailboxDatum, Response, ResponseCode, Status};
-use sealwax_domain::model::{Flags, FolderId};
-use sealwax_infrastructure::store::{FlagUpdate, NewMessage};
+use sealwax_domain::model::{Flags, FolderId, FolderRole};
+use sealwax_domain::split::Split;
+use sealwax_infrastructure::store::{FlagUpdate, FolderSync, NewMessage};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::RangeInclusive;
 
@@ -23,6 +24,9 @@ pub(crate) struct View {
     /// a server may name UIDs that never existed, so they are only ever matched against stored
     /// ones.
     pub vanished: Vec<RangeInclusive<u32>>,
+    /// The mailbox is Gmail's INBOX: the rows fetched are given Gmail's category
+    /// ([`primary`]), until the server refuses the search.
+    pub categories: bool,
 }
 
 impl View {
@@ -60,6 +64,7 @@ pub(crate) async fn examine(conn: &mut Connection, name_raw: &str) -> Result<Vie
         command.push_str(" (CONDSTORE)");
     }
     conn.selected = None;
+    conn.noticed = false;
     let mut view = View::default();
     let mut uidvalidity = None;
     raw::run(&mut conn.session, &command, |response| match response {
@@ -79,6 +84,51 @@ pub(crate) async fn examine(conn: &mut Connection, name_raw: &str) -> Result<Vie
     view.uidvalidity = uidvalidity.ok_or(ImapError::Protocol("EXAMINE without UIDVALIDITY"))?;
     view.vanished.clear();
     Ok(view)
+}
+
+/// Whether a pass over `state`'s folder gives the rows it fetches Gmail's categories (the fork's
+/// Split Inbox, docs/superhuman/split.md): Gmail's INBOX (X-GM-EXT-1), unless the server
+/// refused the search on this connection.
+pub(crate) fn categorizes(conn: &Connection, state: &FolderSync) -> bool {
+    state.role == FolderRole::Inbox && conn.caps().has("X-GM-EXT-1") && !conn.categories.refused
+}
+
+/// The UIDs among `uids` in Gmail's Primary tab, by one `UID SEARCH UID <set> X-GM-RAW
+/// "category:primary"` (a plain SEARCH response; ESEARCH is never asked for). `None` when the
+/// view doesn't ask, or when the server refuses the search: the view and the connection stop
+/// asking, and the rows keep to the header rules.
+pub(crate) async fn primary(
+    conn: &mut Connection,
+    uids: &[u32],
+    view: &mut View,
+) -> Result<Option<HashSet<u32>>, ImapError> {
+    if !view.categories || uids.is_empty() {
+        return Ok(None);
+    }
+    let criteria = format!("UID {} X-GM-RAW \"category:primary\"", raw::uid_set(uids));
+    match uid_search(conn, &criteria, view).await {
+        Ok(found) => Ok(Some(found.into_iter().collect())),
+        Err(error) if !error.is_connection() => {
+            tracing::info!(%error, "no categories from Gmail; the header rules sort its mail");
+            view.categories = false;
+            conn.categories.refused = true;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Gives each row its category from `primary`, the UIDs among them in Gmail's Primary tab:
+/// Important there, Other in any other tab.
+pub(crate) fn categorize(rows: &mut [NewMessage], primary: Option<&HashSet<u32>>) {
+    let Some(primary) = primary else {
+        return;
+    };
+    for row in rows {
+        if let Some(uid) = row.uid {
+            row.category = Some(Split::of(primary.contains(&uid)));
+        }
+    }
 }
 
 /// `UID SEARCH <criteria>`: the matching UIDs, ascending.
@@ -145,7 +195,9 @@ pub(crate) async fn fetch_flags(
 }
 
 /// The first sync's header FETCH of `set`, as store rows. Responses for UIDs `wanted` refuses,
-/// or without the header section (unsolicited flag updates), are hints and are dropped.
+/// or without the header section (unsolicited flag updates), are hints and are dropped. In
+/// Gmail's INBOX the rows come with their categories ([`primary`]), so new mail is stored on
+/// its side of the Split Inbox at once.
 pub(crate) async fn fetch_rows(
     conn: &mut Connection,
     folder: FolderId,
@@ -168,13 +220,16 @@ pub(crate) async fn fetch_rows(
         other => view.track(other),
     })
     .await?;
-    let rows = tokio::task::spawn_blocking(move || {
+    let uids: Vec<u32> = out.iter().map(|found| found.uid).collect();
+    // The rows are parsed while Gmail is asked for their categories.
+    let parsed = tokio::task::spawn_blocking(move || {
         out.into_iter()
             .map(|found| fetch::message(folder, found))
             .collect::<Vec<_>>()
-    })
-    .await
-    .map_err(|_| SyncError::Parse)?;
+    });
+    let primary = primary(conn, &uids, view).await?;
+    let mut rows = parsed.await.map_err(|_| SyncError::Parse)?;
+    categorize(&mut rows, primary.as_ref());
     Ok(rows)
 }
 
@@ -207,6 +262,167 @@ pub(crate) fn imap_date(unix: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imap::{Credentials, connect};
+    use crate::net::testing::{Peer, bind, test_ca};
+    use sealwax_domain::account::{Endpoint, Security};
+    use sealwax_infrastructure::store::SyncState;
+
+    /// A scripted Gmail's half of a login, with Gmail's capabilities after it.
+    async fn gmail(
+        listener: &tokio::net::TcpListener,
+        config: std::sync::Arc<rustls::ServerConfig>,
+    ) -> Peer {
+        let mut peer = Peer::accept_tls(listener, config).await;
+        peer.send("* OK Gimap ready for requests from 127.0.0.1\r\n")
+            .await;
+        let tag = peer.expect("CAPABILITY").await;
+        peer.send("* CAPABILITY IMAP4rev1 UNSELECT IDLE NAMESPACE QUOTA ID XLIST CHILDREN X-GM-EXT-1 XYZZY SASL-IR AUTH=PLAIN\r\n")
+            .await;
+        peer.send(&format!("{tag} OK Thats all she wrote!\r\n"))
+            .await;
+        let tag = peer.expect("AUTHENTICATE PLAIN").await;
+        peer.send(&format!(
+            "{tag} OK [CAPABILITY IMAP4rev1 UNSELECT IDLE NAMESPACE QUOTA ID XLIST CHILDREN \
+             X-GM-EXT-1 UIDPLUS COMPRESS=DEFLATE ENABLE MOVE CONDSTORE ESEARCH UTF8=ACCEPT \
+             LIST-EXTENDED LIST-STATUS LITERAL- SPECIAL-USE APPENDLIMIT=35651584] \
+             user@example.test authenticated (Success)\r\n"
+        ))
+        .await;
+        while let Some(line) = peer.line().await {
+            let (tag, command) = line.trim_end().split_once(' ').unwrap_or_default();
+            if command.eq_ignore_ascii_case("CAPABILITY") {
+                peer.send(
+                    "* CAPABILITY IMAP4rev1 UNSELECT IDLE NAMESPACE QUOTA ID XLIST CHILDREN \
+                           X-GM-EXT-1 UIDPLUS COMPRESS=DEFLATE ENABLE MOVE CONDSTORE ESEARCH \
+                           UTF8=ACCEPT LIST-EXTENDED LIST-STATUS LITERAL- SPECIAL-USE\r\n",
+                )
+                .await;
+                peer.send(&format!("{tag} OK Success\r\n")).await;
+            } else if command.to_ascii_uppercase().starts_with("ID ") {
+                peer.send("* ID (\"name\" \"GImap\" \"vendor\" \"Google, Inc.\")\r\n")
+                    .await;
+                peer.send(&format!("{tag} OK Success\r\n")).await;
+                break;
+            } else {
+                peer.send(&format!("{tag} OK Success\r\n")).await;
+                break;
+            }
+        }
+        peer
+    }
+
+    async fn client(port: u16, trust: &crate::net::Trust) -> Connection {
+        connect(
+            &Endpoint {
+                host: "127.0.0.1".into(),
+                port,
+                security: Security::Tls,
+                certificate: None,
+            },
+            Credentials::Password {
+                username: "user@example.test",
+                password: "secret-password",
+            },
+            trust.client_config().unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn inbox() -> FolderSync {
+        FolderSync {
+            folder: FolderId(1),
+            account: sealwax_domain::model::AccountId(1),
+            name_raw: "INBOX".into(),
+            delimiter: Some('/'),
+            role: FolderRole::Inbox,
+            selectable: true,
+            uidvalidity: Some(7),
+            uidnext: 10,
+            highestmodseq: 0,
+            state: SyncState::Ready,
+            floor: Some(1),
+            below: 0,
+            messages: 5,
+        }
+    }
+
+    fn rows(uids: &[u32]) -> Vec<NewMessage> {
+        uids.iter()
+            .map(|uid| NewMessage {
+                uid: Some(*uid),
+                ..NewMessage::default()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn gmail_says_which_of_the_inbox_rows_are_in_its_primary_tab() {
+        let ca = test_ca();
+        let config = ca.server.clone();
+        let (listener, port) = bind().await;
+        let server = tokio::spawn(async move {
+            let mut peer = gmail(&listener, config).await;
+            // Gmail answers X-GM-RAW with a plain SEARCH, never ESEARCH unless asked.
+            let tag = peer
+                .expect("UID SEARCH UID 3:5,9 X-GM-RAW \"category:primary\"")
+                .await;
+            peer.send(&format!(
+                "* SEARCH 3 9\r\n{tag} OK SEARCH completed (Success)\r\n"
+            ))
+            .await;
+            let tag = peer.expect("UID SEARCH UID 12 X-GM-RAW").await;
+            peer.send(&format!(
+                "* SEARCH\r\n{tag} OK SEARCH completed (Success)\r\n"
+            ))
+            .await;
+            let tag = peer.expect("UID SEARCH UID 13 X-GM-RAW").await;
+            peer.send(&format!("{tag} BAD Could not parse command\r\n"))
+                .await;
+            peer.drain().await
+        });
+        let mut conn = client(port, &ca.trust).await;
+        let mut view = View {
+            categories: categorizes(&conn, &inbox()),
+            ..View::default()
+        };
+        assert!(view.categories, "Gmail's INBOX");
+        let mut sent = FolderSync {
+            role: FolderRole::Sent,
+            ..inbox()
+        };
+        assert!(!categorizes(&conn, &sent), "only the INBOX");
+        sent.role = FolderRole::Inbox;
+
+        let mut found = rows(&[3, 4, 5, 9]);
+        let tab = primary(&mut conn, &[3, 4, 5, 9], &mut view).await.unwrap();
+        categorize(&mut found, tab.as_ref());
+        let sides: Vec<Option<Split>> = found.iter().map(|row| row.category).collect();
+        assert_eq!(
+            sides,
+            [
+                Some(Split::Important),
+                Some(Split::Other),
+                Some(Split::Other),
+                Some(Split::Important)
+            ]
+        );
+        // An empty answer: Gmail put it in another tab.
+        let tab = primary(&mut conn, &[12], &mut view).await.unwrap();
+        assert_eq!(tab, Some(HashSet::new()));
+        // Refused: no category, and this connection stops asking.
+        let tab = primary(&mut conn, &[13], &mut view).await.unwrap();
+        assert_eq!(tab, None);
+        assert!(!view.categories && conn.categories.refused);
+        assert!(!categorizes(&conn, &sent));
+        let mut kept = rows(&[14]);
+        let tab = primary(&mut conn, &[14], &mut view).await.unwrap();
+        categorize(&mut kept, tab.as_ref());
+        assert_eq!(kept[0].category, None, "the header rules sort it");
+        drop(conn);
+        let received = server.await.unwrap();
+        assert_eq!(received.matches("X-GM-RAW").count(), 3, "{received}");
+    }
 
     #[test]
     #[allow(clippy::single_range_in_vec_init)]

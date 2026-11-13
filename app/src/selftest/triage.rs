@@ -8,6 +8,8 @@
 //! | `type TEXT` | Types TEXT, a character at a time |
 //! | `focus list\|search\|reader\|NAME` | Puts the keyboard focus there |
 //! | `click-row POS [ctrl\|shift\|ctrl+shift]` | Clicks a list row with the primary button |
+//! | `click-row-held POS MS [ctrl\|shift\|ctrl+shift]` | Clicks a list row as a person does: the press, MS ms (frames and idles run), the release at the same place |
+//! | `click-row-twice POS GAP_MS` | Clicks a list row twice at the same place, each press held 60 ms, the second GAP_MS after the first's release (a person's double click), counting the presses that reach the reader pane |
 //! | `check-row POS` | Ticks or unticks a row's checkbox, as a click on it does |
 //! | `hover-row POS` | Moves the pointer over a row |
 //! | `hover NAME` | Moves the pointer to the middle of the widget named NAME (a scrollbar shows itself) |
@@ -16,7 +18,7 @@
 //! | `click-quick POS archive\|delete\|star` | Hovers a row and clicks its quick action |
 //! | `triage-account NAME KEY` | An account with a key, as `accounts.toml` lists one, and its six role folders (OpsQueued goes to it) |
 //! | `triage-mark-read-on-open true\|false` | Switches marking a message read when the reader shows it |
-//! | `triage-undo-window MS` | Shortens the undo window (the toast shows at least a second) |
+//! | `triage-undo-window MS` | Shortens the undo window, of triage and of sends (the toast shows at least a second) |
 //! | `toast-undo` | Clicks the toast's Undo |
 //! | `sidebar-menu all-inboxes\|[ACCOUNT:]ROLE` | Right-clicks a sidebar folder |
 //! | `account-menu KEY` | Right-clicks the heading of the sidebar's account KEY (`account-1`) |
@@ -26,6 +28,7 @@
 //! | `measure-leave KEY COUNT [MS]` | Presses KEY COUNT times on the message the reader shows and times each from the command's handler (the key press for a key that moves the selection, `j`) to the first frame without it in the reader and to the frame with the next one; with MS, fails when it stayed longer |
 //! | `hold-reader-layout BOOL` | Holds the reader's layout of the next conversations unfinished, as a slow machine would, until switched off |
 //! | `assert-focus WHERE` | The keyboard focus is in WHERE (as `focus`) |
+//! | `assert-reader-presses N` | The presses of the last `click-row-twice` that reached the reader pane |
 //! | `assert-list-selection none\|POS,…` | The selected rows |
 //! | `assert-select-mode BOOL` | Whether the list is in the select mode |
 //! | `assert-reader-page empty\|message\|batch` | What the reader pane shows |
@@ -34,6 +37,9 @@
 //! | `assert-row-check POS none\|true\|false` | A row's checkbox: hidden, ticked, not ticked |
 //! | `assert-row-quick POS BOOL` | Whether a row shows its quick actions |
 //! | `assert-move-to open\|shown\|selected VALUE` | The Move to… picker: open (BOOL), the folders shown (`A,B`), the folder Enter picks |
+//! | `assert-palette open\|shown\|first\|selected\|headings\|clear VALUE` | The command palette: open (BOOL), every row's title as shown (`A\|B`, `none`), the first rows' (as many as VALUE names), the row Enter runs, the empty query's headings (`Suggested\|Recent\|…`), the selected row clear of the bottom fade while rows lie below (BOOL) |
+//! | `palette-shown-in MS` | The palette's last opening reached the screen within MS, from its command to its first painted frame |
+//! | `assert-list-filter all\|unread\|starred\|attachments` | The filter the message list shows (Show Unread Only, Show Starred Only, …) |
 //! | `assert-sidebar-menu closed\|enabled\|disabled [NAME]` | The sidebar's menu, and its item named NAME, else its first (Mark Folder as Read) |
 //! | `assert-action-log NAMES\|none` | The commands run since the last check, in order (`win.archive,win.star`) |
 
@@ -57,6 +63,8 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("type", 1, 1),
     ("focus", 1, 1),
     ("click-row", 1, 2),
+    ("click-row-held", 2, 3),
+    ("click-row-twice", 2, 2),
     ("check-row", 1, 1),
     ("hover-row", 1, 1),
     ("hover", 1, 1),
@@ -76,6 +84,7 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("measure-leave", 2, 3),
     ("hold-reader-layout", 1, 1),
     ("assert-focus", 1, 1),
+    ("assert-reader-presses", 1, 1),
     ("assert-list-selection", 1, 1),
     ("assert-select-mode", 1, 1),
     ("assert-reader-page", 1, 1),
@@ -85,6 +94,9 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("assert-row-check", 2, 2),
     ("assert-row-quick", 2, 2),
     ("assert-move-to", 2, 2),
+    ("assert-palette", 2, 2),
+    ("palette-shown-in", 1, 1),
+    ("assert-list-filter", 1, 1),
     ("assert-sidebar-menu", 1, 2),
     ("assert-action-log", 1, 1),
 ];
@@ -92,7 +104,12 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
 thread_local! {
     /// The commands run since `action-log` or the last `assert-action-log`.
     static LOG: RefCell<Option<Rc<RefCell<Vec<String>>>>> = const { RefCell::new(None) };
+    /// The presses of the last `click-row-twice` that reached the reader pane.
+    static READER_PRESSES: Cell<Option<u32>> = const { Cell::new(None) };
 }
+
+/// How long `click-row-twice` holds each press.
+const TWICE_HOLD: Duration = Duration::from_millis(60);
 
 pub fn handles(command: &str) -> bool {
     COMMANDS.iter().any(|(name, _, _)| *name == command)
@@ -120,7 +137,12 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
             Ok(())
         }
         "focus" => {
-            focus_target(harness, arg(0))?.grab_focus();
+            // The search field shows on demand, as Search shows it.
+            if arg(0) == "search" {
+                super::mail::list(harness)?.focus_search();
+            } else {
+                focus_target(harness, arg(0))?.grab_focus();
+            }
             harness.wait_until_settled().await;
             Ok(())
         }
@@ -128,6 +150,51 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
             let row = row_widget(harness, arg(0))?;
             let state = modifiers(args.get(1).map_or("none", String::as_str))?;
             click_widget(harness, row.upcast_ref(), state, 1).await
+        }
+        "click-row-held" => {
+            let row = row_widget(harness, arg(0))?;
+            let hold = Duration::from_millis(number(arg(1))? as u64);
+            let state = modifiers(args.get(2).map_or("none", String::as_str))?;
+            let (x, y) = centre(harness, row.upcast_ref())?;
+            let watch = releases(harness);
+            let held = broadway::press(x, y, state, 1).map_err(|error| error.to_string())?;
+            glib::timeout_future(hold).await;
+            broadway::release(held).map_err(|error| error.to_string())?;
+            broadway::part_clicks().map_err(|error| error.to_string())?;
+            delivered(harness, watch, 1).await;
+            Ok(())
+        }
+        "click-row-twice" => {
+            let row = row_widget(harness, arg(0))?;
+            let gap = Duration::from_millis(number(arg(1))? as u64);
+            let (x, y) = centre(harness, row.upcast_ref())?;
+            // Counted ahead of every handler in the reader pane.
+            let reader = harness.widget("reader-pane")?;
+            let seen = Rc::new(Cell::new(0u32));
+            let counter = gtk::EventControllerLegacy::new();
+            counter.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let count = seen.clone();
+            counter.connect_event(move |_, event| {
+                if event.event_type() == gtk::gdk::EventType::ButtonPress {
+                    count.set(count.get() + 1);
+                }
+                glib::Propagation::Proceed
+            });
+            reader.add_controller(counter.clone());
+            let watch = releases(harness);
+            for click in 0..2 {
+                if click > 0 {
+                    glib::timeout_future(gap).await;
+                }
+                let held = broadway::press(x, y, 0, 1).map_err(|error| error.to_string())?;
+                glib::timeout_future(TWICE_HOLD).await;
+                broadway::release(held).map_err(|error| error.to_string())?;
+            }
+            broadway::part_clicks().map_err(|error| error.to_string())?;
+            delivered(harness, watch, 2).await;
+            reader.remove_controller(&counter);
+            READER_PRESSES.with(|presses| presses.set(Some(seen.get())));
+            Ok(())
         }
         "check-row" => {
             let row = row_widget(harness, arg(0))?;
@@ -211,7 +278,11 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
                 .state
                 .triage()
                 .ok_or("there is no triage controller")?;
-            triage.set_window(Duration::from_millis(number(arg(0))? as u64));
+            let window = Duration::from_millis(number(arg(0))? as u64);
+            triage.set_window(window);
+            // Sends wait as long (they followed the triage window until `[compose]
+            // undo_send_seconds`, the fork's phase B).
+            crate::outbox::set_send_window(Some(window));
             Ok(())
         }
         "toast-undo" => {
@@ -395,6 +466,108 @@ async fn check(harness: &Harness, assertion: &str, args: &[String]) -> StepResul
                 )),
             }
         }
+        "assert-palette" => {
+            let palette = harness.state.palette().ok_or("the window has no palette")?;
+            let joined = |titles: Vec<String>| {
+                if titles.is_empty() {
+                    "none".to_owned()
+                } else {
+                    titles.join("|")
+                }
+            };
+            match arg(0) {
+                "open" => equal("palette open", palette.is_open(), boolean(arg(1))?),
+                "shown" => equal(
+                    "palette rows",
+                    joined(palette.shown_titles()).as_str(),
+                    arg(1),
+                ),
+                "first" => {
+                    let count = arg(1).split('|').count();
+                    let first: Vec<String> =
+                        palette.shown_titles().into_iter().take(count).collect();
+                    equal("palette's first rows", joined(first).as_str(), arg(1))
+                }
+                "selected" => equal(
+                    "palette row Enter runs",
+                    palette.selected_title().unwrap_or_default().as_str(),
+                    arg(1),
+                ),
+                "headings" => equal(
+                    "palette headings",
+                    joined(palette.headings()).as_str(),
+                    arg(1),
+                ),
+                "clear" => {
+                    // The bottom fade is 2 × --sw-space-huge tall (style.css); while rows lie
+                    // below, the selected one ends above it.
+                    let theme = harness.state.theme().ok_or("the theme hasn't started")?;
+                    let huge = theme
+                        .theme()
+                        .spacing
+                        .tokens()
+                        .iter()
+                        .find(|(name, _)| *name == "huge")
+                        .map_or(18, |(_, px)| *px);
+                    let fade = f64::from(2 * huge);
+                    let (bottom, height, below) = palette
+                        .selected_extent()
+                        .ok_or("no palette row is selected")?;
+                    let clear = !below || bottom <= height - fade + 0.5;
+                    println!(
+                        "  # selected row ends at {bottom:.0} of {height:.0} px; the fade is \
+                         {fade:.0} px; rows below: {below}"
+                    );
+                    equal(
+                        "the selected row clear of the fade",
+                        clear,
+                        boolean(arg(1))?,
+                    )
+                }
+                other => Err(format!(
+                    "assert-palette checks open, shown, first, selected, headings or clear, not \
+                     {other}"
+                )),
+            }
+        }
+        "assert-reader-presses" => {
+            let presses = READER_PRESSES
+                .with(Cell::get)
+                .ok_or("no click-row-twice ran")?;
+            equal("presses on the reader", presses, number(arg(0))? as u32)
+        }
+        "assert-list-filter" => {
+            let filter = super::mail::list(harness)?.filter();
+            let name = crate::list::FILTERS
+                .iter()
+                .find(|(candidate, _)| *candidate == filter)
+                .map_or("unknown", |(_, name)| name);
+            equal("the list's filter", name.to_lowercase().as_str(), arg(0))
+        }
+        "palette-shown-in" => {
+            let palette = harness.state.palette().ok_or("the window has no palette")?;
+            let limit = Duration::from_millis(number(arg(0))? as u64);
+            let shown = palette
+                .shown_in()
+                .ok_or("the palette hasn't been painted yet")?;
+            let ms = |took: Option<Duration>| took.map_or(0.0, |took| took.as_secs_f64() * 1000.0);
+            println!(
+                "  # palette on screen in {:.1} ms (its own work {:.1} ms; the last query's \
+                 rows {:.1} ms)",
+                ms(Some(shown)),
+                ms(palette.worked()),
+                ms(palette.queried())
+            );
+            if shown <= limit {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the palette took {:.1} ms, more than {} ms",
+                    shown.as_secs_f64() * 1000.0,
+                    limit.as_millis()
+                ))
+            }
+        }
         "assert-sidebar-menu" => {
             let state = match harness.window()?.sidebar().menu() {
                 None => "closed",
@@ -508,7 +681,7 @@ fn modifiers(spec: &str) -> Result<u32, String> {
 /// Where `widget`'s centre is on Broadway's screen: its surface's place there (a popover's
 /// relative to the window's), the window's shadow, which the surface includes, and the widget's
 /// place in its window or popover.
-fn centre(harness: &Harness, widget: &gtk::Widget) -> Result<(f64, f64), String> {
+pub(super) fn centre(harness: &Harness, widget: &gtk::Widget) -> Result<(f64, f64), String> {
     point(harness, widget, None)
 }
 
@@ -608,7 +781,7 @@ async fn hovered(harness: &Harness, row: &crate::list::row::MessageRow) -> StepR
 
 /// Presses `spec`, a GTK accelerator (`j`, `<Shift>i`, `numbersign`, `<Control>z`), with the
 /// keysym already chosen: a letter with Shift arrives as its capital, as GDK delivers it.
-fn press(spec: &str) -> StepResult {
+pub(super) fn press(spec: &str) -> StepResult {
     let (keyval, mods) =
         gtk::accelerator_parse(spec).ok_or_else(|| format!("GTK can't parse the key {spec}"))?;
     let mut state = 0;
@@ -732,6 +905,7 @@ async fn add_account(harness: &Harness, name: &str, key: &str) -> StepResult {
             },
         );
     let account = reply.recv().await.map_err(|error| error.to_string())?.value;
+    super::mail::account_read(harness, account).await?;
     for (role, folder) in [
         (FolderRole::Inbox, "INBOX"),
         (FolderRole::Drafts, "Drafts"),
@@ -981,7 +1155,7 @@ async fn measure_leave(
             let asked = at.checked_sub(report.ready).unwrap_or(*at);
             println!(
                 "  # round {round}: gone {:.1} ms, next {:.1} ms; the reader asked at {:.1}, \
-                 read {:.1}, prepared {:.1}, ready {:.1} ms after, painted {:.1} ms after; {:?}",
+                 read {:.1}, prepared {:.1}, ready {:.1} ms after, painted {:.1} ms after; {:?}{}",
                 ms(handled, gone),
                 ms(handled, next),
                 ms(handled, asked),
@@ -989,7 +1163,8 @@ async fn measure_leave(
                 report.prepared.as_secs_f64() * 1000.0,
                 report.ready.as_secs_f64() * 1000.0,
                 ms(*at, next),
-                report.body
+                report.body,
+                if report.ahead { "; laid out ahead" } else { "" }
             );
         }
         super::mail::settled(harness).await?;

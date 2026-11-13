@@ -11,7 +11,7 @@
 # <target> runs for [seconds] (default 600) at low priority, with a 10 s limit per input and
 # 2 GiB of memory. The working corpus is target/fuzz-corpus/<target>, seeded from the
 # checked-in fuzz/corpus/<target> and, where they exist, the repository's samples and the
-# open-licensed templates in .local/corpus/real (never committed; SEALWAX_CORPUS_REAL names
+# open-licensed templates in .local/corpus/real (never committed; PRONTO_CORPUS_REAL names
 # another folder, such as the main checkout's from a worktree). Crashes, hangs and slow
 # inputs land in target/fuzz-artifacts/<target>/; the log in target/fuzz-logs/<target>.log.
 # A crash found once goes into fuzz/corpus/<target>/, where `cargo test` keeps it fixed.
@@ -22,7 +22,7 @@ targets=(message html text links attachment autoconfig search mailto config them
 triple=x86_64-unknown-linux-gnu
 export CARGO_TARGET_DIR=$PWD/target/fuzz
 export CARGO_PROFILE_DEV_DEBUG=line-tables-only
-real=${SEALWAX_CORPUS_REAL:-.local/corpus/real}
+real=${PRONTO_CORPUS_REAL:-.local/corpus/real}
 binary() { echo "$CARGO_TARGET_DIR/$triple/release/$1"; }
 
 build() {

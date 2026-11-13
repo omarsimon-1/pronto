@@ -1,5 +1,5 @@
 //! An account's rules (ADR-020, docs/m9/folders-rules.md): its Sieve script, read from
-//! `rules/<key>.sieve` and compiled once per change of the file, run by Sealwax on the mail that
+//! `rules/<key>.sieve` and compiled once per change of the file, run by Pronto on the mail that
 //! arrives in the account's Inbox and Junk, before `Event::NewMail` (mail a rule sends to Junk or
 //! Trash doesn't notify), and on request for a folder (`Command::ApplyRules`, with the account's
 //! script or one rule just saved). What the script decides becomes ops in the op queue, as the
@@ -287,7 +287,7 @@ struct Planned {
     changes: Vec<RuleChange>,
     /// The folder a move takes it to.
     to: Option<FolderId>,
-    /// Flags or keywords Sealwax can't set (only its own bits travel through the op queue).
+    /// Flags or keywords Pronto can't set (only its own bits travel through the op queue).
     dropped: bool,
 }
 
@@ -534,7 +534,7 @@ async fn run_script(
         tracing::info!(
             account = account_id.0,
             messages = dropped,
-            "rules set keywords Sealwax doesn't keep"
+            "rules set keywords Pronto doesn't keep"
         );
     }
     tracing::debug!(
@@ -901,7 +901,7 @@ mod tests {
                 remove: Flags::SEEN
             }]
         );
-        assert!(planned.dropped, "a keyword Sealwax doesn't keep");
+        assert!(planned.dropped, "a keyword Pronto doesn't keep");
         let inbox = "require \"fileinto\"; fileinto \"inbox\";";
         assert!(
             plan(&outcome(inbox, &view), FolderId(1), &folders())

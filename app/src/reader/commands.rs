@@ -2,10 +2,10 @@
 //! conversation the reader shows. Each owner connects its own commands below; a command stays
 //! unavailable, and so insensitive in the toolbar, the menu and the palette, until it does.
 
-use super::{Reader, remote};
+use super::{Reader, live, remote};
 use crate::actions::ActionSet;
-use gtk4::glib;
 use gtk4::prelude::*;
+use gtk4::{gio, glib};
 use sealwax_domain::actions::ActionId;
 use std::rc::Rc;
 
@@ -16,17 +16,20 @@ type Command = fn(&Reader);
 pub fn connect(actions: &ActionSet, reader: &Reader) {
     conversation(actions, reader);
     scrolling(actions, reader);
+    details(actions, reader);
     files(actions, reader);
     remote_content(actions, reader);
     quick_reply(actions, reader);
 }
 
-/// Expand All Messages, Collapse All Messages, and Next and Previous Message in Conversation
-/// (ML-057), available while the shown conversation has more than one message.
+/// Expand All Messages, Collapse All Messages, Expand or Collapse Message, and Next and Previous
+/// Message in Conversation (ML-057), available while the shown conversation has more than one
+/// message.
 fn conversation(actions: &ActionSet, reader: &Reader) {
     for (id, run) in [
         (ActionId::ExpandAll, Reader::expand_all as fn(&Reader)),
         (ActionId::CollapseAll, Reader::collapse_all),
+        (ActionId::ToggleMessage, Reader::toggle_message),
         (ActionId::NextInConversation, Reader::next_in_conversation),
         (
             ActionId::PreviousInConversation,
@@ -48,17 +51,19 @@ fn conversation(actions: &ActionSet, reader: &Reader) {
     }
 }
 
-/// Scroll Message Down and Up (`d`, Shift+D; issue #10), available while the reader shows a
-/// conversation.
+/// Scroll Message Down and Up (`d`, Shift+D; issue #10) and Scroll Message Page Down and Up
+/// (Space, Shift+Space in the reader), available while the reader shows a conversation.
 fn scrolling(actions: &ActionSet, reader: &Reader) {
-    for (id, down) in [
-        (ActionId::ScrollMessageDown, true),
-        (ActionId::ScrollMessageUp, false),
+    for (id, pages) in [
+        (ActionId::ScrollMessageDown, live::HALF_PAGE),
+        (ActionId::ScrollMessageUp, -live::HALF_PAGE),
+        (ActionId::ScrollMessagePageDown, live::PAGE),
+        (ActionId::ScrollMessagePageUp, -live::PAGE),
     ] {
         let target = Rc::downgrade(&reader.inner);
         actions.connect(id, move || {
             if let Some(inner) = target.upgrade() {
-                inner.scroll_half_page(down);
+                inner.scroll_pages(pages);
             }
         });
         if let Some(action) = actions.action(id).cloned() {
@@ -68,9 +73,25 @@ fn scrolling(actions: &ActionSet, reader: &Reader) {
     }
 }
 
-/// Print, Show Original and Save as .eml (ML-063), on the message the reader shows. They need a
-/// selection (the registry's), and apply only while the reader shows one message (the app's
-/// `refresh_commands`, as Open Message).
+/// Message Details, on the message of the shown conversation the user is on: its card's details
+/// button from the keyboard. Available while the reader shows a conversation.
+fn details(actions: &ActionSet, reader: &Reader) {
+    let id = ActionId::MessageDetails;
+    let target = Rc::downgrade(&reader.inner);
+    actions.connect(id, move || {
+        if let Some(inner) = target.upgrade() {
+            Reader { inner }.toggle_details();
+        }
+    });
+    if let Some(action) = actions.action(id).cloned() {
+        action.set_enabled(reader.state().messages > 0);
+        reader.connect_size(move |size| action.set_enabled(size > 0));
+    }
+}
+
+/// Print, Show Original and Save as .eml (ML-063), on the message of the shown conversation the
+/// user is on ([`Reader::message_in_hand`]). They need a selection (the registry's), and apply
+/// only while the reader shows one message (the app's `refresh_commands`, as Open Message).
 fn files(actions: &ActionSet, reader: &Reader) {
     for (id, run) in [
         (ActionId::Print, Reader::print as Command),
@@ -86,10 +107,11 @@ fn files(actions: &ActionSet, reader: &Reader) {
     }
 }
 
-/// Show Images and Always Show Images from This Sender (ML-058), on the message the reader
-/// shows: Show Images while its banner says its images are hidden; Always Show Images while it
-/// has a sender address, its state whether that sender is on the list. Both follow the shown
-/// message, the list and the banner; nothing else in the app enables or disables them.
+/// Show Images and Always Show Images from This Sender (ML-058), on the message of the shown
+/// conversation the user is on ([`Reader::message_in_hand`]): Show Images while its banner says
+/// its images are hidden; Always Show Images while it has a sender address, its state whether
+/// that sender is on the list. Both follow the shown message, the user's moves in its
+/// conversation, the list and the banner; nothing else in the app enables or disables them.
 fn remote_content(actions: &ActionSet, reader: &Reader) {
     let target = Rc::downgrade(&reader.inner);
     actions.connect(ActionId::ShowImages, move || {
@@ -131,6 +153,8 @@ fn remote_content(actions: &ActionSet, reader: &Reader) {
     follow();
     let on_shown = follow.clone();
     reader.connect_shown(move |_| on_shown());
+    let on_moved = follow.clone();
+    reader.connect_moved(move |_| on_moved());
     let on_change = follow.clone();
     remote::connect_changed(reader, move || on_change());
     reader
@@ -141,14 +165,22 @@ fn remote_content(actions: &ActionSet, reader: &Reader) {
         });
 }
 
-/// Quick Reply, Open Reply in Composer and Send (M6, ML-068), on the quick reply under the shown
-/// conversation: the first two while one is on screen, Send while it holds text (the quick
-/// reply's Send button is bound to it, and its Ctrl+Enter is the Composer scope's).
+/// Quick Reply, Open Reply in Composer and Send (M6, ML-068), and the fork's phase B: Send and
+/// Archive, Send Later, Pop Draft Out or In, Edit To, Cc and Bcc, on the inline reply under the shown
+/// conversation: all but the sends while one is on screen, the sends while it holds text (its
+/// Send button is bound to Send, and its keys are the Composer scope's).
 fn quick_reply(actions: &ActionSet, reader: &Reader) {
     for (id, run) in [
         (ActionId::QuickReply, Reader::focus_quick_reply as Command),
         (ActionId::ReplyInComposer, Reader::expand_quick_reply),
+        (ActionId::PopOutDraft, Reader::expand_quick_reply),
         (ActionId::Send, Reader::send_quick_reply),
+        (
+            ActionId::SendAndArchive,
+            Reader::send_quick_reply_and_archive,
+        ),
+        (ActionId::SendLater, Reader::send_quick_reply_later),
+        (ActionId::SwitchReply, Reader::switch_quick_reply),
     ] {
         let target = Rc::downgrade(&reader.inner);
         actions.connect(id, move || {
@@ -157,17 +189,45 @@ fn quick_reply(actions: &ActionSet, reader: &Reader) {
             }
         });
     }
-    let (Some(quick), Some(expand), Some(send)) = (
-        actions.action(ActionId::QuickReply).cloned(),
-        actions.action(ActionId::ReplyInComposer).cloned(),
-        actions.action(ActionId::Send).cloned(),
-    ) else {
-        return;
-    };
+    for (id, field) in [
+        (ActionId::EditTo, "to"),
+        (ActionId::EditCc, "cc"),
+        (ActionId::EditBcc, "bcc"),
+    ] {
+        let target = Rc::downgrade(&reader.inner);
+        actions.connect(id, move || {
+            if let Some(inner) = target.upgrade() {
+                Reader { inner }.edit_quick_recipients(field);
+            }
+        });
+    }
+    let shown: Vec<gio::SimpleAction> = [
+        ActionId::QuickReply,
+        ActionId::ReplyInComposer,
+        ActionId::PopOutDraft,
+        ActionId::SwitchReply,
+        ActionId::EditTo,
+        ActionId::EditCc,
+        ActionId::EditBcc,
+    ]
+    .into_iter()
+    .filter_map(|id| actions.action(id).cloned())
+    .collect();
+    let sends: Vec<gio::SimpleAction> = [
+        ActionId::Send,
+        ActionId::SendAndArchive,
+        ActionId::SendLater,
+    ]
+    .into_iter()
+    .filter_map(|id| actions.action(id).cloned())
+    .collect();
     let follow = move |state: super::QuickState| {
-        quick.set_enabled(state.shown);
-        expand.set_enabled(state.shown);
-        send.set_enabled(state.has_text);
+        for action in &shown {
+            action.set_enabled(state.shown);
+        }
+        for action in &sends {
+            action.set_enabled(state.has_text);
+        }
     };
     follow(reader.quick_state());
     reader.connect_quick_state(follow);

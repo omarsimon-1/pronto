@@ -23,7 +23,7 @@ pub struct StoredDraft {
     pub subject: String,
     /// Cleaned HTML; a plain-text draft as the editor's lines.
     pub html: String,
-    /// Its Message-ID when it is one Sealwax can send under (on the From's domain); otherwise
+    /// Its Message-ID when it is one Pronto can send under (on the From's domain); otherwise
     /// the caller makes a new one.
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,

@@ -4,7 +4,7 @@
 # store. Keyboard: the focus lands in each step's first field, Enter advances, Escape goes back
 # a step and closes on the first. The look in matte-black (square) and catppuccin-latte
 # (rounded). Every address, name and server is fictional. Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/setup.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/setup.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -22,7 +22,7 @@ assert-setup open true
 assert-setup step address
 assert-setup focus setup-address
 assert-label setup-title "Type your address"
-assert-label setup-subtitle "Sealwax finds the server settings for you."
+assert-label setup-subtitle "Pronto finds the server settings for you."
 assert-shown setup-name true
 assert-shown setup-manual-link true
 assert-shown setup-back false
@@ -155,6 +155,8 @@ setup-key escape
 assert-setup step adding
 assert-sensitive setup-close false
 engine-reply added ok
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 assert-setup open false
 wait-until assert-shown welcome false
 assert-label sidebar-summary "1 account · synced"

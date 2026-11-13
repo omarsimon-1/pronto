@@ -17,16 +17,16 @@ use std::rc::Rc;
 /// A state the banner can show (ML-048), from the most to the least important kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attention {
-    /// No Secret Service answered: passwords and sign-ins stay in memory until Sealwax quits.
+    /// No Secret Service answered: passwords and sign-ins stay in memory until Pronto quits.
     NoKeyring,
-    /// The account's server shows a certificate that no longer verifies, so Sealwax stopped
+    /// The account's server shows a certificate that no longer verifies, so Pronto stopped
     /// connecting to it.
     CertificateChanged { name: String, host: String },
     /// The server refused the account's password (`browser` false) or its Microsoft sign-in.
     SignIn { name: String, browser: bool },
     /// The server says the account's mailbox is full.
     QuotaFull { name: String },
-    /// A message may have been sent (Sealwax stopped while sending it, or the server's reply
+    /// A message may have been sent (Pronto stopped while sending it, or the server's reply
     /// didn't come or couldn't be read; `reason` `None` when the engine said why in an earlier
     /// session), and it is never sent again without the user's word (M6, ADR-015). `what`
     /// names it: its subject, account and time ([`crate::outbox::described`]).
@@ -55,7 +55,7 @@ pub enum BannerAction {
     TypePassword,
     /// Reconnect now.
     Retry,
-    /// Why the certificate stopped Sealwax, and the account's servers.
+    /// Why the certificate stopped Pronto, and the account's servers.
     Details,
     /// Hide the no-keyring banner for this session.
     Dismiss,
@@ -108,7 +108,7 @@ impl Attention {
         match self {
             Self::NoKeyring => "No keyring found".to_owned(),
             Self::CertificateChanged { name, .. } => {
-                format!("Sealwax stopped connecting to {name}")
+                format!("Pronto stopped connecting to {name}")
             }
             Self::SignIn { name, .. } => format!("{name} needs you to sign in again"),
             Self::QuotaFull { name } => format!("{name}'s mailbox is full"),
@@ -123,20 +123,20 @@ impl Attention {
     /// What happened and what to do next.
     pub fn body(&self) -> String {
         match self {
-            Self::NoKeyring => "Passwords and sign-ins stay in memory until Sealwax quits, so \
+            Self::NoKeyring => "Passwords and sign-ins stay in memory until Pronto quits, so \
                                 you'll type them again next time. Start a Secret Service such \
                                 as gnome-keyring to keep them."
                 .to_owned(),
             Self::CertificateChanged { host, .. } => format!(
-                "{host} shows a certificate that no longer verifies, and Sealwax never signs in \
+                "{host} shows a certificate that no longer verifies, and Pronto never signs in \
                  to a server it can't verify. A network that inspects secure connections can \
                  cause this: try another network, then Retry."
             ),
-            Self::SignIn { browser: true, .. } => "Microsoft ended the session. Sealwax keeps \
+            Self::SignIn { browser: true, .. } => "Microsoft ended the session. Pronto keeps \
                                                    your mail; nothing syncs until you sign in."
                 .to_owned(),
             Self::SignIn { browser: false, .. } => "The server stopped accepting the password \
-                                                    Sealwax has. Sealwax keeps your mail; \
+                                                    Pronto has. Pronto keeps your mail; \
                                                     nothing syncs until you type it again."
                 .to_owned(),
             Self::QuotaFull { .. } => "The server has no room for more mail: new messages may \
@@ -150,17 +150,17 @@ impl Attention {
                 waiting: 0,
                 ..
             } => {
-                "Sealwax shows the mail it has and syncs again when the network is back.".to_owned()
+                "Pronto shows the mail it has and syncs again when the network is back.".to_owned()
             }
-            Self::Offline { network: true, .. } => "Sealwax shows the mail it has, keeps your \
+            Self::Offline { network: true, .. } => "Pronto shows the mail it has, keeps your \
                                                     changes and sends them when the network is \
                                                     back."
                 .to_owned(),
-            Self::Offline { waiting: 0, .. } => "Sealwax shows the mail it has and tries again \
+            Self::Offline { waiting: 0, .. } => "Pronto shows the mail it has and tries again \
                                                  by itself. Check your connection, or try \
                                                  another network."
                 .to_owned(),
-            Self::Offline { .. } => "Sealwax shows the mail it has, keeps your changes and tries \
+            Self::Offline { .. } => "Pronto shows the mail it has, keeps your changes and tries \
                                      again by itself. Check your connection, or try another \
                                      network."
                 .to_owned(),
@@ -491,7 +491,7 @@ mod tests {
             titles,
             [
                 "No keyring found",
-                "Sealwax stopped connecting to Work",
+                "Pronto stopped connecting to Work",
                 "Work needs you to sign in again",
                 "Work needs you to sign in again",
                 "Work's mailbox is full",

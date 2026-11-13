@@ -1,4 +1,4 @@
-//! `config.toml` (ADR-009): Sealwax's settings, in `$XDG_CONFIG_HOME/sealwax/`. The file is
+//! `config.toml` (ADR-009): Pronto's settings, in `$XDG_CONFIG_HOME/pronto/`. The file is
 //! TOML read with positions, so every mistake is reported with its line and column, and a
 //! file with mistakes is not applied at all. Missing settings keep their defaults; a missing
 //! file is the defaults. `keys.toml` shares the error type and helpers (`crate::keymap`).
@@ -120,22 +120,34 @@ pub(crate) fn article(kind: &str) -> String {
 }
 
 pub use crate::theme::{
-    ChromeFont, CornerRadius, MAX_RADIUS as MAX_CORNER_RADIUS, ReadingFont,
+    ChromeFont, CornerRadius, MAX_RADIUS as MAX_CORNER_RADIUS, PaletteChoice, ReadingFont,
     ThemeOptions as Appearance,
 };
 
-/// An OAuth client registration that overrides the build's (ADR-008, OAUTH-SETUP.md). Only
-/// the client ID: Microsoft's client is public, and no settings file holds a secret (ADR-009).
-/// The section names are final once M2 builds sign-in.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// An OAuth client registration that overrides the build's (ADR-008, OAUTH-SETUP.md). Microsoft's
+/// client is public, so `[oauth.microsoft]` takes only the client ID. `[oauth.google]` also takes
+/// the `client_secret` Google issues to a Desktop app client, which Google says isn't
+/// confidential (ADR-023); its debug form never shows it.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct OAuthClient {
     pub client_id: Option<String>,
+    pub client_secret: Option<String>,
 }
 
-/// `[oauth.microsoft]`; there is no Sign in with Google (ADR-008 amendment, 2026-10-07).
+impl std::fmt::Debug for OAuthClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthClient")
+            .field("client_id", &self.client_id.is_some())
+            .field("client_secret", &self.client_secret.is_some())
+            .finish()
+    }
+}
+
+/// `[oauth.microsoft]` and `[oauth.google]` (ADR-023: Sign in with Google, 2026-10-22).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OAuth {
     pub microsoft: OAuthClient,
+    pub google: OAuthClient,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -145,7 +157,8 @@ const GIB: u64 = 1024 * MIB;
 pub const DEFAULT_CACHE_SIZE: u64 = 2 * GIB;
 /// The smallest `cache_size`: a few large messages must fit.
 pub const MIN_CACHE_SIZE: u64 = 100 * MIB;
-/// Days of Inbox mail downloaded in the background by default (a proposal, ML-044).
+/// Days of Inbox mail downloaded in the background by default (a proposal, ML-044). Since the
+/// fork's Superhuman pass any value but 0 means the whole Inbox (see [`Storage::prefetch_days`]).
 pub const DEFAULT_PREFETCH_DAYS: u32 = 14;
 pub const MAX_PREFETCH_DAYS: u32 = 365;
 
@@ -155,8 +168,10 @@ pub struct Storage {
     /// Bytes the downloaded messages may take; `None` for no limit. Past it, the messages
     /// opened or fetched longest ago go back to their headers and preview.
     pub cache_size: Option<u64>,
-    /// Inbox messages from the last this many days are downloaded in the background; 0 turns
-    /// it off.
+    /// 0 turns the background download off. Since the fork's Superhuman pass any other value
+    /// turns it on for the whole Inbox and the rest of its conversations, whatever their age
+    /// (upstream: Inbox messages from the last this many days); the key keeps its name and
+    /// range so existing files stay valid.
     pub prefetch_days: u32,
 }
 
@@ -184,6 +199,9 @@ pub enum NotificationContent {
 pub struct Notifications {
     pub enabled: bool,
     pub content: NotificationContent,
+    /// Mail the Split Inbox puts in Other notifies too (the fork's phase C: off by default, as
+    /// in Superhuman; mail in Important notifies as before, and with the splits off, all of it).
+    pub other: bool,
 }
 
 impl Default for Notifications {
@@ -191,11 +209,27 @@ impl Default for Notifications {
         Self {
             enabled: true,
             content: NotificationContent::default(),
+            other: false,
         }
     }
 }
 
-/// `[background]`: closing the window keeps Sealwax running, so sync and notifications go on
+/// `[inbox]`: the Inbox and All Inboxes (the fork's phase C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InboxSettings {
+    /// The Split Inbox: two tabs, Important (mail from people) and Other (newsletters,
+    /// notifications, receipts); false shows one Inbox. Split Inbox in the palette and the View
+    /// menu switches it too, which `layout.toml` remembers until this changes.
+    pub split: bool,
+}
+
+impl Default for InboxSettings {
+    fn default() -> Self {
+        Self { split: true }
+    }
+}
+
+/// `[background]`: closing the window keeps Pronto running, so sync and notifications go on
 /// (ML-084; on by default, ADR-013 amendment, M7 start). Quit stops it either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Background {
@@ -208,8 +242,8 @@ impl Default for Background {
     }
 }
 
-/// `[reader]`: how the reader shows a conversation (issue #3) and whom Reply answers (issue
-/// #8).
+/// `[reader]`: how the reader shows a conversation (issue #3) and whom Enter's reply answers
+/// (issue #8; the fork's phase C).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReaderSettings {
     pub conversation_order: ConversationOrder,
@@ -224,14 +258,40 @@ pub enum ConversationOrder {
     NewestFirst,
 }
 
-/// Whom Reply (`r`, Ctrl+R, a card's first reply button, the quick reply) answers.
+/// Whom the reply under a conversation answers when the user doesn't say: Enter in a
+/// conversation (Quick Reply), a click in its box. Superhuman's Enter is Reply All, the fork's
+/// default since phase C; `r` (Reply) always answers the sender and `a` (Reply All) everyone.
+/// (Upstream's issue #8 made "all" turn Reply itself into Reply All.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DefaultReply {
-    /// The sender (or Reply-To) alone; Reply All answers everyone.
-    #[default]
+    /// The sender (or Reply-To) alone, as Reply does.
     Sender,
-    /// Everyone the message went to, as Reply All does; Reply to Sender answers the sender.
+    /// Everyone the message went to, as Reply All does (a message to the user alone is
+    /// answered as Reply does).
+    #[default]
     All,
+}
+
+/// How long a sent message waits so Undo can take it back by default, in seconds: Superhuman's
+/// ten (the fork's phase B; upstream waited 7).
+pub const DEFAULT_UNDO_SEND_SECONDS: u32 = 10;
+/// The longest undo window `undo_send_seconds` takes, as Gmail's.
+pub const MAX_UNDO_SEND_SECONDS: u32 = 30;
+
+/// `[compose]`: writing and sending (the fork's phase B).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComposeSettings {
+    /// Seconds a sent message waits before it goes, while Undo can take it back; 0 sends at
+    /// once, with no Undo.
+    pub undo_send_seconds: u32,
+}
+
+impl Default for ComposeSettings {
+    fn default() -> Self {
+        Self {
+            undo_send_seconds: DEFAULT_UNDO_SEND_SECONDS,
+        }
+    }
 }
 
 /// The settings in `config.toml`.
@@ -243,29 +303,37 @@ pub struct Config {
     pub notifications: Notifications,
     pub background: Background,
     pub reader: ReaderSettings,
+    pub compose: ComposeSettings,
+    pub inbox: InboxSettings,
 }
 
-const APPEARANCE_SETTINGS: [&str; 3] = ["corner_radius", "chrome_font", "reading_font"];
+const APPEARANCE_SETTINGS: [&str; 4] = ["palette", "corner_radius", "chrome_font", "reading_font"];
 const STORAGE_SETTINGS: [&str; 2] = ["cache_size", "prefetch_days"];
-const NOTIFICATION_SETTINGS: [&str; 2] = ["enabled", "show"];
+const NOTIFICATION_SETTINGS: [&str; 3] = ["enabled", "show", "other"];
 const BACKGROUND_SETTINGS: [&str; 1] = ["enabled"];
 const READER_SETTINGS: [&str; 2] = ["conversation_order", "reply"];
-const SECTIONS: [&str; 6] = [
+const COMPOSE_SETTINGS: [&str; 1] = ["undo_send_seconds"];
+const INBOX_SETTINGS: [&str; 1] = ["split"];
+const SECTIONS: [&str; 8] = [
     "appearance",
     "oauth",
     "storage",
     "notifications",
     "background",
     "reader",
+    "compose",
+    "inbox",
 ];
-const PROVIDERS: [&str; 1] = ["microsoft"];
+const PROVIDERS: [&str; 2] = ["microsoft", "google"];
 
 /// Where a setting written at the top level belongs.
 fn section_of(name: &str) -> Option<&'static str> {
     if APPEARANCE_SETTINGS.contains(&name) {
         Some("[appearance]")
     } else if name == "client_id" {
-        Some("[oauth.microsoft]")
+        Some("[oauth.microsoft] or [oauth.google]")
+    } else if name == "client_secret" {
+        Some("[oauth.google]")
     } else if STORAGE_SETTINGS.contains(&name) {
         Some("[storage]")
     } else if name == "enabled" {
@@ -274,6 +342,10 @@ fn section_of(name: &str) -> Option<&'static str> {
         Some("[notifications]")
     } else if READER_SETTINGS.contains(&name) {
         Some("[reader]")
+    } else if COMPOSE_SETTINGS.contains(&name) {
+        Some("[compose]")
+    } else if INBOX_SETTINGS.contains(&name) {
+        Some("[inbox]")
     } else {
         None
     }
@@ -337,6 +409,18 @@ impl Reader<'_> {
             let name = key.get_ref().as_ref();
             let span = value.span();
             match name {
+                "palette" => match value.get_ref().as_str() {
+                    Some("adwaita") => appearance.palette = PaletteChoice::Adwaita,
+                    Some("tokyo-night") => appearance.palette = PaletteChoice::TokyoNight,
+                    Some("omarchy") => appearance.palette = PaletteChoice::Omarchy,
+                    _ => self.error(
+                        span,
+                        format!(
+                            "palette is \"adwaita\", \"tokyo-night\" or \"omarchy\", not {}",
+                            shown(value.get_ref())
+                        ),
+                    ),
+                },
                 "corner_radius" => match corner_radius(value.get_ref()) {
                     Some(radius) => appearance.corner_radius = radius,
                     None => self.error(
@@ -349,23 +433,25 @@ impl Reader<'_> {
                     ),
                 },
                 "chrome_font" => match value.get_ref().as_str() {
+                    Some("adwaita") => appearance.chrome_font = ChromeFont::Adwaita,
                     Some("omarchy") => appearance.chrome_font = ChromeFont::Omarchy,
                     Some("sans") => appearance.chrome_font = ChromeFont::Sans,
                     _ => self.error(
                         span,
                         format!(
-                            "chrome_font is \"omarchy\" or \"sans\", not {}",
+                            "chrome_font is \"adwaita\", \"omarchy\" or \"sans\", not {}",
                             shown(value.get_ref())
                         ),
                     ),
                 },
                 "reading_font" => match value.get_ref().as_str() {
+                    Some("adwaita") => appearance.reading_font = ReadingFont::Adwaita,
                     Some("sans") => appearance.reading_font = ReadingFont::Sans,
                     Some("mono") => appearance.reading_font = ReadingFont::Mono,
                     _ => self.error(
                         span,
                         format!(
-                            "reading_font is \"sans\" or \"mono\", not {}",
+                            "reading_font is \"adwaita\", \"sans\" or \"mono\", not {}",
                             shown(value.get_ref())
                         ),
                     ),
@@ -386,12 +472,13 @@ impl Reader<'_> {
             let provider = key.get_ref().as_ref();
             let (client, settings): (&mut OAuthClient, &[&str]) = match provider {
                 "microsoft" => (&mut oauth.microsoft, &["client_id"]),
+                "google" => (&mut oauth.google, &["client_id", "client_secret"]),
                 _ => {
                     self.error(
                         key.span(),
                         format!(
-                            "unknown provider oauth.{provider}{}; Sealwax signs in with \
-                             microsoft",
+                            "unknown provider oauth.{provider}{}; Pronto signs in with \
+                             microsoft or google",
                             did_you_mean(provider, PROVIDERS)
                         ),
                     );
@@ -429,7 +516,10 @@ impl Reader<'_> {
                     continue;
                 };
                 let text = Some(text.trim().to_owned()).filter(|text| !text.is_empty());
-                client.client_id = text;
+                match name {
+                    "client_secret" => client.client_secret = text,
+                    _ => client.client_id = text,
+                }
             }
         }
     }
@@ -534,6 +624,11 @@ impl Reader<'_> {
                         ),
                     ),
                 },
+                "other" => {
+                    if let Some(on) = self.boolean(name, value) {
+                        notifications.other = on;
+                    }
+                }
                 _ => self.error(
                     key.span(),
                     format!(
@@ -600,6 +695,55 @@ impl Reader<'_> {
                     format!(
                         "unknown setting {name} in [reader]{}",
                         did_you_mean(name, READER_SETTINGS)
+                    ),
+                ),
+            }
+        }
+    }
+
+    fn inbox(&mut self, table: &DeTable<'_>, inbox: &mut InboxSettings) {
+        for (key, value) in entries(table) {
+            let name = key.get_ref().as_ref();
+            match name {
+                "split" => {
+                    if let Some(on) = self.boolean(name, value) {
+                        inbox.split = on;
+                    }
+                }
+                _ => self.error(
+                    key.span(),
+                    format!(
+                        "unknown setting {name} in [inbox]{}",
+                        did_you_mean(name, INBOX_SETTINGS)
+                    ),
+                ),
+            }
+        }
+    }
+
+    fn compose(&mut self, table: &DeTable<'_>, compose: &mut ComposeSettings) {
+        for (key, value) in entries(table) {
+            let name = key.get_ref().as_ref();
+            match name {
+                "undo_send_seconds" => match whole_number(value.get_ref())
+                    .and_then(|seconds| u32::try_from(seconds).ok())
+                    .filter(|seconds| *seconds <= MAX_UNDO_SEND_SECONDS)
+                {
+                    Some(seconds) => compose.undo_send_seconds = seconds,
+                    None => self.error(
+                        value.span(),
+                        format!(
+                            "undo_send_seconds is a whole number of seconds from 0 to \
+                             {MAX_UNDO_SEND_SECONDS}, not {}",
+                            shown(value.get_ref())
+                        ),
+                    ),
+                },
+                _ => self.error(
+                    key.span(),
+                    format!(
+                        "unknown setting {name} in [compose]{}",
+                        did_you_mean(name, COMPOSE_SETTINGS)
                     ),
                 ),
             }
@@ -677,6 +821,16 @@ impl Config {
                         reader.reader(table, &mut config.reader);
                     }
                 }
+                "compose" => {
+                    if let Some(table) = reader.table(value, name) {
+                        reader.compose(table, &mut config.compose);
+                    }
+                }
+                "inbox" => {
+                    if let Some(table) = reader.table(value, name) {
+                        reader.inbox(table, &mut config.inbox);
+                    }
+                }
                 _ => match section_of(name) {
                     Some(section) => reader.error(
                         key.span(),
@@ -708,31 +862,43 @@ impl Config {
 /// so the file changes nothing until a line is uncommented.
 pub fn default_config_file() -> String {
     format!(
-        "# Sealwax settings (config.toml). Uncomment a line and change it; Sealwax applies the\n\
+        "# Pronto settings (config.toml). Uncomment a line and change it; Pronto applies the\n\
          # file when you save it. A mistake is shown with its line and column, and the previous\n\
          # settings stay until the file is fixed.\n\
          \n\
          [appearance]\n\
+         # Colours: \"adwaita\" (GNOME's look, light or dark as the desktop prefers),\n\
+         # \"tokyo-night\", or \"omarchy\" to follow the live Omarchy theme.\n\
+         # palette = \"adwaita\"\n\
          # Corners of rows, chips, cards and buttons: \"auto\" follows Hyprland's rounding (0\n\
          # outside Hyprland), or a number of pixels from 0 to {MAX_CORNER_RADIUS}.\n\
          # corner_radius = \"auto\"\n\
-         # The sidebar, list and toolbars: \"omarchy\" (the Omarchy font) or \"sans\".\n\
-         # chrome_font = \"omarchy\"\n\
-         # Message text: \"sans\" or \"mono\".\n\
-         # reading_font = \"sans\"\n\
+         # The sidebar, list and toolbars: \"adwaita\" (Adwaita Sans), \"omarchy\" (the\n\
+         # Omarchy font) or \"sans\" (the desktop's sans-serif).\n\
+         # chrome_font = \"adwaita\"\n\
+         # Message text: \"adwaita\" (Adwaita Sans), \"sans\" or \"mono\".\n\
+         # reading_font = \"adwaita\"\n\
          \n\
-         # Your own OAuth client for Sign in with Microsoft, in place of the one Sealwax was\n\
+         # Your own OAuth client for Sign in with Microsoft, in place of the one Pronto was\n\
          # built with (docs/OAUTH-SETUP.md).\n\
          [oauth.microsoft]\n\
          # client_id = \"00000000-0000-0000-0000-000000000000\"\n\
+         \n\
+         # Your OAuth client for Sign in with Google (Gmail): a Desktop app client from the\n\
+         # Google Cloud console (docs/GOOGLE-OAUTH-SETUP.md). Without one, Gmail uses an app\n\
+         # password.\n\
+         [oauth.google]\n\
+         # client_id = \"0000000000-xxxxxxxx.apps.googleusercontent.com\"\n\
+         # client_secret = \"GOCSPX-xxxxxxxx\"\n\
          \n\
          [storage]\n\
          # Disk space for messages downloaded from your accounts: a size such as \"2 GiB\" or\n\
          # \"500 MB\" (at least 100 MiB), or \"unlimited\". When it is full, the messages opened\n\
          # longest ago keep only their headers and preview, and download again when opened.\n\
          # cache_size = \"2 GiB\"\n\
-         # Inbox messages from this many days download in the background, so they open\n\
-         # without waiting; 0 turns it off.\n\
+         # Inbox mail and the rest of its conversations download in the background,\n\
+         # whatever their age, so they open without waiting; 0 turns it off (any other\n\
+         # number, up to 365, turns it on).\n\
          # prefetch_days = {DEFAULT_PREFETCH_DAYS}\n\
          \n\
          [notifications]\n\
@@ -741,9 +907,12 @@ pub fn default_config_file() -> String {
          # What it shows: \"sender-and-subject\", or \"count\" for only how many new\n\
          # messages came, so nothing can be read on a shared screen.\n\
          # show = \"sender-and-subject\"\n\
+         # Mail the Split Inbox puts in Other (newsletters, notifications, receipts) comes\n\
+         # quietly; true notifies for it too.\n\
+         # other = false\n\
          \n\
          [background]\n\
-         # Closing the window keeps Sealwax running, so mail still syncs and notifications\n\
+         # Closing the window keeps Pronto running, so mail still syncs and notifications\n\
          # still come; Quit (Ctrl+Q) stops it. false makes closing the window quit.\n\
          # enabled = true\n\
          \n\
@@ -751,9 +920,21 @@ pub fn default_config_file() -> String {
          # The order of a conversation's messages: \"oldest-first\", or \"newest-first\" to show\n\
          # the latest reply at the top.\n\
          # conversation_order = \"oldest-first\"\n\
-         # Whom Reply (r, Ctrl+R) answers: \"sender\", or \"all\" to answer everyone the\n\
-         # message went to, as Reply All does; Reply to Sender then answers the sender alone.\n\
-         # reply = \"sender\"\n"
+         # Whom Enter in a conversation (and a click in its reply box) answers: \"all\",\n\
+         # everyone the message went to, as Reply All (a) does, or \"sender\", as Reply (r)\n\
+         # does.\n\
+         # reply = \"all\"\n\
+         \n\
+         [compose]\n\
+         # Seconds a message you send waits before it goes, while Undo (z, Ctrl+Z, the toast)\n\
+         # can take it back: 0 sends at once, at most {MAX_UNDO_SEND_SECONDS}.\n\
+         # undo_send_seconds = {DEFAULT_UNDO_SEND_SECONDS}\n\
+         \n\
+         [inbox]\n\
+         # The Split Inbox: the Inbox (and All Inboxes) on two tabs, Important for mail from\n\
+         # people and Other for newsletters, notifications and receipts; Tab switches them.\n\
+         # false shows one Inbox. Split Inbox in the command palette switches it too.\n\
+         # split = true\n"
     )
 }
 
@@ -775,19 +956,22 @@ mod tests {
         assert_eq!(Config::parse("# only comments\n"), Ok(Config::default()));
         let defaults = Config::default();
         assert_eq!(defaults.appearance.corner_radius, CornerRadius::Auto);
-        assert_eq!(defaults.appearance.chrome_font, ChromeFont::Omarchy);
-        assert_eq!(defaults.appearance.reading_font, ReadingFont::Sans);
+        assert_eq!(defaults.appearance.palette, PaletteChoice::Adwaita);
+        assert_eq!(defaults.appearance.chrome_font, ChromeFont::Adwaita);
+        assert_eq!(defaults.appearance.reading_font, ReadingFont::Adwaita);
         assert_eq!(defaults.oauth, OAuth::default());
     }
 
     #[test]
     fn reads_every_setting() {
-        let text = "[appearance]\ncorner_radius = 8\nchrome_font = \"sans\"\n\
-                    reading_font = \"mono\"\n\n[oauth.microsoft]\nclient_id = \" id.example \"\n";
+        let text = "[appearance]\npalette = \"tokyo-night\"\ncorner_radius = 8\n\
+                    chrome_font = \"sans\"\nreading_font = \"mono\"\n\n[oauth.microsoft]\n\
+                    client_id = \" id.example \"\n";
         let config = Config::parse(text).unwrap();
         assert_eq!(
             config.appearance,
             Appearance {
+                palette: PaletteChoice::TokyoNight,
                 corner_radius: CornerRadius::Px(8),
                 chrome_font: ChromeFont::Sans,
                 reading_font: ReadingFont::Mono,
@@ -830,11 +1014,24 @@ mod tests {
         );
         assert_eq!(
             errors("[appearance]\nchrome_font = \"serif\"\n"),
-            ["line 2, column 15: chrome_font is \"omarchy\" or \"sans\", not \"serif\""]
+            [
+                "line 2, column 15: chrome_font is \"adwaita\", \"omarchy\" or \"sans\", not \
+                 \"serif\""
+            ]
         );
         assert_eq!(
             errors("[appearance]\nreading_font = true\n"),
-            ["line 2, column 16: reading_font is \"sans\" or \"mono\", not a boolean"]
+            [
+                "line 2, column 16: reading_font is \"adwaita\", \"sans\" or \"mono\", not a \
+                 boolean"
+            ]
+        );
+        assert_eq!(
+            errors("[appearance]\npalette = \"nord\"\n"),
+            [
+                "line 2, column 11: palette is \"adwaita\", \"tokyo-night\" or \"omarchy\", not \
+                 \"nord\""
+            ]
         );
         assert_eq!(
             errors("[appearance]\ncorner_radios = 4\n"),
@@ -857,7 +1054,10 @@ mod tests {
         );
         assert_eq!(
             errors("[oauth.yahoo]\n"),
-            ["line 1, column 8: unknown provider oauth.yahoo; Sealwax signs in with microsoft"]
+            [
+                "line 1, column 8: unknown provider oauth.yahoo; Pronto signs in with microsoft \
+                 or google"
+            ]
         );
         assert_eq!(
             errors("[oauth.microsoft]\nclient_secret = \"x\"\n"),
@@ -921,6 +1121,35 @@ mod tests {
         let config = Config::parse(&uncommented).unwrap();
         assert_eq!(config.appearance, Appearance::default());
         assert!(config.oauth.microsoft.client_id.is_some());
+        assert!(config.oauth.google.client_id.is_some());
+        assert!(config.oauth.google.client_secret.is_some());
+    }
+
+    #[test]
+    fn google_takes_a_client_id_and_secret_and_never_shows_them() {
+        let config = Config::parse(
+            "[oauth.google]\nclient_id = \" 123-abc.apps.googleusercontent.com \"\n\
+             client_secret = \" GOCSPX-shh \"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.oauth.google.client_id.as_deref(),
+            Some("123-abc.apps.googleusercontent.com")
+        );
+        assert_eq!(
+            config.oauth.google.client_secret.as_deref(),
+            Some("GOCSPX-shh")
+        );
+        assert_eq!(config.oauth.microsoft, OAuthClient::default());
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("GOCSPX"), "{shown}");
+        assert!(!shown.contains("googleusercontent"), "{shown}");
+        let config = Config::parse("[oauth.google]\nclient_secret = \"\"\n").unwrap();
+        assert_eq!(config.oauth.google, OAuthClient::default());
+        assert_eq!(
+            errors("client_secret = \"x\"\n"),
+            ["line 1, column 1: client_secret belongs in [oauth.google]; put it under that line"]
+        );
     }
 
     #[test]
@@ -1014,7 +1243,13 @@ mod tests {
 
     #[test]
     fn whom_reply_answers() {
-        assert_eq!(Config::default().reader.reply, DefaultReply::Sender);
+        // Superhuman's Enter, the fork's default since phase C (it was the sender).
+        assert_eq!(Config::default().reader.reply, DefaultReply::All);
+        assert_eq!(
+            Config::parse("").unwrap().reader.reply,
+            DefaultReply::All,
+            "no config.toml"
+        );
         let config = Config::parse("[reader]\nreply = \"all\"\n").unwrap();
         assert_eq!(config.reader.reply, DefaultReply::All);
         assert_eq!(
@@ -1031,6 +1266,42 @@ mod tests {
             errors("reply = \"all\"\n"),
             ["line 1, column 1: reply belongs in [reader]; put it under that line"]
         );
+    }
+
+    #[test]
+    fn the_undo_window_of_a_send() {
+        assert_eq!(Config::default().compose.undo_send_seconds, 10);
+        let seconds = |text: &str| Config::parse(text).unwrap().compose.undo_send_seconds;
+        assert_eq!(seconds("[compose]\nundo_send_seconds = 0\n"), 0);
+        assert_eq!(seconds("[compose]\nundo_send_seconds = 30\n"), 30);
+        assert_eq!(
+            errors("[compose]\nundo_send_seconds = 31\n"),
+            [
+                "line 2, column 21: undo_send_seconds is a whole number of seconds from 0 to 30, \
+                 not 31"
+            ]
+        );
+        assert_eq!(
+            errors("[compose]\nundo_send_seconds = \"10\"\n"),
+            [
+                "line 2, column 21: undo_send_seconds is a whole number of seconds from 0 to 30, \
+                 not \"10\""
+            ]
+        );
+        assert_eq!(
+            errors("undo_send_seconds = 5\n"),
+            ["line 1, column 1: undo_send_seconds belongs in [compose]; put it under that line"]
+        );
+        assert_eq!(
+            errors("[compose]\nundo_send_second = 5\n"),
+            [
+                "line 2, column 1: unknown setting undo_send_second in [compose]; did you mean \
+                 undo_send_seconds?"
+            ]
+        );
+        let file = default_config_file();
+        assert!(file.contains("[compose]\n"), "{file}");
+        assert!(file.contains("# undo_send_seconds = 10\n"), "{file}");
     }
 
     #[test]
@@ -1051,6 +1322,7 @@ mod tests {
             Notifications {
                 enabled: false,
                 content: NotificationContent::Count,
+                other: false,
             }
         );
         assert_eq!(config.background, Background { enabled: false });
@@ -1091,6 +1363,34 @@ mod tests {
             errors("[notification]\n"),
             ["line 1, column 2: unknown section notification; did you mean notifications?"]
         );
+    }
+
+    #[test]
+    fn the_split_inbox_and_its_quiet_other_side() {
+        let defaults = Config::default();
+        assert!(defaults.inbox.split, "on by default");
+        assert!(!defaults.notifications.other, "Other is quiet by default");
+        let config =
+            Config::parse("[inbox]\nsplit = false\n\n[notifications]\nother = true\n").unwrap();
+        assert!(!config.inbox.split);
+        assert!(config.notifications.other);
+        assert!(config.notifications.enabled);
+        assert_eq!(
+            errors("[inbox]\nsplit = \"yes\"\n"),
+            ["line 2, column 9: split is true or false, not \"yes\""]
+        );
+        assert_eq!(
+            errors("[inbox]\nsplits = true\n"),
+            ["line 2, column 1: unknown setting splits in [inbox]; did you mean split?"]
+        );
+        assert_eq!(
+            errors("split = false\n"),
+            ["line 1, column 1: split belongs in [inbox]; put it under that line"]
+        );
+        let file = default_config_file();
+        assert!(file.contains("[inbox]\n"), "{file}");
+        assert!(file.contains("# split = true\n"), "{file}");
+        assert!(file.contains("# other = false\n"), "{file}");
     }
 
     #[test]

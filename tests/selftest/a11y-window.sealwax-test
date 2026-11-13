@@ -4,8 +4,9 @@
 # (real key presses through Broadway) go through the panes left to right and come back where
 # they started: folders, then the list's bar and the list, then the reader's toolbar and the
 # conversation, also with no message open. The folder list and the message list are one Tab
-# stop each (Up and Down move inside them). Every message is fictional.
-# Run: tools/headless.sh 71 target/debug/sealwax --self-test tests/selftest/a11y-window.sealwax-test
+# stop each (Up and Down move inside them). In the harness's Split with the sidebar shown
+# (focused.sealwax-test has the Focused layout's). Every message is fictional.
+# Run: tools/headless.sh 71 target/debug/pronto --self-test tests/selftest/a11y-window.sealwax-test
 
 desktop tiling
 fixtures --count 40 --seed 9 --folders spread
@@ -23,26 +24,29 @@ assert-accessible-role folder-list list
 assert-accessible-name folder-list Folders
 assert-accessible-name message-list Messages
 assert-accessible-name list-search "Search mail"
-assert-accessible-role chip-all toggle-button
-assert-accessible-state chip-all pressed true
-assert-accessible-state chip-unread pressed false
+assert-accessible-role list-sidebar toggle-button
+assert-accessible-name list-sidebar Sidebar
+assert-accessible-state list-sidebar pressed true
+assert-accessible-name list-search-button Search
+assert-accessible-name list-compose "New message"
 assert-accessible-name list-menu "Main menu"
 assert-accessible-name reader-archive Archive
 assert-accessible-state reader-previous disabled true
 
-# Tab from the folder shown: the sidebar's footer, the list's bar, the list, the reader's toolbar
-# and conversation, and round to the sidebar's compose button and the folder list again.
+# Tab from the folder shown: the sidebar's footer, the list's bar (the sidebar button, search,
+# compose, the menu), the list, the reader's toolbar and conversation, and round to the
+# sidebar's compose button and the folder list again.
 focus folder:folder-1
 assert-focus folder:folder-1
 tab-chain window forward 80
-assert-tab-chain folder:folder-1,config,list-menu,list-search,chip-all,chip-attachments,message-list,reader-archive,reader-next,reader-subject,quick-reply-text,compose,folder:folder-1
+assert-tab-chain folder:folder-1,config,list-sidebar,list-search-button,list-compose,list-menu,message-list,reader-archive,reader-next,reader-subject,quick-reply-text,compose,folder:folder-1
 tab-chain window backward 80
-assert-tab-chain folder:folder-1,compose,quick-reply-text,reader-subject,reader-next,reader-archive,message-list,chip-attachments,chip-all,list-search,list-menu,config,folder:folder-1
+assert-tab-chain folder:folder-1,compose,quick-reply-text,reader-subject,reader-next,reader-archive,message-list,list-menu,list-compose,list-search-button,list-sidebar,config,folder:folder-1
 
-# With no message open, Tab goes on past the reader's Next button to the sidebar, and Shift+Tab
-# round the start reaches the reader's toolbar (2026-10-08: the reader's empty page took the
-# press and kept the focus on Next for good): with messages but none selected, and in an empty
-# folder, whose list is no stop.
+# With no message open the reader's toolbar hides (the Superhuman pass), so Tab goes from the
+# list on to the sidebar and Shift+Tab round the start comes back to the list (2026-10-08: the
+# reader's empty page once took the press and kept the focus on Next for good): with messages
+# but none selected, and in an empty folder, whose list is no stop and shows alone.
 folder sent
 folder inbox
 list-wait
@@ -50,23 +54,24 @@ assert-list-selected none
 assert-reader-page empty
 focus folder:folder-1
 tab-chain window forward 80
-assert-tab-chain folder:folder-1,config,list-menu,list-search,chip-all,chip-attachments,message-list,reader-more,reader-previous,reader-next,compose,folder:folder-1
+assert-tab-chain folder:folder-1,config,list-sidebar,list-search-button,list-compose,list-menu,message-list,compose,folder:folder-1
 tab-chain window backward 80
-assert-tab-chain folder:folder-1,compose,reader-next,reader-previous,reader-more,message-list,chip-attachments,chip-all,list-search,list-menu,config,folder:folder-1
+assert-tab-chain folder:folder-1,compose,message-list,list-menu,list-compose,list-search-button,list-sidebar,config,folder:folder-1
 focus list
 tab-chain window forward 80
-assert-tab-chain message-list,reader-more,reader-previous,reader-next,compose,folder:folder-1,config,list-search,message-list
+assert-tab-chain message-list,compose,folder:folder-1,config,list-sidebar,list-search-button,list-compose,list-menu,message-list
 tab-chain window backward 80
-assert-tab-chain message-list,chip-attachments,list-search,config,folder:folder-1,compose,reader-next,reader-previous,reader-more,message-list
+assert-tab-chain message-list,list-menu,list-compose,list-search-button,list-sidebar,config,folder:folder-1,compose,message-list
 folder trash
 list-wait
 assert-list-empty "No messages"
 assert-reader-page empty
+assert-shown reader false
 focus folder:folder-6
 tab-chain window forward 80
-assert-tab-chain folder:folder-6,config,list-menu,list-search,chip-all,chip-attachments,reader-more,reader-previous,reader-next,compose,folder:folder-6
+assert-tab-chain folder:folder-6,config,list-sidebar,list-search-button,list-compose,list-menu,compose,folder:folder-6
 tab-chain window backward 80
-assert-tab-chain folder:folder-6,compose,reader-next,reader-previous,reader-more,chip-attachments,chip-all,list-search,list-menu,config,folder:folder-6
+assert-tab-chain folder:folder-6,compose,list-menu,list-compose,list-search-button,list-sidebar,config,folder:folder-6
 folder inbox
 list-wait
 list-select 0
@@ -167,7 +172,7 @@ key Menu
 assert-row-menu open
 assert-accessible window
 assert-accessible-name message-menu-archive Archive
-assert-tooltip message-menu-junk-sender "Only accounts set up in Sealwax have rules"
+assert-tooltip message-menu-junk-sender "Only accounts set up in Pronto have rules"
 key Escape
 assert-row-menu closed
 assert-focus list
@@ -183,9 +188,10 @@ assert-accessible window
 key Escape
 assert-select-mode false
 
-# Half: the rail · list · reader, with a message shown and the toasts of the steps above gone.
+# Medium: list · reader, the sidebar hidden, with a message shown and the toasts of the steps
+# above gone.
 resize 1100 900
-assert-layout rail
+assert-layout medium
 setup-dismiss-toasts
 list-select 0
 wait-until assert-reader-page message
@@ -194,29 +200,26 @@ wait-until assert-reader-selected
 assert-accessible window
 focus list
 tab-chain window forward 80
-assert-tab-chain message-list,reader-archive,quick-reply-text,compose,rail:all-inboxes,rail-config,list-menu,list-search,message-list
+assert-tab-chain message-list,reader-archive,quick-reply-text,list-sidebar,list-search-button,list-compose,list-menu,message-list
 
-# Narrow: one pane at a time, with back buttons.
+# Narrow: one pane at a time, with the sidebar over the list and Back in the reader.
 resize 800 900
 assert-layout narrow
 assert-accessible window
 focus list
 tab-chain window forward 40
-assert-tab-chain message-list,list-back,list-compose,list-menu,list-search,chip-all,message-list
+assert-tab-chain message-list,list-sidebar,list-search-button,list-compose,list-menu,message-list
 action nav.pane::folders
 assert-pane folders
 assert-accessible window
 action nav.pane::reader
 assert-pane reader
 assert-accessible window
-# Back to List (Escape, u) as the reader's back button says: the list, with the focus in it.
-assert-tooltip reader-back "Back to the list (Escape, u)"
-focus reader
-key u
-assert-pane list
-assert-focus list
-action nav.pane::reader
+# Back to List (Escape) as the reader's back button says: the list, with the focus in it. The
+# focus is in the message's WebView, which hands a key it doesn't use back to the window once
+# its web process has answered: a moment later under load, so the checks wait for it.
+assert-tooltip reader-back "Back to the list (Escape)"
 focus reader
 key Escape
-assert-pane list
-assert-focus list
+wait-until assert-pane list
+wait-until assert-focus list

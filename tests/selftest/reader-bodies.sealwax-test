@@ -3,14 +3,18 @@
 # engine for its body and shows the snippet under "Downloading…"; the store's change event, or
 # the engine's answer, shows the message in place, the list's selection kept. A failure says why
 # with Retry, and a message being downloaded isn't asked for twice. Every message is fictional.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/reader-bodies.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/reader-bodies.sealwax-test
 
 desktop tiling
 resize 1440 900
 engine-attach
 mail-account Bodies
+# The window opens the account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 bodies-add plain simple remote newsletter
 assert-list-count 4
+# Its first rows in, the list has the Inbox's end in view and asks for older mail.
+engine-expect load-older
 
 # Selected: the reader asks for the body and shows the preview meanwhile.
 list-select 0
@@ -55,7 +59,8 @@ engine-expect fetch-bodies count=1
 bodies-store simple
 engine-reply body-fetched ok
 wait-until assert-body html-themed
-assert-body-text "Two small comments"
+# The body shows in place: WebKit commits its page a little after the reader shows it.
+wait-until assert-body-text "Two small comments"
 assert-list-selected 1
 assert-labelled
 

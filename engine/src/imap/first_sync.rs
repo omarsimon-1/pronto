@@ -2,7 +2,8 @@
 //! (ML-043): EXAMINE, then newest-first batches of UIDs from the top down to the window's floor,
 //! each FETCHed, ingested in one store transaction and then recorded as the new floor, so an
 //! interrupted sync continues below the last committed batch. The next batch is fetched while
-//! the store commits the previous one. Older mail loads on request (`sync::load_older`).
+//! the store commits the previous one; the first batches are small, so the newest rows show at
+//! once. Older mail loads on request (`sync::load_older`).
 
 use super::connection::Connection;
 use super::error::{ImapError, SyncError};
@@ -20,6 +21,28 @@ use std::time::Instant;
 
 /// UIDs per FETCH and per store transaction (the writer's own limit is 200).
 pub const BATCH: usize = 200;
+
+/// The first batches of a folder's first sync, before [`BATCH`] at a time (the fork's Superhuman
+/// pass): its newest rows show after 25 headers, not 200 (Gmail sends about 15 headers a
+/// second: under 2 s instead of 13).
+const RAMP: [usize; 2] = [25, 100];
+
+/// `uids` (newest first) in the first sync's batches: [`RAMP`] while the folder shows nothing
+/// yet, then [`BATCH`] each.
+fn batches(uids: &[u32], shown: bool) -> Vec<&[u32]> {
+    let ramp: &[usize] = if shown { &[] } else { &RAMP };
+    let mut out = Vec::new();
+    let mut rest = uids;
+    for size in ramp.iter().copied().chain(std::iter::repeat(BATCH)) {
+        if rest.is_empty() {
+            break;
+        }
+        let (batch, tail) = rest.split_at(size.min(rest.len()));
+        out.push(batch);
+        rest = tail;
+    }
+    out
+}
 
 /// Headers stored of all the folder holds, newest first; for `Event::SyncProgress`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +134,7 @@ pub async fn first_sync_with(
         return Err(SyncError::NotSelectable);
     }
     let mut view = view::examine(conn, &state.name_raw).await?;
+    view.categories = view::categorizes(conn, &state);
     let mut reset = None;
     if state
         .uidvalidity
@@ -215,14 +239,20 @@ pub(crate) async fn run(
     });
 
     let mut pending: Option<Pending> = None;
-    for batch in uids.chunks(BATCH) {
+    for batch in batches(&uids, stored > 0) {
         let previous = async {
             match pending.take() {
                 Some(pending) => commit(store, folder, pending).await.map(Some),
                 None => Ok(None),
             }
         };
-        let (fetched, committed) = tokio::join!(fetch_batch(conn, batch, view), previous);
+        // In Gmail's INBOX the batch's categories come with it (`view::primary`).
+        let fetch = async {
+            let fetched = fetch_batch(conn, batch, view).await?;
+            let primary = view::primary(conn, batch, view).await?;
+            Ok::<_, ImapError>((fetched, primary))
+        };
+        let (fetched, committed) = tokio::join!(fetch, previous);
         if let Some(count) = committed? {
             stored += count;
             report.fetched += count;
@@ -231,8 +261,8 @@ pub(crate) async fn run(
                 total: report.total,
             });
         }
-        let fetched = fetched?;
-        let messages = tokio::task::spawn_blocking(move || {
+        let (fetched, primary) = fetched?;
+        let mut messages = tokio::task::spawn_blocking(move || {
             fetched
                 .into_iter()
                 .map(|found| fetch::message(folder, found))
@@ -240,6 +270,7 @@ pub(crate) async fn run(
         })
         .await
         .map_err(|_| SyncError::Parse)?;
+        view::categorize(&mut messages, primary.as_ref());
         report.batches += 1;
         let batch_floor = batch.last().copied().unwrap_or(floor);
         floor = floor.min(batch_floor);
@@ -273,4 +304,33 @@ pub(crate) async fn run(
         "first sync done"
     );
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sizes(uids: &[u32], shown: bool) -> Vec<usize> {
+        batches(uids, shown)
+            .iter()
+            .map(|batch| batch.len())
+            .collect()
+    }
+
+    #[test]
+    fn a_first_sync_ramps_up_to_full_batches() {
+        let uids: Vec<u32> = (1..=700).rev().collect();
+        assert_eq!(sizes(&uids, false), [25, 100, 200, 200, 175]);
+        assert_eq!(batches(&uids, false)[0][0], 700, "newest first");
+        assert_eq!(
+            sizes(&uids, true),
+            [200, 200, 200, 100],
+            "resumed: rows show"
+        );
+        assert_eq!(sizes(&uids[..10], false), [10]);
+        assert_eq!(sizes(&uids[..60], false), [25, 35]);
+        assert!(batches(&[], false).is_empty());
+        let all: Vec<u32> = batches(&uids, false).concat();
+        assert_eq!(all, uids, "every UID once, in order");
+    }
 }

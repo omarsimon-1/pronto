@@ -10,7 +10,7 @@
 //! only the users `ops` (direct) and `opsfault` (through the fault proxy), whose folders they
 //! empty and fill with synthetic messages:
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test ops_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -33,7 +33,7 @@ use sealwax_infrastructure::store::{FolderSync, QueueTriage, Queued, Store};
 use snapshot::Rng;
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use testbed_client::Client;
+use testbed_client::{Client, Failure};
 use testbed_engine::{TestEngine, converge, counts_converge, until};
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -71,9 +71,9 @@ fn config(moves: bool) -> SyncConfig {
     }
 }
 
-/// Seeds per scenario: `SEALWAX_OPS_SEEDS`, else `default`.
+/// Seeds per scenario: `PRONTO_OPS_SEEDS`, else `default`.
 fn seeds(default: u64) -> u64 {
-    std::env::var("SEALWAX_OPS_SEEDS")
+    std::env::var("PRONTO_OPS_SEEDS")
         .ok()
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(default)
@@ -945,26 +945,43 @@ async fn other_change(
         return "append";
     }
     if roll < 50 {
-        test.select("INBOX").await.unwrap();
-        let uids = test.uids().await.unwrap();
-        if uids.is_empty() {
-            return "flags";
-        }
-        let picks: Vec<u32> = (0..1 + rng.below(3)).map(|_| *rng.pick(&uids)).collect();
         let sign = if rng.chance(50) { "+" } else { "-" };
         let flag = rng.pick(&OTHER_FLAGS);
-        test.store(&picks, &format!("{sign}FLAGS ({flag})"))
-            .await
-            .unwrap();
-        return "flags";
+        let count = 1 + rng.below(3);
+        // Stalwart 0.16 now and then refuses a flag change on messages the user's triage moves
+        // away meanwhile (1 run in 6): picked again once, then left alone. Only this client's
+        // own flags are at stake, and the server keeps what it refused unchanged.
+        for attempt in 0..2 {
+            test.select("INBOX").await.unwrap();
+            let uids = test.uids().await.unwrap();
+            if uids.is_empty() {
+                return "flags";
+            }
+            let picks: Vec<u32> = (0..count).map(|_| *rng.pick(&uids)).collect();
+            match test.store(&picks, &format!("{sign}FLAGS ({flag})")).await {
+                Ok(()) => return "flags",
+                Err(Failure::No(text)) => {
+                    println!("{seed}: the other client's flag change refused ({attempt}): {text}");
+                }
+                Err(other) => panic!("the other client's flag change: {other:?}"),
+            }
+        }
+        return "flags-refused";
     }
     if roll < 55 {
         test.select("INBOX").await.unwrap();
         let sign = if rng.chance(50) { "+" } else { "-" };
-        test.run(&format!("UID STORE 1:* {sign}FLAGS (\\Answered)"), |_| {})
+        return match test
+            .run(&format!("UID STORE 1:* {sign}FLAGS (\\Answered)"), |_| {})
             .await
-            .unwrap();
-        return "flag-storm";
+        {
+            Ok(()) => "flag-storm",
+            Err(Failure::No(text)) => {
+                println!("{seed}: the other client's flag storm refused: {text}");
+                "flag-storm-refused"
+            }
+            Err(other) => panic!("the other client's flag storm: {other:?}"),
+        };
     }
     let from = wire(rng.pick(&OTHER));
     let to = wire(OTHER.iter().find(|name| wire(name) != from).unwrap());

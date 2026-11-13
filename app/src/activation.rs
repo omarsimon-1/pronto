@@ -1,7 +1,7 @@
-//! D-Bus activation for a command line. When no Sealwax runs yet, a command line — from a
+//! D-Bus activation for a command line. When no Pronto runs yet, a command line — from a
 //! terminal, or `xdg-open mailto:…` running the desktop file's `Exec` line — first asks the
 //! session bus to start the installed service (`StartServiceByName`, served by the `.service`
-//! file) and then hands its command line to that instance as a remote. So the running Sealwax is
+//! file) and then hands its command line to that instance as a remote. So the running Pronto is
 //! always the one the bus started, as when a launcher activates it (`DBusActivatable=true`), and
 //! closing the terminal or the browser that ran the command doesn't end it.
 //!
@@ -24,7 +24,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// How the command line reaches a primary instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// A Sealwax with this id runs already; GApplication forwards the command line to it.
+    /// A Pronto with this id runs already; GApplication forwards the command line to it.
     Running,
     /// The bus started the service from its `.service` file.
     Activated,
@@ -49,7 +49,7 @@ pub fn prepare(app_id: &str) -> Outcome {
         Ok(()) => {
             tracing::debug!(
                 ms = started.elapsed().as_secs_f64() * 1e3,
-                "the session bus started Sealwax"
+                "the session bus started Pronto"
             );
             Outcome::Activated
         }

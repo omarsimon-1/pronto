@@ -101,7 +101,7 @@ pub fn queue(
     waiting
 }
 
-/// The certificate banner's Details: why Sealwax stopped, what to do, and the account's
+/// The certificate banner's Details: why Pronto stopped, what to do, and the account's
 /// servers. Only a server on this computer can be trusted with its own certificate, which the
 /// assistant pins when the account is added (issue #9); a new one goes into `accounts.toml` by
 /// hand. Retry reconnects.
@@ -134,16 +134,16 @@ fn details_text(again: &Again) -> (String, String) {
             security_name(endpoint.security)
         )
     };
-    let heading = format!("Why Sealwax stopped connecting to {}", again.name);
+    let heading = format!("Why Pronto stopped connecting to {}", again.name);
     let pinned = [&again.incoming, &again.smtp]
         .into_iter()
         .find(|endpoint| endpoint.pinned().is_some());
     let body = match pinned {
         Some(endpoint) => format!(
-            "Sealwax checks a server's certificate before it signs in, and {host} no longer \
+            "Pronto checks a server's certificate before it signs in, and {host} no longer \
              shows the certificate you trusted for it. {host} is on this computer: the program \
              that serves it, such as Proton Mail Bridge, may have made a new one, for instance \
-             after it was reinstalled. Sealwax never signs in to a server it can't verify.\n\n\
+             after it was reinstalled. Pronto never signs in to a server it can't verify.\n\n\
              To trust the new certificate, put its SHA-256 fingerprint in the server's \
              certificate line in accounts.toml (the user guide shows how), then Retry.\n\n\
              {imap}\n{smtp}",
@@ -152,10 +152,10 @@ fn details_text(again: &Again) -> (String, String) {
             smtp = server("Outgoing mail (SMTP)", &again.smtp),
         ),
         None => format!(
-            "Sealwax checks a server's certificate before it signs in, and {host}'s no longer \
+            "Pronto checks a server's certificate before it signs in, and {host}'s no longer \
          verifies. It may have changed or expired, or a network that inspects secure \
          connections, as some workplace, school and hotel networks do, may stand in between. \
-         Sealwax never signs in to a server it can't verify.\n\nTry another network, then Retry. If it keeps happening, ask your provider \
+         Pronto never signs in to a server it can't verify.\n\nTry another network, then Retry. If it keeps happening, ask your provider \
          about its certificate.\n\n{imap}\n{smtp}",
             host = again.incoming.host,
             imap = server(incoming_name(again.receive), &again.incoming),
@@ -358,6 +358,7 @@ mod tests {
             address: account.address.clone(),
             incoming: bridge.clone(),
             receive: account.receive,
+            auth: account.auth,
             smtp: Endpoint {
                 port: 1025,
                 ..bridge
@@ -381,6 +382,7 @@ mod tests {
             address: account.address.clone(),
             incoming: account.incoming.clone(),
             receive: account.receive,
+            auth: account.auth,
             smtp: Endpoint {
                 port: 587,
                 security: Security::StartTls,
@@ -388,7 +390,7 @@ mod tests {
             },
         };
         let (heading, body) = details_text(&again);
-        assert_eq!(heading, "Why Sealwax stopped connecting to Work");
+        assert_eq!(heading, "Why Pronto stopped connecting to Work");
         assert!(body.contains("imap.work.example.test's no longer verifies"));
         assert!(body.ends_with(
             "Incoming mail (IMAP): imap.work.example.test, port 993, TLS\n\

@@ -1,6 +1,6 @@
-//! Fonts and the type scale (DESIGN.md "Typography"): the chrome uses the Omarchy font
-//! (fontconfig's `monospace`), message text uses `sans-serif`, and sizes follow
-//! omarchy-shell's scale from `[font] base-size`.
+//! Fonts and the type scale (DESIGN.md "Typography"): the chrome and message text use Adwaita
+//! Sans (the Omarchy font, fontconfig's `monospace`, or `sans-serif` when `config.toml` asks),
+//! weights tuned per mode, and sizes follow omarchy-shell's scale from `[font] base-size`.
 
 use super::shell::{ShellValues, get, parse_int};
 use std::str::FromStr;
@@ -12,6 +12,20 @@ pub const MAX_BASE_SIZE: u32 = 64;
 /// Message text at the default base size (DESIGN.md: ≈ 15 px) and its line height.
 pub const READING_SIZE: u32 = 15;
 pub const READING_LINE_HEIGHT: f64 = 1.55;
+
+/// GNOME's interface font since GNOME 48 (`adwaita-fonts`): the default chrome and reading
+/// family. fontconfig falls back to `sans-serif` where it isn't installed.
+pub const ADWAITA_SANS: &str = "Adwaita Sans";
+
+/// Font weights by role (`--sw-weight-<name>`), for dark themes, then light ones. Text a shade
+/// heavier than Pango's 400 holds up on dense HiDPI panels; light text on a dark surface reads
+/// heavier than dark text on a light one, so dark themes take a little less.
+pub const FONT_WEIGHTS: [(&str, [u32; 2]); 4] = [
+    ("regular", [450, 500]),
+    ("medium", [550, 600]),
+    ("bold", [700, 700]),
+    ("heavy", [800, 800]),
+];
 
 /// Text sizes in px. At base 12: caption 10, small 11, body 12, subtitle 13, title 14,
 /// heading 16, display 24; message text 15.
@@ -74,18 +88,21 @@ impl Default for TypeScale {
     }
 }
 
-/// `config.toml`'s chrome font: the Omarchy font (default) or sans-serif.
+/// `config.toml`'s chrome font: Adwaita Sans (default), the Omarchy font or sans-serif.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ChromeFont {
     #[default]
+    Adwaita,
     Omarchy,
     Sans,
 }
 
-/// `config.toml`'s reading font for message text: sans-serif (default) or the Omarchy font.
+/// `config.toml`'s reading font for message text: Adwaita Sans (default), sans-serif or the
+/// Omarchy font.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReadingFont {
     #[default]
+    Adwaita,
     Sans,
     Mono,
 }
@@ -93,12 +110,15 @@ pub enum ReadingFont {
 impl FromStr for ChromeFont {
     type Err = String;
 
-    /// `omarchy` or `sans`.
+    /// `adwaita`, `omarchy` or `sans`.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text.trim().to_ascii_lowercase().as_str() {
+            "adwaita" => Ok(Self::Adwaita),
             "omarchy" => Ok(Self::Omarchy),
             "sans" => Ok(Self::Sans),
-            _ => Err(format!("expected \"omarchy\" or \"sans\", not {text:?}")),
+            _ => Err(format!(
+                "expected \"adwaita\", \"omarchy\" or \"sans\", not {text:?}"
+            )),
         }
     }
 }
@@ -106,12 +126,15 @@ impl FromStr for ChromeFont {
 impl FromStr for ReadingFont {
     type Err = String;
 
-    /// `sans` or `mono`.
+    /// `adwaita`, `sans` or `mono`.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text.trim().to_ascii_lowercase().as_str() {
+            "adwaita" => Ok(Self::Adwaita),
             "sans" => Ok(Self::Sans),
             "mono" => Ok(Self::Mono),
-            _ => Err(format!("expected \"sans\" or \"mono\", not {text:?}")),
+            _ => Err(format!(
+                "expected \"adwaita\", \"sans\" or \"mono\", not {text:?}"
+            )),
         }
     }
 }
@@ -149,20 +172,21 @@ pub struct Fonts {
 
 impl Fonts {
     pub fn new(families: &FontFamilies, chrome: ChromeFont, reading: ReadingFont) -> Self {
-        let pick = |mono: bool| {
-            if mono {
-                families.monospace.clone()
-            } else {
-                families.sans.clone()
-            }
+        let chrome_family = match chrome {
+            ChromeFont::Adwaita => ADWAITA_SANS.to_owned(),
+            ChromeFont::Omarchy => families.monospace.clone(),
+            ChromeFont::Sans => families.sans.clone(),
         };
-        let chrome_is_mono = chrome == ChromeFont::Omarchy;
-        let reading_is_mono = reading == ReadingFont::Mono;
+        let reading_family = match reading {
+            ReadingFont::Adwaita => ADWAITA_SANS.to_owned(),
+            ReadingFont::Sans => families.sans.clone(),
+            ReadingFont::Mono => families.monospace.clone(),
+        };
         Self {
-            chrome: pick(chrome_is_mono),
-            chrome_is_mono,
-            reading: pick(reading_is_mono),
-            reading_is_mono,
+            chrome: chrome_family,
+            chrome_is_mono: chrome == ChromeFont::Omarchy,
+            reading: reading_family,
+            reading_is_mono: reading == ReadingFont::Mono,
             monospace: families.monospace.clone(),
             sans: families.sans.clone(),
         }
@@ -259,7 +283,16 @@ mod tests {
             ("Test Sans", "Test Mono")
         );
         assert!(fonts.reading_is_mono);
+        let fonts = Fonts::new(&families, ChromeFont::default(), ReadingFont::default());
+        assert_eq!(
+            (fonts.chrome.as_str(), fonts.reading.as_str()),
+            (ADWAITA_SANS, ADWAITA_SANS)
+        );
+        assert!(!fonts.chrome_is_mono && !fonts.reading_is_mono);
+        assert_eq!(fonts.sans, "Test Sans");
         assert_eq!("Omarchy".parse(), Ok(ChromeFont::Omarchy));
+        assert_eq!("adwaita".parse(), Ok(ChromeFont::Adwaita));
+        assert_eq!("Adwaita".parse(), Ok(ReadingFont::Adwaita));
         assert_eq!(" mono ".parse(), Ok(ReadingFont::Mono));
         assert!("serif".parse::<ReadingFont>().is_err());
     }

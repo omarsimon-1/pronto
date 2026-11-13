@@ -1,5 +1,5 @@
-//! The keyboard shortcuts dialog (`?`, `h`, Ctrl+?): an AdwShortcutsDialog generated from the
-//! registry and the keymap in use, one section per category.
+//! The keyboard shortcuts dialog (`?`, Ctrl+?, Ctrl+H): an AdwShortcutsDialog generated from
+//! the registry and the keymap in use, one section per category.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -95,12 +95,19 @@ fn keys(bindings: &[Binding]) -> String {
 
 /// Where the keys of `id` work when not anywhere in the window, and whether it exists yet:
 /// `In the message list and the reader`, or `c in the message list and the reader` when the
-/// command also has keys that work anywhere.
+/// command also has keys that work anywhere; a key that yields says where it doesn't.
 pub fn subtitle(id: ActionId, keymap: &Keymap, available: bool) -> String {
     let scoped = keymap.scoped(id);
     let list = Keymap::list_keys(id);
     let anywhere = !keymap.accels(id).is_empty();
     let mut parts = Vec::new();
+    let yielding = keymap.yielding(id);
+    if !yielding.is_empty() {
+        parts.push(format!(
+            "{} anywhere the focused field doesn't use it",
+            keys(&yielding)
+        ));
+    }
     if !scoped.is_empty() {
         let place = place(id.spec().key_scopes);
         if anywhere || !list.is_empty() {
@@ -144,6 +151,14 @@ mod tests {
         assert_eq!(
             subtitle(ActionId::BackToList, &keymap, true),
             "In the reader"
+        );
+        assert_eq!(
+            subtitle(ActionId::CommandPalette, &keymap, true),
+            "Ctrl+K, Ctrl+Shift+P anywhere the focused field doesn't use it"
+        );
+        assert_eq!(
+            subtitle(ActionId::ShowUnreadOnly, &keymap, true),
+            "In the message list"
         );
         assert_eq!(
             subtitle(ActionId::Send, &keymap, false),

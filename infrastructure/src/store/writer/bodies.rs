@@ -3,12 +3,16 @@
 //! sends the bodies used longest ago back to their headers and preview.
 
 use super::{RowChange, Writer, people, removed_positions, view_changes};
-use crate::store::api::{BodyState, BodyUpgrade, ChangeEvent, Evicted, StoreVersion, Upgraded};
+use crate::blobs::BlobStore;
+use crate::store::api::{
+    BlobsDiscarded, BodyState, BodyUpgrade, ChangeEvent, Evicted, StoreVersion, Upgraded,
+};
 use crate::store::{StoreError, codec, compose, fts};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sealwax_domain::model::{Address, BlobKey, FolderId, MessageId};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Bodies evicted per transaction.
 const EVICT_BATCH: usize = 200;
@@ -208,6 +212,42 @@ impl Writer {
             found: true,
             orphaned_blobs,
         })
+    }
+
+    /// Deletes the files of `keys` nothing refers to. The transaction is held over the
+    /// deletions: every commit that adds a reference is this thread's, so none comes between.
+    pub(super) fn discard_blobs(
+        &mut self,
+        blobs: &BlobStore,
+        keys: Vec<BlobKey>,
+        older_than: Option<Duration>,
+    ) -> Result<BlobsDiscarded, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let keys: BTreeSet<BlobKey> = keys.into_iter().collect();
+        let asked = keys.len();
+        let unreferenced = compose::unreferenced(&tx, keys)?;
+        let mut discarded = BlobsDiscarded {
+            referenced: u32::try_from(asked - unreferenced.len()).unwrap_or(u32::MAX),
+            ..BlobsDiscarded::default()
+        };
+        for key in &unreferenced {
+            let removed = match older_than {
+                Some(age) => blobs.remove_if_older(key, age),
+                None => blobs.remove(key),
+            };
+            match removed {
+                Ok(true) => discarded.removed += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "a raw message no row refers to couldn't be deleted");
+                    discarded.failed += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(discarded)
     }
 
     /// Marks the body of `message` used at `at`, for the disk cap's order. Nothing the lists

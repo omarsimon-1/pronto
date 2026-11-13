@@ -1,0 +1,457 @@
+# Remind Me's UI (the fork's phase C, docs/superhuman/remind.md "UI"), in the app's own layout
+# (Focused, conversation rows): h opens the time picker titled "Remind Me" (the presets with
+# their times, Someday, a typed time read live); a choice sends the conversation to Reminders, so
+# it leaves the list at once and the cursor moves on, and the toast's Undo brings it back;
+# several selected go together. The Reminders view (g h, the sidebar's row under the Inbox) lists
+# what waits, the soonest due first and Someday last, its date column saying when; h there
+# changes the time or removes it, Shift+E and the palette's Remove Reminder bring one back now.
+# At its time a conversation comes back to the top of the Inbox with the reminder's clock and a
+# notification, unread or not as it was, and reading or starring it keeps the clock; Done ends
+# it. Someone else's answer while it waits ends the reminder and brings it back beside the
+# answer ("if no reply"). The reader says when a waiting conversation comes back. The final
+# review's fixes: a search dates a waiting conversation by its latest message, the palette
+# lists Go to Reminders once, nothing in Sent can be reminded, the clock's slot only while a
+# conversation is back, reminders back together notify as one count and their notifications
+# go with Done and when notifications are turned off, and the empty Reminders view. The second
+# review's: a new time is the last action with nothing to undo (remind-undo has a send in its
+# undo window), a filter's empty state in the Reminders view is the filter's, the picker's
+# "Tomorrow", and in Sent h and the dimmed clock say why. The picker works on the real clock
+# ("tomorrow 08:00"); the Reminders view and the wake on the list's. Every name and subject is
+# fictional.
+# Run: tools/headless.sh 64 target/debug/pronto --self-test tests/selftest/remind-ui.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+engine-attach
+notify-server
+mail-account Personal
+folder inbox Personal
+triage-mark-read-on-open false
+list-clock 2026-10-29T14:20:00
+mail-add Personal:inbox 6d "Passport renewal" read from=Kari
+mail-add Personal:inbox 5d "Dentist" read from=Ingrid
+mail-add Personal:inbox 4d "Taxes" read from=Marius
+mail-add Personal:inbox 3d "Novel club" read from=Leah
+mail-add Personal:inbox 2d "Lunch on Friday?" read from=Tomas
+mail-add Personal:inbox yesterday "The contract" read from=Ingrid
+mail-add Personal:inbox today "Board meeting" from=Sana
+wait-until assert-list-count 7
+# Nothing is back from Reminders: no row gives the clock a slot.
+assert-reminders-shown none
+assert-row-reminder 0 false
+
+# The rows' quick actions, hovered: Done and Remind Me first, as Superhuman's check and clock,
+# then Delete and Star, as the toolbar and the batch bar have them.
+hover-row 1
+wait-until assert-row-quick 1 true
+assert-quick-order 1 archive,remind,delete,star
+assert-quick-off 1 false
+assert-quick-tooltip 1 remind "Remind Me… (h)"
+
+# h: the picker, its presets with their times and Someday, the field read live.
+list-select 2
+assert-list-row 2 subject "Lunch on Friday?"
+focus list
+key h
+wait-until assert-picker shown true
+assert-picker name remind-picker
+assert-picker title "Remind Me"
+assert-focus picker-search
+assert-picker has "Tomorrow" "Tomorrow 08:00"
+assert-picker lacks "Tomorrow morning"
+assert-picker has "This weekend"
+assert-picker has "Next week"
+assert-picker has "Someday" "no date"
+assert-picker lacks "Remove Reminder"
+picker-type "mon 9"
+assert-picker row 0 "Mon 09:00"
+picker-type never
+assert-picker row 0 "Someday"
+picker-type some
+assert-picker rows 1
+assert-picker row 0 "Someday"
+picker-type banana
+assert-picker row 0 "Not a time Pronto reads: try tomorrow 9am, mon 8:30, in 3 days or nov 5"
+picker-type ""
+key Escape
+assert-picker shown false
+assert-list-count 7
+assert-reminder "Lunch on Friday?" none
+
+# Chosen: it leaves the list at once, the cursor moves on, the toast says when.
+key h
+wait-until assert-picker shown true
+picker-choose "Tomorrow"
+wait-until assert-list-count 6
+wait-until assert-toast "Reminder set for tomorrow 08:00"
+assert-reminder "Lunch on Friday?" waiting
+assert-reminder-at "Lunch on Friday?" "tomorrow 08:00"
+assert-list-selected 2
+assert-list-row 2 subject "Novel club"
+assert-undoable true
+
+# Undo brings it back.
+toast-undo
+wait-until assert-list-count 7
+assert-reminder "Lunch on Friday?" none
+
+# In an open conversation, h sends it away and the next one opens, as Done does.
+list-select 2
+focus list
+key Return
+wait-until assert-pane reader
+key h
+wait-until assert-picker shown true
+picker-shown-in 250
+picker-choose "Tomorrow"
+wait-until assert-list-count 6
+assert-pane reader
+assert-list-selected 2
+assert-list-row 2 subject "Novel club"
+toast-undo
+wait-until assert-list-count 7
+assert-reminder "Lunch on Friday?" none
+key Escape
+wait-until assert-pane list
+
+# Several at once, from the select mode; then Someday.
+list-select 0
+key x
+key j
+key x
+assert-select-mode true
+key h
+wait-until assert-picker shown true
+picker-choose "Tomorrow"
+wait-until assert-list-count 5
+wait-until assert-toast "2 reminders set for tomorrow 08:00"
+assert-reminder "Board meeting" waiting
+assert-reminder "The contract" waiting
+toast-undo
+wait-until assert-list-count 7
+key Escape
+assert-select-mode false
+list-select 4
+assert-list-row 4 subject "Taxes"
+key h
+wait-until assert-picker shown true
+picker-type someday
+key Return
+wait-until assert-list-count 6
+wait-until assert-toast "Reminder set for someday"
+assert-reminder-at "Taxes" someday
+
+# The Reminders view: a sidebar row under the Inbox, and g h. What waits, the soonest due
+# first and Someday last, says when it comes back in the date column (the list's clock is
+# Thursday 29 October, 14:20).
+remind "Dentist" 2026-10-29T17:30:00
+remind "Passport renewal" 2026-11-03T08:00:00
+remind "Novel club" 2026-11-12T08:00:00
+wait-until assert-list-count 3
+assert-sidebar-tree Personal "Inbox,Reminders,Drafts,Sent,Archive,Junk,Trash"
+# The palette lists Go to Reminders once: the command, with its keys, stands for the folder.
+key <Control>k
+wait-until assert-palette open true
+type "reminders"
+assert-palette shown "Go to Reminders"
+key Escape
+wait-until assert-palette open false
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+wait-until assert-list-count 4
+assert-list-row 0 subject "Dentist"
+assert-list-row 0 time "17:30"
+assert-list-row 1 subject "Passport renewal"
+assert-list-row 1 time "TUE 08:00"
+assert-list-row 2 subject "Novel club"
+assert-list-row 2 time "NOV 12"
+assert-list-row 3 subject "Taxes"
+assert-list-row 3 time "SOMEDAY"
+assert-list-row 3 label-starts "Marius, Taxes, back someday"
+assert-rows-aligned time
+
+# Under a filter it says why nothing shows in the filter's own words, not "No reminders" (the
+# final review: the clock and "No reminders" beside the Unread pill).
+focus list
+key <Shift>u
+wait-until assert-list-count 0
+assert-list-empty "No unread messages"
+assert-empty-icon folder-symbolic
+key <Shift>u
+wait-until assert-list-count 4
+chip starred
+wait-until assert-list-count 0
+assert-list-empty "No starred messages"
+chip all
+wait-until assert-list-count 4
+assert-list-row 3 subject "Taxes"
+
+# A search dates a waiting conversation by its latest message, as any row: in the Reminders
+# view, and from All Inboxes through every folder (the final review: its date was blank).
+search Passport
+wait-until assert-list-count 1
+assert-list-row 0 subject "Passport renewal"
+assert-list-row 0 time "OCT 23"
+search-escape
+list-wait
+folder all-inboxes
+list-wait
+search Passport
+wait-until assert-list-count 1
+assert-list-row 0 time "OCT 23"
+search-escape
+list-wait
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+wait-until assert-list-count 4
+assert-list-row 3 subject "Taxes"
+
+# With Group by Conversation off, its message rows keep their dates, which their order follows
+# (the final review: wake times in date order looked shuffled).
+grouping messages
+list-wait
+wait-until assert-reminders-shown none
+wait-until assert-list-row 0 subject "Novel club"
+assert-list-row 0 time "OCT 26"
+assert-list-row 3 subject "Passport renewal"
+assert-list-row 3 time "OCT 23"
+grouping conversations
+list-wait
+wait-until assert-reminders-shown wakes
+wait-until assert-list-row 3 subject "Taxes"
+assert-list-row 3 time "SOMEDAY"
+
+# The reader says when a waiting conversation comes back.
+list-select 3
+key Return
+wait-until assert-pane reader
+wait-until assert-reader-reminder "Reminder set for someday"
+key Escape
+wait-until assert-pane list
+
+# Done in the Inbox: the last action, with Undo.
+folder inbox Personal
+list-wait
+wait-until assert-list-count 3
+assert-list-row 2 subject "Lunch on Friday?"
+list-select 2
+focus list
+key e
+wait-until assert-list-count 2
+assert-undoable true
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+wait-until assert-list-count 4
+
+# h on one waiting: a new time, or Remove Reminder. The new time is the last action, with
+# nothing to undo (ADR-015), so z takes back neither it nor the Done before it (the final
+# review: z brought the archived conversation back).
+list-select 1
+key h
+wait-until assert-picker shown true
+assert-picker has "Remove Reminder"
+picker-choose "Someday"
+wait-until assert-toast "Reminder moved to someday"
+assert-undoable false
+assert-action-enabled win.undo false
+focus list
+key z
+sleep 500
+assert-conversations Personal:inbox "Board meeting" "The contract"
+assert-reminder-at "Passport renewal" someday
+wait-until assert-list-row 3 subject "Passport renewal"
+assert-reminder-at "Passport renewal" someday
+assert-list-count 4
+list-select 3
+key h
+wait-until assert-picker shown true
+picker-choose "Remove Reminder"
+wait-until assert-list-count 3
+wait-until assert-toast "Reminder removed"
+assert-reminder "Passport renewal" none
+toast-undo
+wait-until assert-list-count 4
+assert-reminder "Passport renewal" waiting
+
+# Shift+E (Superhuman's Mark Not Done) and the palette's Remove Reminder bring one back now.
+list-select 0
+assert-list-row 0 subject "Dentist"
+key <Shift>e
+wait-until assert-list-count 3
+wait-until assert-toast "Reminder removed"
+assert-reminder "Dentist" none
+list-select 0
+assert-list-row 0 subject "Novel club"
+key <Control>k
+wait-until assert-palette open true
+type "remove remi"
+assert-palette first "Remove Reminder"
+key Return
+wait-until assert-list-count 2
+assert-reminder "Novel club" none
+
+# Its time: back on top of the Inbox with the clock, read as it was, and a notification (the
+# window shows the Archive, not that Inbox); reading or starring keeps the clock.
+folder inbox Personal
+remind "Novel club" 2026-10-29T18:00:00
+folder archive Personal
+wake-reminders 2026-10-29T18:00:30
+wait-until assert-notify-count 1
+assert-notify 1 summary "Reminder: Novel club"
+assert-notify 1 body "Leah"
+folder inbox Personal
+wait-until assert-list-row 0 subject "Novel club"
+assert-reminders-shown marks
+wait-until assert-row-reminder 0 true
+assert-row-reminder 1 false
+assert-list-row 0 unread false
+assert-list-row 0 label-starts "Leah, Novel club,"
+list-select 0
+action win.star
+wait-until assert-list-row 0 starred true
+assert-row-reminder 0 true
+assert-reminder "Novel club" reminded
+# Done ends it.
+action win.archive
+wait-until assert-reminder "Novel club" none
+assert-list-row 0 subject "Board meeting"
+
+# A search of every folder sends only Inbox mail away: h on the archived conversation there
+# says so at once, with no picker (the third review: the picker, then the toast).
+folder all-inboxes
+list-wait
+search "Novel club"
+wait-until assert-list-count 1
+list-select 0
+focus list
+key h
+wait-until assert-toast "Only a conversation in an Inbox can be reminded from here"
+assert-picker shown false
+assert-reminder "Novel club" none
+search-escape
+list-wait
+folder inbox Personal
+list-wait
+wait-until assert-list-row 0 subject "Board meeting"
+
+# The notification opens the conversation.
+remind "Dentist" 2026-10-29T19:00:00
+folder archive Personal
+wake-reminders 2026-10-29T19:00:30
+wait-until assert-notify-count 2
+assert-notify 2 summary "Reminder: Dentist"
+notify-click 2 default
+wait-until assert-pane reader
+key Escape
+wait-until assert-pane list
+wait-until assert-row-reminder 0 true
+action win.archive
+wait-until assert-reminder "Dentist" none
+
+# "If no reply": someone answers a waiting conversation, so the reminder ends and it comes
+# back beside the answer, at the top.
+remind "The contract" 2026-11-02T08:00:00
+wait-until assert-reminder "The contract" waiting
+remind-reply "The contract" "Ingrid Solberg"
+wake-reminders now
+wait-until assert-reminder "The contract" none
+wait-until assert-list-row 0 subject "The contract"
+assert-list-row 0 members 2
+assert-row-reminder 0 false
+
+# Nothing in Sent can be reminded: Remind Me is off there, and h (in the list and in the
+# reader) and a row's clock, dimmed, say why (the second review: h did nothing).
+mail-add Personal:sent 2d "Proposal draft" read from=Selftest
+folder sent Personal
+list-wait
+wait-until assert-list-count 1
+list-select 0
+assert-action-enabled win.remind-me false
+setup-dismiss-toasts
+focus list
+key h
+wait-until assert-toast "Mail in Sent can't be reminded"
+assert-picker shown false
+hover-row 0
+wait-until assert-row-quick 0 true
+assert-quick-order 0 archive,remind,delete,star
+assert-quick-off 0 true
+assert-quick-tooltip 0 remind "Remind Me… (h) — mail in Sent can't be reminded"
+setup-dismiss-toasts
+wait-until assert-toasts 0
+click-quick 0 remind
+wait-until assert-toast "Mail in Sent can't be reminded"
+assert-picker shown false
+setup-dismiss-toasts
+wait-until assert-toasts 0
+focus list
+key Return
+wait-until assert-pane reader
+key h
+wait-until assert-toast "Mail in Sent can't be reminded"
+assert-picker shown false
+key Escape
+wait-until assert-pane list
+
+# Done takes a returned conversation's notification away.
+folder inbox Personal
+list-wait
+remind "Board meeting" 2026-10-29T20:00:00
+folder archive Personal
+wake-reminders 2026-10-29T20:00:30
+wait-until assert-notify-count 3
+assert-notify 3 summary "Reminder: Board meeting"
+assert-notify-closed 3 false
+folder inbox Personal
+list-wait
+wait-until assert-list-row 0 subject "Board meeting"
+list-select 0
+action win.archive
+wait-until assert-reminder "Board meeting" none
+wait-until assert-notify-closed 3 true
+
+# Four back at once notify as one count, as new mail does past three.
+mail-add Personal:inbox 1h "Garden party" read from=Kari
+mail-add Personal:inbox 2h "Book club" read from=Leah
+mail-add Personal:inbox 3h "Car service" read from=Tomas
+mail-add Personal:inbox 4h "Concert tickets" read from=Sana
+wait-until assert-reminder "Concert tickets" none
+remind "Garden party" 2026-10-29T21:00:00
+remind "Book club" 2026-10-29T21:00:00
+remind "Car service" 2026-10-29T21:00:00
+remind "Concert tickets" 2026-10-29T21:00:00
+folder archive Personal
+wake-reminders 2026-10-29T21:00:30
+wait-until assert-notify-count 4
+assert-notify 4 summary "4 reminders"
+assert-notify 4 body "Garden party, Book club, Car service and 1 other"
+sleep 500
+assert-notify-count 4
+assert-notify-open 1
+
+# The empty Reminders view: its clock and one line.
+folder inbox Personal
+list-wait
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+wait-until assert-list-count 2
+list-select 0
+key <Control>a
+key <Shift>e
+wait-until assert-list-count 0
+assert-list-empty "No reminders"
+assert-empty-icon alarm-symbolic
+
+# Turned off, notifications Pronto showed go, the reminders' count too.
+write-file $TMP/config/pronto/config.toml "[notifications]\nenabled = false\n"
+wait-until assert-notify-settings off sender
+wait-until assert-notify-open 0

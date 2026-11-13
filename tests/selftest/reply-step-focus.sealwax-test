@@ -1,0 +1,50 @@
+# `n` and `p` in an open conversation (the fork's phase B) move the keyboard focus to the message
+# they reach, so Reply answers it and a screen reader reads it: into its body, also when that
+# body was still loading as the key came (its header holds the focus only until then; before,
+# the header kept it, its focus ring drawn: the review's 03-after-pp). The app's layout; the
+# stand-in backend; every name and message is fictional.
+# Run: tools/headless.sh 65 target/debug/pronto --self-test tests/selftest/reply-step-focus.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+composer-backend stand-in
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+folder inbox Personal
+list-wait
+focus list
+
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-conversation focus trip-6 body
+key p
+wait-until assert-conversation top-of trip-5
+wait-until assert-conversation focus trip-5 body
+# trip-4 is a collapsed row: it expands, and its HTML body loads after the key.
+key p
+wait-until assert-conversation top-of trip-4
+wait-until assert-conversation focus trip-4 body
+key p
+wait-until assert-conversation top-of trip-3
+wait-until assert-conversation focus trip-3 body
+key n
+key n
+key n
+wait-until assert-conversation focus trip-6 body
+key r
+assert-quick-reply target trip-6
+assert-quick-reply focused true
+key Escape
+key p
+wait-until assert-conversation focus trip-5 body
+key a
+assert-quick-reply target trip-5
+assert-quick-reply kind reply-all
+assert-conversation criticals 0

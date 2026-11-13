@@ -255,6 +255,90 @@ async fn small_messages_come_whole_in_one_round_trip_with_peek_only() {
     assert_read_only(&server.await.unwrap());
 }
 
+/// The fork's Superhuman pass: a body fetch with the folder open already (the IDLE
+/// connection's new mail) sends no EXAMINE, and the mailbox notices it reads and drops (an
+/// EXISTS of mail that came meanwhile, another message's flags) mark the connection `noticed`,
+/// so the IDLE connection passes again instead of idling on them; its own answers mark
+/// nothing, and opening the mailbox again starts afresh.
+#[tokio::test]
+async fn notices_a_body_fetch_drops_mark_the_connection() {
+    let scratch = Scratch::new();
+    let targets = scratch.headers(&[(5, 300), (7, 300), (8, 300)]);
+    let ca = test_ca();
+    let config = ca.server.clone();
+    let (listener, port) = bind().await;
+    let server = tokio::spawn(async move {
+        let mut peer = logged_in(&listener, config).await;
+        examined(&mut peer, UIDVALIDITY).await;
+        let tag = peer.expect("UID FETCH 5 (UID BODY.PEEK[])").await;
+        peer.send(&format!(
+            "* 1 FETCH (UID 5 {})\r\n{tag} OK fetched\r\n",
+            literal("BODY[]", &small(5))
+        ))
+        .await;
+        let tag = peer.expect("UID FETCH 7 (UID BODY.PEEK[])").await;
+        peer.send(&format!(
+            "* 4 EXISTS\r\n* 2 FETCH (UID 7 {})\r\n{tag} OK fetched\r\n",
+            literal("BODY[]", &small(7))
+        ))
+        .await;
+        examined(&mut peer, UIDVALIDITY).await;
+        let tag = peer.expect("UID FETCH 8 (UID BODY.PEEK[])").await;
+        peer.send(&format!(
+            "* 3 FETCH (UID 8 {})\r\n* 1 FETCH (UID 5 FLAGS (\\Seen))\r\n{tag} OK fetched\r\n",
+            literal("BODY[]", &small(8))
+        ))
+        .await;
+        peer.drain().await
+    });
+    let mut conn = client(port, &ca.trust).await;
+    let folder = scratch.folder_sync();
+    let mut answers: Answers = Vec::new();
+    let mut done = |id, result| answers.push((id, result));
+    fetch_bodies(
+        &mut conn,
+        scratch.sink(),
+        &folder,
+        &targets[..1],
+        0,
+        &mut done,
+    )
+    .await
+    .unwrap();
+    assert!(!conn.noticed, "its own answers only");
+    fetch_examined(
+        &mut conn,
+        scratch.sink(),
+        &folder,
+        &targets[1..2],
+        0,
+        &mut done,
+    )
+    .await
+    .unwrap();
+    assert!(conn.noticed, "new mail came meanwhile");
+    view::examine(&mut conn, "INBOX").await.unwrap();
+    assert!(!conn.noticed, "opened afresh");
+    fetch_examined(
+        &mut conn,
+        scratch.sink(),
+        &folder,
+        &targets[2..],
+        0,
+        &mut done,
+    )
+    .await
+    .unwrap();
+    assert!(conn.noticed, "another message's flags changed");
+    drop(conn);
+    let ids: Vec<MessageId> = targets.iter().map(|target| target.message).collect();
+    assert_eq!(
+        answers,
+        ids.into_iter().map(|id| (id, Ok(()))).collect::<Answers>()
+    );
+    assert_read_only(&server.await.unwrap());
+}
+
 /// multipart/mixed: an alternative (plain and HTML) and a 12 MB PDF.
 const STRUCTURE: &str = "((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 22 1 NIL NIL \
     NIL NIL)(\"TEXT\" \"HTML\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 38 1 NIL NIL NIL NIL) \

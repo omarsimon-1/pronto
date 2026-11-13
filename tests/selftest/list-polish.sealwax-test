@@ -1,0 +1,261 @@
+# The list's polish at the app's own defaults (Focused, one row a conversation; the Superhuman
+# pass, phase B; docs/superhuman/conversations.md "Part 2"): rows locked at 38 px on one line and
+# 57 on two, CJK and emoji included; the date column, the paperclip and the star at one place on
+# every row; the header's name on the names' column and its icons ending where the dates do;
+# quick actions on the pointer only; a click that opens; the select mode's bar in the header;
+# the search in the header row. Every name and message is fictional.
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/list-polish.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open false
+conversation-account Alex alex.berg@example.test
+conversation-add singles
+conversation-add typical
+conversation-add trip
+mail-add Alex:inbox 2m "会议纪要：第三季度计划 🎉" "from=李雷" "text=请查看附件里的议程 📎 谢谢！"
+mail-add Alex:inbox 3m "🎉🎉 Fredagskaffe 🥐☕" "from=Zoë Ø. Ångström 😀" "text=Kaffe og boller på kjøkkenet 🍰"
+# The window shows the account's Inbox as soon as its folders are there (phase C's first view),
+# so the samples come into it one at a time and the cursor stays on the first to come, which the
+# later ones push down: a cursor never moves under the user (without the two lines below it sits
+# on row 4). Opened again, the Inbox opens filled, its cursor on the first row: how a view
+# opens is what this script checks.
+folder archive
+folder inbox
+list-wait
+assert-view-mode focused
+assert-list-count 28
+assert-list-row 0 subject "会议纪要：第三季度计划 🎉"
+
+# No date headers in Focused: the dates are on the rows, "OCT 28" style, never a word.
+assert-list-headers ""
+
+# Rows: one line, 38 px whatever the text and its fonts, the date column, the indicators and
+# the sender column at one place on every row.
+focus list
+hover list-title
+assert-row-heights 38
+assert-rows-aligned time
+assert-rows-aligned clip
+assert-rows-aligned star
+assert-rows-aligned sender
+assert-row-part 0 names left 36
+assert-row-part 0 time right 1428
+assert-row-part 1 names left 36
+
+# The header's lines: the sidebar button in the dots' gutter, the name on the names' column,
+# the menu's icon ending where the dates do.
+assert-edge list-sidebar left 14 icon
+assert-edge list-sidebar right 30 icon
+assert-edge list-title left 36
+assert-edge list-menu right 1428 icon
+# The sidebar button's keyboard focus ring stays inside the button, on its fill's edge, 4 px
+# clear of the name's first letter (phase C, the visual QA: it ran to x 35, the "I" at 36).
+focus list-sidebar
+key <Shift>Tab
+key Tab
+wait-frames 2
+assert-focus list-sidebar
+assert-drawn-inside list-sidebar 4
+focus list
+
+# Quick actions show on the pointer only: the selected row keeps its date while the pointer is
+# in the header, and a hovered row shows them, selected or not.
+assert-list-selected 0
+assert-quick-rows none
+hover-row 2
+assert-quick-rows 2
+# The quick Star's outline at full strength, as Done and Delete (phase C: Adwaita's own
+# outline star paints at 35 %, so it looked disabled).
+assert-glyph quick-star star-outline
+assert-glyph quick-archive theme
+hover-row 0
+assert-quick-rows 0
+hover list-title
+assert-quick-rows none
+
+# Narrower, the sender column gives way first (the 710 px half tile), and the rows keep their
+# one line; narrower still they take two lines, 57 px, CJK and emoji too.
+resize 710 900
+wait-frames 2
+assert-row-heights 38
+assert-rows-aligned time
+assert-rows-aligned clip
+assert-row-part 0 time right 698
+assert-row-part 0 sender width 122
+resize 480 900
+wait-frames 2
+assert-row-heights 57
+assert-rows-aligned time
+resize 1440 900
+wait-frames 2
+assert-row-heights 38
+
+# A click opens the conversation in the list's place, as Enter does; Escape comes back to it,
+# the keyboard focus on its row.
+hover list-title
+click-row 2
+assert-pane reader
+assert-reader-on-screen true
+wait-until assert-focus reader
+key Escape
+assert-pane list
+assert-list-selected 2
+assert-focus-row 2
+# A click held as a person holds it (the press, frames, the release), the cursor's row scrolled
+# out of view: the list stays where it is and the row clicked opens (phase B's review: the
+# focus following the selection scrolled back to the cursor between the press and the release,
+# and the click was lost). The same from the search field, whose focus the press brings in.
+list-select 0
+list-scroll-end
+assert-list-scrolled 150
+click-row-held 20 150
+assert-pane reader
+assert-list-selected 20
+key Escape
+assert-pane list
+assert-focus-row 20
+assert-list-scrolled 150
+list-select 0
+list-scroll-end
+key slash
+assert-search-shown true
+click-row-held 22 150
+assert-pane reader
+assert-list-selected 22
+key Escape
+assert-pane list
+assert-list-scrolled 150
+# A person's double click opens on its first click; its second press, on the reader now in the
+# list's place, is swallowed with its release.
+click-row-twice 21 120
+assert-pane reader
+assert-list-selected 21
+assert-reader-presses 0
+key Escape
+assert-pane list
+list-select 2
+list-scroll 0
+# Ctrl+click and Shift+click select without opening, into the select mode, its bar in the
+# header in the name's place.
+click-row 3 ctrl
+assert-pane list
+assert-select-mode true
+assert-list-selection 2,3
+assert-shown list-batch true
+assert-label list-batch-count "2 conversations selected"
+assert-shown list-title false
+assert-shown list-compose false
+assert-shown list-batch-archive true
+assert-shown list-batch-delete true
+assert-shown list-batch-move-to true
+assert-shown list-batch-toggle-read true
+assert-shown list-batch-star true
+# Read and Star at full strength beside Done, Delete and Move (phase C, the visual QA).
+assert-glyph list-batch-toggle-read mail-read
+assert-glyph list-batch-star star-outline
+assert-glyph list-batch-archive theme
+assert-edge list-batch-count left 36
+assert-edge list-batch-archive left 241
+# Remind Me adds one 32 px button and its 2 px gap after Done (phase C).
+assert-edge list-batch-star right 443
+assert-edge list-batch-clear left 451
+assert-row-dot 2 false
+# Shift+click: from the last row Ctrl+click chose, as GtkListView has it.
+click-row 5 shift
+assert-list-selection 3,4,5
+assert-label list-batch-count "3 conversations selected"
+# A ticked row hides its unread dot; an unticked unread row keeps it inside its box.
+assert-row-check 3 true
+assert-row-check 2 false
+assert-row-dot 0 true
+assert-row-dot 1 true
+assert-accessible window
+screenshot $DIR/../../.local/selftest/list-polish-select.png
+# Clear leaves the select mode, the cursor where it was.
+click list-batch-clear
+assert-select-mode false
+assert-shown list-batch false
+assert-shown list-title true
+assert-list-selection 5
+# The bar's Done archives the chosen conversations, as e does.
+focus list
+list-select 6
+key x
+key j
+key x
+assert-list-selection 6,7
+assert-label list-batch-count "2 conversations selected"
+click list-batch-archive
+assert-toast "Archived 2 conversations"
+assert-list-count 26
+assert-select-mode false
+assert-shown list-batch false
+
+# Right to left, the row mirrors: the date at the line's start, and a hovered row's quick
+# actions there, their fade turned towards the text (style.css's :dir(rtl)).
+text-direction rtl
+wait-frames 2
+hover-row 1
+assert-quick-rows 1
+assert-rows-aligned time
+assert-row-part 1 time left 12
+assert-row-part 1 quick left 12
+assert-row-part 1 names right 1404
+assert-edge list-title right 1404
+assert-edge list-menu left 12 icon
+# The select mode's bar mirrors too: the gap after the count, and Clear's, on the other side
+# (phase B's review: right to left they stayed on the left).
+focus list
+list-select 1
+key x
+key j
+key x
+assert-edge list-batch-count right 1404
+assert-edge list-batch-archive right 1199
+assert-edge list-batch-star left 997
+assert-edge list-batch-clear right 989
+key Escape
+screenshot $DIR/../../.local/selftest/list-polish-rtl.png
+text-direction ltr
+wait-frames 2
+hover list-title
+assert-row-part 1 time right 1428
+
+# The search in the header row, in the name's place, from the names' column, never wider than
+# about 520 px, the scope after it; Escape brings the name back.
+focus list
+key slash
+assert-search-shown true
+assert-shown list-title false
+assert-shown list-search-button false
+assert-edge list-search left 36
+assert-max-width list-search 560
+type cabin
+search-wait
+assert-shown list-search-scope true
+assert-shown search-scope-all true
+assert-label list-title Search
+assert-labelled
+screenshot $DIR/../../.local/selftest/list-polish-search.png
+# Rows chosen in the results: the select mode's bar takes the header row, the field and the
+# scope stepping aside meanwhile (phase B's review: together they crowded it, the count cut to
+# "…" at 560 px); leaving the select mode gives the field back.
+focus list
+list-select 0
+key x
+assert-select-mode true
+assert-shown list-batch true
+assert-shown list-search false
+assert-shown list-search-scope false
+assert-edge list-batch-count left 36
+key Escape
+assert-select-mode false
+assert-shown list-batch false
+assert-shown list-search true
+search-escape
+assert-search-shown false
+assert-shown list-title true
+assert-shown list-search-button true
+assert-label list-title Inbox

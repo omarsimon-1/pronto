@@ -1,9 +1,9 @@
 //! Drafts, the outbox and contacts (M6: ML-074, ML-076, ML-077, ML-071). The composer saves
 //! its draft here at most 5 s behind the typing (PRD C5) and the store reopens the drafts whose
-//! window was open when Sealwax stopped. A draft queued to send waits out the undo window in
+//! window was open when Pronto stopped. A draft queued to send waits out the undo window in
 //! the outbox; the account's actor takes the sends that are due, records each step before it
 //! happens and what the server did, so a message is sent at most once (ADR-015): a send that
-//! may have reached the server when Sealwax stopped becomes uncertain and is never sent again
+//! may have reached the server when Pronto stopped becomes uncertain and is never sent again
 //! without the user. After a send the store tracks the Sent copy and queues the source
 //! message's `\Answered` or `$Forwarded` through the op queue. Each draft's copy in the
 //! server's Drafts folder is replaced when it changed and went quiet, or was closed. Contacts are
@@ -65,7 +65,7 @@ pub enum SendState {
     /// Its data may be on its way to the server: from just before SMTP DATA until the server's
     /// answer is recorded.
     Sending,
-    /// Sealwax stopped, or the connection broke, while it was sending: it may have been sent.
+    /// Pronto stopped, or the connection broke, while it was sending: it may have been sent.
     /// Never sent again without the user ([`Store::resolve_uncertain`]).
     Uncertain,
     /// The server took it; its Sent copy may still be pending.
@@ -81,7 +81,7 @@ pub enum SendFailure {
     Refused,
     NeedsSignIn,
     Other,
-    /// Sealwax stopped while it built the message, which may be what stopped it: the message
+    /// Pronto stopped while it built the message, which may be what stopped it: the message
     /// isn't built again until the user sends it again ([`Store::send_building`]).
     Interrupted,
 }
@@ -421,12 +421,24 @@ impl Store {
         })
     }
 
+    /// Creates an automatic reply only if its thread has no draft and mail has not changed
+    /// since the caller checked for a reply. Serialized with user saves and sync writes.
+    pub fn save_auto_reply(&self, save: SaveDraft, checked: StoreVersion) -> Reply<DraftSaved> {
+        self.write(|reply| {
+            WriteJob::Compose(ComposeJob::SaveAuto {
+                save: Box::new(save),
+                checked,
+                reply,
+            })
+        })
+    }
+
     /// A draft, with its revision and its place in the outbox.
     pub fn draft(&self, id: DraftId) -> Reply<Option<StoredDraft>> {
         self.read(|reply| ReadJob::Compose(ComposeRead::Draft { id, reply }))
     }
 
-    /// The editable drafts whose composer window was open when Sealwax stopped, oldest first.
+    /// The editable drafts whose composer window was open when Pronto stopped, oldest first.
     pub fn open_drafts(&self) -> Reply<Vec<DraftId>> {
         self.read(|reply| ReadJob::Compose(ComposeRead::OpenDrafts { reply }))
     }
@@ -451,8 +463,16 @@ impl Store {
         self.read(|reply| ReadJob::Compose(ComposeRead::DraftForMessage { message, reply }))
     }
 
-    /// The newest closed, editable draft that replies to `message` with Reply (M6 phase B: the
-    /// quick reply's text kept as a draft, found again after a restart).
+    /// The Drafts-folder copies of `drafts` (the reverse of [`Store::draft_for_message`]), each
+    /// with its draft: a scheduled send's copy says when it goes on its list row (the fork's
+    /// phase C). A draft never uploaded has none.
+    pub fn draft_copies(&self, drafts: Vec<DraftId>) -> Reply<Vec<(DraftId, MessageId)>> {
+        self.read(|reply| ReadJob::Compose(ComposeRead::DraftCopies { drafts, reply }))
+    }
+
+    /// The newest closed, editable draft that replies to `message` with Reply or Reply All (M6
+    /// phase B: the quick reply's text kept as a draft, found again after a restart; the fork's
+    /// phase B: the inline reply answers with Reply All too).
     pub fn reply_draft(&self, message: MessageId) -> Reply<Option<StoredDraft>> {
         self.read(|reply| ReadJob::Compose(ComposeRead::ReplyDraft { message, reply }))
     }
@@ -485,7 +505,7 @@ impl Store {
     /// `Uncertain` (its data may have reached the server) and is never sent again without the
     /// user; every send whose message was being built ([`Store::send_building`]) goes back to an
     /// editable draft that failed with [`SendFailure::Interrupted`], so a message that stops
-    /// Sealwax isn't built again at every start; a Drafts-folder copy left being built
+    /// Pronto isn't built again at every start; a Drafts-folder copy left being built
     /// ([`Store::draft_building`]) waits for the draft to change. Replies with the sends, for
     /// `Event::SendUncertain` and `Event::SendFailed`.
     pub fn recover_sends(&self) -> Reply<Vec<OutboxChange>> {

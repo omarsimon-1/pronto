@@ -4,7 +4,7 @@
 //! told apart), and so does the implicit-TLS handshake, with the same rustls configuration as
 //! IMAP, because lettre takes a connected stream only before its greeting. STARTTLS uses
 //! lettre's own TLS parameters, built from the same [`Trust`]. lettre's typed EHLO answer keeps
-//! neither SIZE nor keywords in any case but upper, so Sealwax sends EHLO once more after TLS
+//! neither SIZE nor keywords in any case but upper, so Pronto sends EHLO once more after TLS
 //! and reads the extensions itself ([`Extensions`]).
 
 pub mod submit;
@@ -169,7 +169,7 @@ impl fmt::Display for Line<'_> {
 }
 
 /// Logs in on a secured connection: PLAIN, else LOGIN, for a password; XOAUTH2 for a token,
-/// spoken by Sealwax so that an error challenge is answered (lettre's AUTH gives up on it and
+/// spoken by Pronto so that an error challenge is answered (lettre's AUTH gives up on it and
 /// leaves the exchange open). A refused login leaves the connection to be dropped: lettre's
 /// abort would wait for QUIT's reply without a timeout.
 pub(crate) async fn authenticate(
@@ -225,7 +225,7 @@ pub(crate) async fn quit(mut conn: AsyncSmtpConnection) {
 
 /// lettre's STARTTLS settings. For a pinned server, lettre checks the handshake's signature but
 /// not the certificate, which [`open`] compares with the pin before anything but EHLO is sent:
-/// lettre takes no rustls verifier of Sealwax's.
+/// lettre takes no rustls verifier of Pronto's.
 fn tls_parameters(endpoint: &Endpoint, trust: &Trust) -> Result<TlsParameters, LoginFailure> {
     let builder = TlsParameters::builder(endpoint.host.clone());
     if endpoint.pinned().is_some() {

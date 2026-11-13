@@ -1,14 +1,14 @@
 //! The command line. It is parsed twice: locally in `main`, so a typo never reaches a running
-//! Sealwax, and again in the primary instance for forwarded command lines, where errors go back
+//! Pronto, and again in the primary instance for forwarded command lines, where errors go back
 //! to the calling terminal. Neither path calls `process::exit`.
 //!
 //! `--gapplication-service` is GApplication's own option for D-Bus activation (the service file
-//! runs `sealwax --gapplication-service`); it is accepted here, hidden, so that the local parse
+//! runs `pronto --gapplication-service`); it is accepted here, hidden, so that the local parse
 //! lets it through to GApplication.
 //!
-//! `--background` (ML-084) starts Sealwax without a window, as an autostart entry does; given to a
-//! running Sealwax it shows nothing. `--compose` opens a new message; with `mailto:` links, those
-//! messages are opened instead. Both are forwarded to a running Sealwax like the links.
+//! `--background` (ML-084) starts Pronto without a window, as an autostart entry does; given to a
+//! running Pronto it shows nothing. `--compose` opens a new message; with `mailto:` links, those
+//! messages are opened instead. Both are forwarded to a running Pronto like the links.
 
 use clap::{Arg, ArgAction, Command, value_parser};
 use sealwax_domain::mailto;
@@ -29,7 +29,7 @@ pub struct Cli {
 }
 
 pub fn command() -> Command {
-    Command::new("sealwax")
+    Command::new("pronto")
         .about("A fast, minimal email client for Omarchy")
         .version(env!("CARGO_PKG_VERSION"))
         .arg(
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn mailto_links() {
         let cli = parse([
-            "sealwax",
+            "pronto",
             "mailto:a@example.com?subject=Hi",
             "MAILTO:b@example.com",
         ])
@@ -117,28 +117,28 @@ mod tests {
         );
         assert_eq!(cli.self_test, None);
         assert!(!cli.service);
-        assert_eq!(parse(["sealwax"]).unwrap(), Cli::default());
+        assert_eq!(parse(["pronto"]).unwrap(), Cli::default());
     }
 
     #[test]
     fn anything_else_fails_here_and_never_reaches_a_running_sealwax() {
         for args in [
-            &["sealwax", "https://example.com"][..],
-            &["sealwax", "notes.txt"],
-            &["sealwax", "--no-such-flag"],
-            &["sealwax", "--self-test"],
+            &["pronto", "https://example.com"][..],
+            &["pronto", "notes.txt"],
+            &["pronto", "--no-such-flag"],
+            &["pronto", "--self-test"],
         ] {
             let error = parse(args).unwrap_err();
             assert_eq!(error.exit_code(), 2, "{args:?}");
         }
-        let error = parse(["sealwax", "notes.txt"]).unwrap_err();
+        let error = parse(["pronto", "notes.txt"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
         assert!(error.to_string().contains("not a mailto: link"), "{error}");
     }
 
     #[test]
     fn help_and_version_exit_zero() {
-        let help = parse(["sealwax", "--help"]).unwrap_err();
+        let help = parse(["pronto", "--help"]).unwrap_err();
         assert_eq!(help.kind(), ErrorKind::DisplayHelp);
         assert_eq!(help.exit_code(), 0);
         let text = help.to_string();
@@ -147,24 +147,20 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("gapplication-service"), "{text}");
-        let version = parse(["sealwax", "--version"]).unwrap_err();
+        let version = parse(["pronto", "--version"]).unwrap_err();
         assert_eq!(version.kind(), ErrorKind::DisplayVersion);
         assert_eq!(version.exit_code(), 0);
         assert_eq!(
             version.to_string().trim(),
-            format!("sealwax {}", env!("CARGO_PKG_VERSION"))
+            format!("pronto {}", env!("CARGO_PKG_VERSION"))
         );
     }
 
     #[test]
     fn service_and_self_test() {
-        assert!(
-            parse(["sealwax", "--gapplication-service"])
-                .unwrap()
-                .service
-        );
+        assert!(parse(["pronto", "--gapplication-service"]).unwrap().service);
         let cli = parse([
-            "sealwax",
+            "pronto",
             "--self-test",
             "tests/selftest/window.sealwax-test",
         ])
@@ -177,28 +173,28 @@ mod tests {
 
     #[test]
     fn background_and_compose() {
-        let cli = parse(["sealwax", "--background"]).unwrap();
+        let cli = parse(["pronto", "--background"]).unwrap();
         assert!(cli.background && !cli.compose && cli.uris.is_empty());
-        let cli = parse(["sealwax", "--compose"]).unwrap();
+        let cli = parse(["pronto", "--compose"]).unwrap();
         assert!(cli.compose && !cli.background);
-        let cli = parse(["sealwax", "--compose", "mailto:a@example.com"]).unwrap();
+        let cli = parse(["pronto", "--compose", "mailto:a@example.com"]).unwrap();
         assert!(cli.compose);
         assert_eq!(cli.uris, ["mailto:a@example.com"]);
         assert!(
-            parse(["sealwax", "--gapplication-service", "--background"])
+            parse(["pronto", "--gapplication-service", "--background"])
                 .unwrap()
                 .background
         );
         for args in [
-            &["sealwax", "--background", "--compose"][..],
-            &["sealwax", "--background", "mailto:a@example.com"],
-            &["sealwax", "--background", "--self-test", "a.sealwax-test"],
+            &["pronto", "--background", "--compose"][..],
+            &["pronto", "--background", "mailto:a@example.com"],
+            &["pronto", "--background", "--self-test", "a.sealwax-test"],
         ] {
             let error = parse(args).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{args:?}");
             assert_eq!(error.exit_code(), 2, "{args:?}");
         }
-        let help = parse(["sealwax", "--help"]).unwrap_err().to_string();
+        let help = parse(["pronto", "--help"]).unwrap_err().to_string();
         assert!(
             help.contains("--background") && help.contains("--compose"),
             "{help}"

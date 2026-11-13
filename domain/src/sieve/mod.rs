@@ -1,6 +1,6 @@
-//! Mail rules in Sieve (RFC 5228), run by Sealwax itself on the mail it syncs ([ADR-020],
+//! Mail rules in Sieve (RFC 5228), run by Pronto itself on the mail it syncs ([ADR-020],
 //! docs/m9/folders-rules.md, docs/m9/sieve.md). Pure: [`parse`] reads the whole grammar,
-//! [`check`] accepts only the subset Sealwax runs and names anything outside it, [`evaluate`]
+//! [`check`] accepts only the subset Pronto runs and names anything outside it, [`evaluate`]
 //! runs a checked [`Script`] on one message, and [`rules`] is the model the Rules dialog edits,
 //! written in Roundcube's `# rule:[…]` form and read back.
 //!
@@ -29,13 +29,13 @@ pub use rules::{
 
 use std::fmt;
 
-/// The largest script Sealwax reads, in bytes.
+/// The largest script Pronto reads, in bytes.
 pub const MAX_SCRIPT_BYTES: usize = 1 << 20;
 
 /// How deep blocks may nest, and tests inside tests.
 pub const MAX_NESTING: usize = 32;
 
-/// Parses and checks `text`: the script Sealwax runs, or the first error in it.
+/// Parses and checks `text`: the script Pronto runs, or the first error in it.
 pub fn compile(text: &str) -> Result<Script, Error> {
     check(&parse(text)?)
 }

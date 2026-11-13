@@ -9,6 +9,7 @@ use super::*;
 use crate::secrets::{MemoryStore, SecretKind, SecretStore};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use sealwax_domain::account::OAuthProvider;
 use sealwax_domain::account::{AccountKey, LoginFailure};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -92,6 +93,7 @@ impl Mock {
 
     fn provider(&self) -> Provider {
         Provider::new(
+            OAuthProvider::Microsoft,
             &format!("http://127.0.0.1:{}/authorize", self.port),
             &format!("http://127.0.0.1:{}/token", self.port),
         )
@@ -283,12 +285,20 @@ fn pkce_matches_the_rfc_7636_example() {
 fn endpoints_must_be_https_except_on_loopback() {
     assert!(
         Provider::new(
+            OAuthProvider::Microsoft,
             "https://login.example.test/a",
             "https://login.example.test/t"
         )
         .is_ok()
     );
-    assert!(Provider::new("http://127.0.0.1:1/a", "http://[::1]:1/t").is_ok());
+    assert!(
+        Provider::new(
+            OAuthProvider::Microsoft,
+            "http://127.0.0.1:1/a",
+            "http://[::1]:1/t"
+        )
+        .is_ok()
+    );
     for bad in [
         "http://login.example.test/t",
         "http://localhost:1/t",
@@ -297,7 +307,11 @@ fn endpoints_must_be_https_except_on_loopback() {
     ] {
         assert!(
             matches!(
-                Provider::new("https://login.example.test/a", bad),
+                Provider::new(
+                    OAuthProvider::Microsoft,
+                    "https://login.example.test/a",
+                    bad
+                ),
                 Err(OAuthError::Endpoint)
             ),
             "{bad}"
@@ -357,7 +371,7 @@ async fn a_sign_in_completes_against_the_mock() {
         browser
             .await
             .unwrap()
-            .contains("Sealwax has the sign-in. You can close this tab")
+            .contains("Pronto has the sign-in. You can close this tab")
     );
     assert_eq!(granted.identity.username, "signin@example.test");
     assert!(granted.identity.consumer());
@@ -466,7 +480,7 @@ async fn a_declined_sign_in_is_reported() {
 async fn the_loopback_listens_on_both_loopback_addresses() {
     let ipv6 = TcpListener::bind("[::1]:0").await.is_ok();
     let loopback = Loopback::bind().await.unwrap();
-    let port = port_of(&loopback.redirect_uri());
+    let port = port_of(&loopback.redirect_uri(OAuthProvider::Microsoft));
     assert!(TcpStream::connect(("127.0.0.1", port)).await.is_ok());
     assert_eq!(TcpStream::connect(("::1", port)).await.is_ok(), ipv6);
 }
@@ -545,6 +559,7 @@ async fn a_token_endpoint_that_is_down_is_unreachable() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let provider = Provider::new(
+        OAuthProvider::Microsoft,
         &format!("http://127.0.0.1:{port}/authorize"),
         &format!("http://127.0.0.1:{port}/token"),
     )
@@ -627,12 +642,13 @@ fn refusals_are_classified() {
 fn the_id_token_names_the_user_and_is_checked() {
     let at = SystemTime::now();
     let token = jwt(&claims(" signin@example.test ", CONSUMER_TENANT));
-    let identity = check(&token, CLIENT, at).unwrap();
+    let identity = check(OAuthProvider::Microsoft, &token, CLIENT, at).unwrap();
     assert_eq!(identity.username, "signin@example.test");
     assert!(identity.consumer());
     assert!(!format!("{identity:?}").contains("signin"));
 
     let work = check(
+        OAuthProvider::Microsoft,
         &jwt(&claims("someone@example.test", WORK_TENANT)),
         CLIENT,
         at,
@@ -644,23 +660,23 @@ fn the_id_token_names_the_user_and_is_checked() {
     padded[1] = base64::engine::general_purpose::URL_SAFE
         .encode(claims("signin@example.test", CONSUMER_TENANT).to_string());
     assert!(
-        check(&padded.join("."), CLIENT, at).is_ok(),
+        check(OAuthProvider::Microsoft, &padded.join("."), CLIENT, at).is_ok(),
         "padding is fine"
     );
 
     let mut many = claims("signin@example.test", CONSUMER_TENANT);
     many["aud"] = serde_json::json!([CLIENT, "other"]);
     assert!(
-        check(&jwt(&many), CLIENT, at).is_err(),
+        check(OAuthProvider::Microsoft, &jwt(&many), CLIENT, at).is_err(),
         "several audiences need azp"
     );
     many["azp"] = CLIENT.into();
-    assert!(check(&jwt(&many), CLIENT, at).is_ok());
+    assert!(check(OAuthProvider::Microsoft, &jwt(&many), CLIENT, at).is_ok());
 
     let refused = |edit: &dyn Fn(&mut serde_json::Value), reason: &str| {
         let mut changed = claims("signin@example.test", CONSUMER_TENANT);
         edit(&mut changed);
-        match check(&jwt(&changed), CLIENT, at) {
+        match check(OAuthProvider::Microsoft, &jwt(&changed), CLIENT, at) {
             Err(OAuthError::IdToken(found)) => assert_eq!(found, reason),
             other => panic!("{reason}: {other:?}"),
         }
@@ -691,7 +707,7 @@ fn the_id_token_names_the_user_and_is_checked() {
     // Five minutes' leeway for the clock.
     let mut late = claims("signin@example.test", CONSUMER_TENANT);
     late["exp"] = (now() - 60).into();
-    assert!(check(&jwt(&late), CLIENT, at).is_ok());
+    assert!(check(OAuthProvider::Microsoft, &jwt(&late), CLIENT, at).is_ok());
 
     for broken in [
         "",
@@ -701,7 +717,10 @@ fn the_id_token_names_the_user_and_is_checked() {
         &format!("a.{}.c", URL_SAFE_NO_PAD.encode("[]")),
     ] {
         assert!(
-            matches!(check(broken, CLIENT, at), Err(OAuthError::IdToken(_))),
+            matches!(
+                check(OAuthProvider::Microsoft, broken, CLIENT, at),
+                Err(OAuthError::IdToken(_))
+            ),
             "{broken}"
         );
     }
@@ -723,7 +742,7 @@ async fn access_tokens_are_cached_refreshed_and_their_refresh_tokens_rotated() {
     let secrets = MemoryStore::default();
     let key = AccountKey("account-1".into());
     let tokens = AccessTokens::default();
-    let get = |renew| tokens.get(&key, "Sealwax: test", &secrets, Some(&client), renew);
+    let get = |renew| tokens.get(&key, "Pronto: test", &secrets, Some(&client), renew);
 
     assert_eq!(
         get(false).await.err(),
@@ -822,6 +841,7 @@ async fn token_answers_are_read_whatever_their_lifetime_looks_like() {
         }
     });
     let provider = Provider::new(
+        OAuthProvider::Microsoft,
         &format!("http://127.0.0.1:{port}/authorize"),
         &format!("http://127.0.0.1:{port}/token"),
     )

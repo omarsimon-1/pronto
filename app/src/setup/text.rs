@@ -5,7 +5,7 @@
 use super::form::security_name;
 use sealwax_domain::account::{
     CertificatePin, DetectSource, DetectedSettings, Detection, Endpoint, HelpLink, LoginError,
-    LoginFailure, Protocol, UnsupportedReason, UsernameForm, is_loopback,
+    LoginFailure, OAuthProvider, Protocol, UnsupportedReason, UsernameForm, is_loopback,
 };
 use sealwax_engine::api::AccountError;
 
@@ -89,7 +89,7 @@ pub fn login_failure(error: &LoginError, context: &Context) -> Notice {
             format!(
                 "{provider} lets mail apps in with an app password: turn on two-step \
                  verification in your account if it isn't on, then create an app password for \
-                 Sealwax and type it here."
+                 Pronto and type it here."
             ),
         )
         .with_link(context.app_password),
@@ -111,34 +111,34 @@ pub fn login_failure(error: &LoginError, context: &Context) -> Notice {
         LoginFailure::OAuthRequired => Notice::problem(
             "Only a browser sign-in works here",
             format!(
-                "{server} doesn't take passwords from mail apps. Sealwax offers browser sign-in \
-                 for Microsoft accounts only."
+                "{server} doesn't take passwords from mail apps. Pronto offers browser sign-in \
+                 for Microsoft and Google accounts only."
             ),
         ),
         LoginFailure::SignInDeclined => Notice::problem(
             "The sign-in was declined",
-            "Microsoft didn't let Sealwax in. Sign in again and approve Sealwax; for a work \
+            "Microsoft didn't let Pronto in. Sign in again and approve Pronto; for a work \
              account, your organization's admin may have to approve it first."
                 .to_owned(),
         ),
         LoginFailure::NoTls => Notice::problem(
             "No secure connection",
             format!(
-                "{host} offers neither TLS nor STARTTLS on port {port}, and Sealwax never sends a \
+                "{host} offers neither TLS nor STARTTLS on port {port}, and Pronto never sends a \
                  password unencrypted. Check the server, port and security below."
             ),
         ),
         LoginFailure::Certificate if is_loopback(host) => Notice::problem(
             "The server's certificate isn't trusted",
             format!(
-                "{host} is on this computer, and Sealwax signs in to it only with a certificate \
+                "{host} is on this computer, and Pronto signs in to it only with a certificate \
                  you trusted. Check settings again to see its certificate."
             ),
         ),
         LoginFailure::Certificate => Notice::problem(
             "The server's certificate isn't trusted",
             format!(
-                "{host} showed a certificate Sealwax can't verify. Check the server name; if it \
+                "{host} showed a certificate Pronto can't verify. Check the server name; if it \
                  is right, ask your provider about its certificate."
             ),
         ),
@@ -156,7 +156,7 @@ pub fn login_failure(error: &LoginError, context: &Context) -> Notice {
         LoginFailure::NoUidl => Notice::problem(
             "This POP3 server can't keep track of messages",
             format!(
-                "{server} doesn't number its messages for good (no UIDL), so Sealwax would \
+                "{server} doesn't number its messages for good (no UIDL), so Pronto would \
                  download everything again on every check and couldn't leave mail on the \
                  server. Use IMAP if your provider offers it."
             ),
@@ -173,7 +173,7 @@ pub fn login_failure(error: &LoginError, context: &Context) -> Notice {
         LoginFailure::Other if error.protocol == Protocol::Pop3 => Notice::problem(
             "The server refused the sign-in",
             format!(
-                "{server} reported a problem Sealwax doesn't recognise. Another mail app \
+                "{server} reported a problem Pronto doesn't recognise. Another mail app \
                  downloading from this mailbox at the same time can cause it: close that app, \
                  check the settings below, then try again."
             ),
@@ -181,40 +181,45 @@ pub fn login_failure(error: &LoginError, context: &Context) -> Notice {
         LoginFailure::Other => Notice::problem(
             "The server refused the sign-in",
             format!(
-                "{server} reported a problem Sealwax doesn't recognise. Check the settings \
+                "{server} reported a problem Pronto doesn't recognise. Check the settings \
                  below, or try again later."
             ),
         ),
     }
 }
 
-/// Why a browser sign-in (ML-032) failed and what to do about it: each ends in signing in
-/// again, which the step's button does. `provider` names the account's provider
-/// ("Outlook.com") when detection knew it.
-pub fn sign_in_failure(error: &LoginError, provider: Option<&str>) -> Notice {
+/// Why a browser sign-in (ML-032, ADR-023) with `oauth` failed and what to do about it: each
+/// ends in signing in again, which the step's button does. `provider` names the account's
+/// provider ("Outlook.com") when detection knew it.
+pub fn sign_in_failure(error: &LoginError, provider: Option<&str>, oauth: OAuthProvider) -> Notice {
     let server = server(error.protocol);
+    let who = oauth.name();
     match error.failure {
         LoginFailure::SignInDeclined => Notice::problem(
             "The sign-in was declined",
-            "Microsoft didn't let Sealwax in. Sign in again and approve Sealwax; for a work \
-             account, your organization's admin may have to approve it first.",
+            format!(
+                "{who} didn't let Pronto in. Sign in again and approve Pronto; for a work \
+                 account, your organization's admin may have to approve it first."
+            ),
         ),
         LoginFailure::Timeout => Notice::problem(
             "The sign-in didn't finish in time",
-            "Sealwax stopped waiting for the browser or for Microsoft's servers. Check that \
-             you're online, then sign in again.",
+            format!(
+                "Pronto stopped waiting for the browser or for {who}'s servers. Check that \
+                 you're online, then sign in again."
+            ),
         ),
         LoginFailure::WrongPassword => Notice::problem(
             "The sign-in wasn't accepted for mail",
             format!(
-                "{server} refused the sign-in. Sign in again with the Microsoft account this \
+                "{server} refused the sign-in. Sign in again with the {who} account this \
                  address belongs to."
             ),
         ),
         LoginFailure::OAuthRequired | LoginFailure::AppPasswordRequired => Notice::problem(
             "The server refused this sign-in",
             format!(
-                "{server} didn't take the sign-in from Microsoft. Sign in again; if it keeps \
+                "{server} didn't take the sign-in from {who}. Sign in again; if it keeps \
                  happening, the account may not allow mail apps, which a work account's admin \
                  can change."
             ),
@@ -224,45 +229,53 @@ pub fn sign_in_failure(error: &LoginError, provider: Option<&str>) -> Notice {
             format!(
                 "Turn on IMAP in {}'s settings, or ask your organization's admin, then sign in \
                  again.",
-                provider.unwrap_or("Outlook.com")
+                provider.unwrap_or(match oauth {
+                    OAuthProvider::Microsoft => "Outlook.com",
+                    OAuthProvider::Google => "Gmail",
+                })
             ),
         ),
         LoginFailure::Unreachable => Notice::problem(
-            "Couldn't reach Microsoft",
-            "Microsoft's servers didn't answer. Check that you're online, then sign in again.",
+            format!("Couldn't reach {who}"),
+            format!("{who}'s servers didn't answer. Check that you're online, then sign in again."),
         ),
         LoginFailure::NoTls => Notice::problem(
             "No secure connection",
             format!(
-                "{server} offered no secure connection, and Sealwax never signs in without one. \
+                "{server} offered no secure connection, and Pronto never signs in without one. \
                  Check your network, then sign in again."
             ),
         ),
         LoginFailure::Certificate => Notice::problem(
             "The server's certificate isn't trusted",
             format!(
-                "{server} showed a certificate Sealwax can't verify. A network that inspects \
+                "{server} showed a certificate Pronto can't verify. A network that inspects \
                  secure connections can cause this: try another network, then sign in again."
             ),
         ),
         LoginFailure::Other | LoginFailure::NoUidl | LoginFailure::Busy => Notice::problem(
             "The sign-in didn't work",
             format!(
-                "{server} reported a problem Sealwax doesn't recognise. Sign in again, or try \
+                "{server} reported a problem Pronto doesn't recognise. Sign in again, or try \
                  later."
             ),
         ),
     }
 }
 
-/// The Microsoft account signed in with isn't the address typed (issue #2): which to send from.
+/// The account signed in with isn't the address typed (issue #2): which to send from.
 pub const IDENTITY_TITLE: &str = "Not the address you typed";
 
-pub fn identity_body(signed_in: &str, typed: &str) -> String {
+pub fn identity_body(signed_in: &str, typed: &str, oauth: OAuthProvider) -> String {
+    let who = oauth.name();
+    let shared = match oauth {
+        OAuthProvider::Microsoft => "an alias or a shared mailbox",
+        OAuthProvider::Google => "a \"Send mail as\" address set up in Gmail",
+    };
     format!(
-        "You signed in to Microsoft as {signed_in}, but your mail would be sent from {typed}. \
-         Microsoft refuses mail from an address your account isn't allowed to send from. Keep \
-         {typed} only if it's an alias or a shared mailbox you may send from."
+        "You signed in to {who} as {signed_in}, but your mail would be sent from {typed}. \
+         {who} refuses mail from an address your account isn't allowed to send from. Keep \
+         {typed} only if it's {shared} you may send from."
     )
 }
 
@@ -278,20 +291,64 @@ pub fn keep_address(address: &str) -> String {
 /// organization that doesn't let its users approve an unverified app leaves its own page open,
 /// and the browser never comes back.
 pub const STILL_WAITING: &str = "Still waiting for Microsoft. If the browser shows “Need admin \
-     approval”, your organization must approve Sealwax first: see the user guide.";
+     approval”, your organization must approve Pronto first: see the user guide.";
 
 /// The note in the Microsoft step while no client ID is in use (ADR-008).
 pub const MICROSOFT_UNAVAILABLE: &str =
-    "Microsoft sign-in isn't available in this build of Sealwax yet.";
+    "Microsoft sign-in isn't available in this build of Pronto yet.";
 
 /// How to make it available.
 pub const MICROSOFT_CLIENT_ID_HINT: &str = "It needs a Microsoft client ID: set client_id under \
      [oauth.microsoft] in config.toml (Preferences opens it). docs/OAUTH-SETUP.md shows how to \
      register one.";
 
+/// The note in the Google step while no Google client is in use (ADR-023).
+pub const GOOGLE_UNAVAILABLE: &str = "Sign in with Google needs your own Google OAuth client.";
+
+/// How to make it available.
+pub const GOOGLE_CLIENT_ID_HINT: &str = "Set client_id and client_secret under [oauth.google] in \
+     config.toml (Preferences opens it), or PRONTO_GOOGLE_CLIENT_ID and \
+     PRONTO_GOOGLE_CLIENT_SECRET. docs/GOOGLE-OAUTH-SETUP.md shows how to make one. Until then, \
+     Gmail works with an app password (docs/GMAIL.md).";
+
+/// The sign-in step's heading and button.
+pub fn sign_in_with(oauth: OAuthProvider) -> String {
+    format!("Sign in with {}", oauth.name())
+}
+
+/// What the sign-in step's card says will happen.
+pub fn sign_in_card(oauth: OAuthProvider) -> String {
+    format!(
+        "Your browser opens {}'s sign-in page. Pronto never sees your password; it keeps a \
+         sign-in token in your keyring.",
+        oauth.name()
+    )
+}
+
+/// The note when `oauth`'s client isn't in use, and how to make it available.
+pub fn sign_in_unavailable(oauth: OAuthProvider) -> (&'static str, &'static str) {
+    match oauth {
+        OAuthProvider::Microsoft => (MICROSOFT_UNAVAILABLE, MICROSOFT_CLIENT_ID_HINT),
+        OAuthProvider::Google => (GOOGLE_UNAVAILABLE, GOOGLE_CLIENT_ID_HINT),
+    }
+}
+
+/// The line under the sign-in step.
+pub fn sign_in_footnote(oauth: OAuthProvider) -> &'static str {
+    match oauth {
+        OAuthProvider::Microsoft => {
+            "Outlook.com and Microsoft 365 accept only Microsoft sign-in for mail apps."
+        }
+        OAuthProvider::Google => {
+            "Gmail also takes an app password: go back and choose Set up manually \
+             (docs/GMAIL.md)."
+        }
+    }
+}
+
 /// The note under the manual step's "Incoming mail" while POP3 is chosen (M8): where its mail
 /// goes, and that the server keeps it unless `accounts.toml` says otherwise.
-pub const POP3_NOTE: &str = "Sealwax downloads new mail to folders on this computer and \
+pub const POP3_NOTE: &str = "Pronto downloads new mail to folders on this computer and \
      leaves it on the server. To delete it there after some days, set delete_after_days in \
      accounts.toml.";
 
@@ -331,21 +388,21 @@ pub fn password_again_failure(error: &LoginError, context: &Context) -> Notice {
         LoginFailure::OAuthRequired => Notice::problem(
             "Only a browser sign-in works here",
             format!(
-                "{server} no longer takes passwords from mail apps. Sealwax offers browser \
-                 sign-in for Microsoft accounts only."
+                "{server} no longer takes passwords from mail apps. Pronto offers browser \
+                 sign-in for Microsoft and Google accounts only."
             ),
         ),
         LoginFailure::NoTls => Notice::problem(
             "No secure connection",
             format!(
-                "{host} offered no secure connection on port {port}, and Sealwax never sends a \
+                "{host} offered no secure connection on port {port}, and Pronto never sends a \
                  password without one. Check your network, then try again."
             ),
         ),
         LoginFailure::Certificate => Notice::problem(
             "The server's certificate isn't trusted",
             format!(
-                "{host} showed a certificate Sealwax can't verify. A network that inspects \
+                "{host} showed a certificate Pronto can't verify. A network that inspects \
                  secure connections can cause this: try another network, then try again."
             ),
         ),
@@ -359,7 +416,7 @@ pub fn password_again_failure(error: &LoginError, context: &Context) -> Notice {
         LoginFailure::Other => Notice::problem(
             "The password wasn't saved",
             format!(
-                "{server} or the keyring reported a problem Sealwax doesn't recognise. Try \
+                "{server} or the keyring reported a problem Pronto doesn't recognise. Try \
                  again, or try later."
             ),
         ),
@@ -408,7 +465,7 @@ pub fn detection(detection: &Detection, domain: &str) -> Option<Notice> {
 pub fn not_connected() -> Notice {
     Notice::problem(
         "Not connected to the mail engine",
-        "This build of Sealwax has no mail engine attached yet, so it can't look up or check an \
+        "This build of Pronto has no mail engine attached yet, so it can't look up or check an \
          account.",
     )
 }
@@ -423,7 +480,7 @@ pub fn account_error(error: &AccountError) -> Notice {
         ),
         AccountError::SettingsFile => Notice::problem(
             "Couldn't save the account",
-            "Sealwax couldn't write accounts.toml. Check that its settings folder is writable, \
+            "Pronto couldn't write accounts.toml. Check that its settings folder is writable, \
              then try again.",
         ),
         AccountError::Store => Notice::problem(
@@ -433,7 +490,7 @@ pub fn account_error(error: &AccountError) -> Notice {
         ),
         AccountError::Exists => Notice::problem(
             "This account is already set up",
-            "An account with this address is already in Sealwax.",
+            "An account with this address is already in Pronto.",
         ),
         AccountError::Missing => Notice::problem(
             "Couldn't save the account",
@@ -441,7 +498,7 @@ pub fn account_error(error: &AccountError) -> Notice {
         ),
         AccountError::SignInExpired => Notice::problem(
             "The sign-in expired",
-            "Sign in with Microsoft again, then add the account.",
+            "Sign in again, then add the account.",
         ),
     }
 }
@@ -539,7 +596,7 @@ pub fn certificate_body(protocol: Protocol, endpoint: &Endpoint) -> String {
     format!(
         "The {server} at {host}, port {port}, runs on this computer, and your system doesn't \
          trust its certificate. Programs such as Proton Mail Bridge make their own. Trust it if \
-         you run one here: Sealwax will accept this certificate from this server and no other.",
+         you run one here: Pronto will accept this certificate from this server and no other.",
         host = endpoint.host,
         port = endpoint.port,
     )
@@ -677,7 +734,7 @@ mod tests {
             let notice = login_failure(&error, &context);
             assert_eq!(notice.tone, Tone::Problem);
             assert!(notice.body.ends_with('.'), "{failure:?}: {}", notice.body);
-            // Only a server Sealwax can't use as POP3 points to IMAP.
+            // Only a server Pronto can't use as POP3 points to IMAP.
             assert!(
                 failure == LoginFailure::NoUidl || !notice.body.contains("IMAP"),
                 "{failure:?}: {}",
@@ -740,7 +797,7 @@ mod tests {
         );
         assert_eq!(
             imap.body,
-            "The incoming mail server (IMAP) reported a problem Sealwax doesn't recognise. \
+            "The incoming mail server (IMAP) reported a problem Pronto doesn't recognise. \
              Check the settings below, or try again later."
         );
         assert!(POP3_NOTE.contains("leaves it on the server"));
@@ -762,6 +819,7 @@ mod tests {
                     failure,
                 },
                 Some("Outlook.com"),
+                OAuthProvider::Microsoft,
             );
             assert_eq!(notice.tone, Tone::Problem);
             assert!(notice.body.ends_with('.'), "{failure:?}: {}", notice.body);
@@ -786,8 +844,57 @@ mod tests {
                 failure: LoginFailure::SignInDeclined,
             },
             None,
+            OAuthProvider::Microsoft,
         );
         assert!(declined.body.contains("admin may have to approve it"));
+        assert!(declined.body.starts_with("Microsoft didn't let Pronto in."));
+    }
+
+    #[test]
+    fn google_sign_in_texts_name_google() {
+        for failure in [
+            LoginFailure::SignInDeclined,
+            LoginFailure::Timeout,
+            LoginFailure::WrongPassword,
+            LoginFailure::OAuthRequired,
+            LoginFailure::Unreachable,
+        ] {
+            let error = LoginError {
+                protocol: Protocol::Imap,
+                failure,
+            };
+            let notice = sign_in_failure(&error, None, OAuthProvider::Google);
+            let text = format!("{} {}", notice.title, notice.body);
+            assert!(text.contains("Google"), "{failure:?}: {text}");
+            assert!(!text.contains("Microsoft"), "{failure:?}: {text}");
+        }
+        let imap_off = LoginError {
+            protocol: Protocol::Imap,
+            failure: LoginFailure::ImapDisabled,
+        };
+        assert!(
+            sign_in_failure(&imap_off, None, OAuthProvider::Google)
+                .body
+                .contains("Gmail's settings")
+        );
+        assert_eq!(sign_in_with(OAuthProvider::Google), "Sign in with Google");
+        assert!(sign_in_card(OAuthProvider::Google).contains("Google's sign-in page"));
+        assert!(
+            sign_in_unavailable(OAuthProvider::Google)
+                .1
+                .contains("[oauth.google]")
+        );
+        assert!(
+            identity_body("me@gmail.com", "alias@example.test", OAuthProvider::Google)
+                .starts_with("You signed in to Google as me@gmail.com")
+        );
+        assert_eq!(
+            identity_body("a@example.test", "b@example.test", OAuthProvider::Microsoft),
+            "You signed in to Microsoft as a@example.test, but your mail would be sent from \
+             b@example.test. Microsoft refuses mail from an address your account isn't allowed \
+             to send from. Keep b@example.test only if it's an alias or a shared mailbox you may \
+             send from."
+        );
     }
 
     #[test]

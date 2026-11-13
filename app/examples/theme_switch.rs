@@ -2,8 +2,8 @@
 //! Omarchy state directory:
 //!
 //! ```sh
-//! SEALWAX_OMARCHY_STATE=$PWD/.local/theme-switch/omarchy SEALWAX_HEADLESS_TIMEOUT=120 \
-//!     tools/headless.sh 30 cargo run -p sealwax --example theme_switch
+//! PRONTO_OMARCHY_STATE=$PWD/.local/theme-switch/omarchy PRONTO_HEADLESS_TIMEOUT=120 \
+//!     tools/headless.sh 30 cargo run -p pronto --example theme_switch
 //! ```
 //!
 //! It fills the scratch state with matte-black (dark), opens a window of themed sample
@@ -50,7 +50,7 @@ fn main() -> glib::ExitCode {
     }
 
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.ThemeSwitch")
+        .application_id("io.github.omarsimon1.Pronto.ThemeSwitch")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let controller: Rc<RefCell<Option<Rc<ThemeController>>>> = Rc::default();
@@ -345,7 +345,7 @@ fn build_window(app: &adw::Application, theme: &Theme) -> adw::ApplicationWindow
     tracing::info!(theme = theme.name(), "theme-switch window built");
     adw::ApplicationWindow::builder()
         .application(app)
-        .title("Sealwax theme switch")
+        .title("Pronto theme switch")
         .default_width(1100)
         .default_height(700)
         .content(&content)

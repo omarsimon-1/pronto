@@ -2,7 +2,7 @@
 # instance's id, as a terminal or `xdg-open mailto:…` would: it hands its command line here and
 # exits. `bus-open` and `bus-activate` are the calls a launcher makes for DBusActivatable=true.
 # Every address here is fictional.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/activation.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/activation.sealwax-test
 
 desktop tiling
 assert-activations 1
@@ -58,9 +58,9 @@ wait-until assert-window true
 assert-activations 8
 background false
 
-# D-Bus activation from a service file: a private bus whose only service is Sealwax's own
-# (`sealwax --gapplication-service`, as packaging/io.github.pixdevsapps.Sealwax.service runs it).
-# The activated Sealwax logs that a compose was asked for, never the link's contents.
+# D-Bus activation from a service file: a private bus whose only service is Pronto's own
+# (`sealwax --gapplication-service`, as packaging/io.github.omarsimon1.Pronto.service runs it).
+# The activated Pronto logs that a compose was asked for, never the link's contents.
 test-bus-start
 assert-bus-owner false
 test-bus-activate
@@ -75,8 +75,8 @@ wait-until assert-bus-owner false
 assert-file-contains $TMP/testbus/daemon.err "SIGTERM: quitting"
 test-bus-stop
 
-# With no Sealwax running, a command line asks the bus to start the service, hands its link to
-# it as a remote and exits; the started Sealwax keeps running.
+# With no Pronto running, a command line asks the bus to start the service, hands its link to
+# it as a remote and exits; the started Pronto keeps running.
 test-bus-start
 test-bus-spawn first "mailto:leah@example.com?subject=Invoice"
 wait-process first 0

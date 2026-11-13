@@ -8,9 +8,10 @@
 //! | `reader-open` | The scratch store and the reader in the window's reader slots |
 //! | `reader-show NAME` | Shows a sample and waits until it is on screen |
 //! | `reader-show-images` | "Show images" for the shown message; waits for the reload |
-//! | `reader-click SELECTOR` | A DOM `click()` in Sealwax's isolated world of the shown body |
+//! | `reader-click SELECTOR` | A DOM `click()` in Pronto's isolated world of the shown body |
 //! | `reader-clear` | Shows nothing |
-//! | `assert-reader FIELD VALUE` | `body` (html-themed, html-paper, plain, text-fallback, empty, none), `banner`, `released` (the view went back while hidden), `remote-allowed`, `remote-requests` (remote loads that started since `reader-show`), `attachments`, `live-views-at-most`, `cid-loaded` (images served through `cid:`), `remote-loaded` (images from the network), `height-exact` (the view is as tall as its document, at its width), `margins` (a styled body's column sits on the theme's background, the card without its edge), `text-contains`, `opened` (the last link handed to the opener; `none`) |
+//! | `assert-reader-more ACTION TITLE [KEY [SHOWN]]` | The app's reader's More menu shows ACTION (`toggle-read`, `junk`, `print`) as TITLE, and KEY beside it (`u`, `<Control>p`), drawn as SHOWN (`u`, `Ctrl+P`) |
+//! | `assert-reader FIELD VALUE` | `body` (html-themed, html-paper, plain, text-fallback, empty, none), `banner`, `released` (the view went back while hidden), `height-kept` (`shown`: the height kept for the shown message is the one its view measured last; `other`: another, the collapsed one while its quotes are open), `remote-allowed`, `remote-requests` (remote loads that started since `reader-show`), `attachments`, `live-views-at-most`, `cid-loaded` (images served through `cid:`), `remote-loaded` (images from the network), `height-exact` (the view is as tall as its document, at its width), `margins` (a styled body's column sits on the theme's background, the card without its edge), `text-contains`, `text-whole` (the plain text view is as tall as its last line needs), `opened` (the last link handed to the opener; `none`) |
 
 use super::{Harness, StepResult, blocking, equal};
 use crate::reader::{Reader, ReaderState, Shown, ShownBody, ViewEvent, samples};
@@ -32,6 +33,7 @@ pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("reader-click", 1, 1),
     ("reader-clear", 0, 0),
     ("assert-reader", 2, 2),
+    ("assert-reader-more", 2, 4),
 ];
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -238,6 +240,35 @@ fn js_string(text: &str) -> String {
     format!("'{escaped}'")
 }
 
+/// `assert-reader-more ACTION TITLE [KEY [SHOWN]]`, on the app's reader (the commands the toolbar
+/// keeps in More since the fork's Superhuman pass): the item's title, the key shown beside it,
+/// and that key as the menu draws it (GTK writes a letter in capitals: phase C writes it again).
+pub fn more(harness: &Harness, args: &[String]) -> StepResult {
+    let reader = harness.state.reader().ok_or("the reader isn't installed")?;
+    let id = sealwax_domain::actions::ActionId::from_name(&args[0])
+        .ok_or_else(|| format!("no action named {}", args[0]))?;
+    equal(
+        "More's title",
+        reader.more_title(id).as_deref(),
+        Some(args[1].as_str()),
+    )?;
+    if let Some(key) = args.get(2) {
+        equal(
+            "More's key",
+            reader.more_key(id).as_deref(),
+            Some(key.as_str()),
+        )?;
+    }
+    match args.get(3) {
+        Some(shown) => equal(
+            "More's key as drawn",
+            reader.more_key_shown(id).as_deref(),
+            Some(shown.as_str()),
+        ),
+        None => Ok(()),
+    }
+}
+
 /// `assert-reader FIELD VALUE`.
 pub async fn check(harness: &Harness, args: &[String]) -> StepResult {
     let opened = opened()?;
@@ -252,6 +283,22 @@ pub async fn check(harness: &Harness, args: &[String]) -> StepResult {
         "body" => equal("body", body_name(state.body.as_ref()), value),
         "banner" => equal("banner", state.banner, boolean(value)?),
         "released" => equal("view released", state.released, boolean(value)?),
+        "height-kept" => {
+            // `shown`: the height kept for the message is the one its view measured last;
+            // `other`: another one (the collapsed height while the quotes are open).
+            let id = opened.reader.message().ok_or("no message is shown")?;
+            let (kept, measured) = opened
+                .reader
+                .kept_height(id)
+                .ok_or("the shown message has no HTML body")?;
+            println!("  # kept height {kept:?}, measured {measured:?}");
+            let kept = match (kept, measured) {
+                (Some(kept), Some(measured)) if kept == measured => "shown",
+                (Some(_), Some(_)) => "other",
+                _ => "none",
+            };
+            equal("the height kept", kept, value)
+        }
         "remote-requests" => {
             let id = opened.reader.message().ok_or("no message is shown")?;
             let started = opened
@@ -330,6 +377,14 @@ pub async fn check(harness: &Harness, args: &[String]) -> StepResult {
             })
             .await;
             equal("plain text shown", shown, boolean(value)?)
+        }
+        "text-whole" => {
+            use gtk4::prelude::*;
+            let whole = plain_view(&opened.reader).is_some_and(|view| {
+                let (top, height) = view.line_yrange(&view.buffer().end_iter());
+                view.height() >= top + height
+            });
+            equal("the plain text's last line in view", whole, boolean(value)?)
         }
         "follows-theme" => {
             let style = match state.body {
@@ -457,6 +512,9 @@ pub(super) fn plain_text(reader: &Reader) -> String {
 fn plain_view(reader: &Reader) -> Option<gtk4::TextView> {
     use gtk4::prelude::*;
     fn find(widget: &gtk4::Widget) -> Option<gtk4::TextView> {
+        if widget.has_css_class(crate::reader::STAGED) {
+            return None;
+        }
         if let Some(view) = widget.downcast_ref::<gtk4::TextView>() {
             return Some(view.clone());
         }

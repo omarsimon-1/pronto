@@ -2,10 +2,14 @@
 //! layouts, the keymap with `keys.toml`'s changes, and the audit every keymap passes: the
 //! registry's defaults in the tests, and `keys.toml` before it is applied.
 //!
-//! Where a key works follows from the key: a key with Ctrl or Alt, or an F-key, of an action
-//! that works anywhere ([`Scope::is_global`]) is an application accelerator, which GTK runs
-//! before the focused widget. Every other key is a scoped shortcut, handled by the widgets of
-//! the action's `key_scopes` after the focused widget, so text fields keep their keys.
+//! Where a key works follows from the key ([`placement`]): a key with Ctrl or Alt, or an F-key,
+//! of an action that works anywhere ([`Scope::is_global`]) is an application accelerator, which
+//! GTK runs before the focused widget, unless it is a text field's or the composer's own key
+//! ([`TEXT_KEYS`]) of an action that yields (`ActionSpec::yields`): such a key works anywhere
+//! in the window after the focused widget, which keeps it where it uses it (Superhuman's Ctrl+K:
+//! the palette, but Insert Link in the composer's editor). Every other key is a scoped shortcut,
+//! handled by the widgets of the action's `key_scopes` after the focused widget, so text fields
+//! keep their keys.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -108,6 +112,28 @@ impl Accelerator {
         let plain = !(self.super_key || self.control || self.alt || self.shift);
         out.push_str(&key_label(&self.key, plain));
         out
+    }
+}
+
+impl Accelerator {
+    /// The keycaps a palette row shows for the key: `["Ctrl", "Shift", "R"]`, `["E"]`,
+    /// `["#"]`, `["Esc"]`.
+    pub fn caps(&self) -> Vec<String> {
+        let mut caps: Vec<String> = [
+            (self.super_key, "Super"),
+            (self.control, "Ctrl"),
+            (self.alt, "Alt"),
+            (self.shift, "Shift"),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name.to_owned())
+        .collect();
+        caps.push(match self.key.as_str() {
+            "Escape" => "Esc".to_owned(),
+            key => key_label(key, false),
+        });
+        caps
     }
 }
 
@@ -252,6 +278,11 @@ impl Binding {
             .join(" then ")
     }
 
+    /// The keycaps of each key in turn: `[["Ctrl", "R"]]`, or `[["G"], ["I"]]` for `g` then `i`.
+    pub fn caps(&self) -> Vec<Vec<String>> {
+        self.steps().map(Accelerator::caps).collect()
+    }
+
     /// AdwShortcutLabel's syntax: `<Control>r`, or `g+i` for a sequence.
     pub fn label(&self) -> String {
         self.steps()
@@ -378,7 +409,7 @@ pub fn level(key: &str, layout: Layout) -> Option<Level> {
     })
 }
 
-/// Keys that never reach Sealwax, with what takes them: fcitx5's hotkeys (5.1.22, found in
+/// Keys that never reach Pronto, with what takes them: fcitx5's hotkeys (5.1.22, found in
 /// its libraries by Stet), window and system switching, and Omarchy's non-SUPER binds
 /// (`/usr/share/omarchy/default/hypr/bindings/`, 2026-10-04). Ctrl+Alt+F-keys switch virtual
 /// terminals, and SUPER belongs to Hyprland.
@@ -393,6 +424,9 @@ pub const GRABBED: &[(&str, &str)] = &[
     ("<Control><Alt>Tab", "window switching"),
     ("Print", "Omarchy's screenshot"),
     ("<Alt>Print", "Omarchy's screen recording"),
+    // `default/hypr/bindings/voxtype.lua` (2026-10-28): push-to-talk dictation, bound whenever
+    // voxtype is installed.
+    ("F9", "Omarchy's dictation (voxtype)"),
 ];
 
 /// GTK's keys for moving the keyboard focus and opening menus.
@@ -435,27 +469,63 @@ pub const TEXT_KEYS: &[&str] = &[
     "<Control><Shift>Down",
     "<Control><Shift>Home",
     "<Control><Shift>End",
+    // GTK's and WebKit's emoji chooser. Its other key, Ctrl+;, is Use Snippet's since the
+    // fork's phase B (Superhuman's): an accelerator, so it works in the composer too.
     "<Control>period",
-    "<Control>semicolon",
     "<Control>slash",
     "<Control>backslash",
     "<Control>b",
     "<Control>i",
     "<Control>u",
     "<Control>k",
+    // The composer's Pop Draft Out or In (Superhuman's Ctrl+Shift+P, the fork's phase B): the
+    // palette's Ctrl+Shift+P yields to it in a draft, as its Ctrl+K does to Insert Link.
+    "<Control><Shift>p",
 ];
+
+/// Tab or Shift+Tab, which an action that takes them (`ActionSpec::takes_tab`) may have.
+fn takes_tab(key: &Accelerator) -> bool {
+    key.key == "Tab" && !key.control && !key.alt && !key.super_key
+}
 
 fn listed(list: &[&str], key: &Accelerator) -> bool {
     list.iter()
         .any(|entry| Accelerator::parse(entry).as_ref() == Some(key))
 }
 
-/// Whether `binding` of `id` is an application accelerator rather than a scoped shortcut.
-pub fn is_accelerator(id: ActionId, binding: &Binding) -> bool {
-    id.scope().is_global()
+/// Where a key of an action works, and when it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// An application accelerator: anywhere in the window, before the focused widget.
+    Accelerator,
+    /// A window key that yields: anywhere in the window, after the focused widget, so a text
+    /// field or the composer that uses the key keeps it there ([`TEXT_KEYS`]; the window's
+    /// bubble phase, ADR-017 amendment of the Superhuman pass).
+    Yielding,
+    /// A scoped shortcut of the action's `key_scopes`, after the focused widget.
+    Scoped,
+}
+
+/// Where `binding` of `id` works: a global action's key with Ctrl or Alt, or its F-key, is an
+/// accelerator, unless it is one of [`TEXT_KEYS`] and the action yields; every other key is
+/// scoped.
+pub fn placement(id: ActionId, binding: &Binding) -> Placement {
+    let global = id.scope().is_global()
         && binding
             .single()
-            .is_some_and(|key| key.control || key.alt || key.is_function_key())
+            .is_some_and(|key| key.control || key.alt || key.is_function_key());
+    if !global {
+        Placement::Scoped
+    } else if id.spec().yields && listed(TEXT_KEYS, &binding.first) {
+        Placement::Yielding
+    } else {
+        Placement::Accelerator
+    }
+}
+
+/// Whether `binding` of `id` is an application accelerator rather than a scoped shortcut.
+pub fn is_accelerator(id: ActionId, binding: &Binding) -> bool {
+    placement(id, binding) == Placement::Accelerator
 }
 
 /// The registry's keys with the user's lists in place of an action's own.
@@ -478,7 +548,7 @@ impl Keymap {
         }
     }
 
-    /// The keys of `id` Sealwax installs, in the order the action lists them.
+    /// The keys of `id` Pronto installs, in the order the action lists them.
     pub fn keys(&self, id: ActionId) -> Vec<Binding> {
         match self.overrides.get(&id) {
             Some(keys) => keys.clone(),
@@ -506,12 +576,27 @@ impl Keymap {
     pub fn scoped(&self, id: ActionId) -> Vec<Binding> {
         self.keys(id)
             .into_iter()
-            .filter(|key| !is_accelerator(id, key))
+            .filter(|key| placement(id, key) == Placement::Scoped)
             .collect()
     }
 
-    /// Every scoped shortcut that works in `scope`, with its action, in registry order.
+    /// The keys of `id` that yield ([`Placement::Yielding`]).
+    pub fn yielding(&self, id: ActionId) -> Vec<Binding> {
+        self.keys(id)
+            .into_iter()
+            .filter(|key| placement(id, key) == Placement::Yielding)
+            .collect()
+    }
+
+    /// Every scoped shortcut that works in `scope`, with its action, in registry order. The
+    /// window's are the keys that yield: they work anywhere in it, after the focused widget.
     pub fn scoped_in(&self, scope: Scope) -> Vec<(Binding, ActionId)> {
+        if scope == Scope::Window {
+            return ActionId::ALL
+                .into_iter()
+                .flat_map(|id| self.yielding(id).into_iter().map(move |key| (key, id)))
+                .collect();
+        }
         ActionId::ALL
             .into_iter()
             .filter(|id| id.spec().key_scopes.contains(&scope))
@@ -618,7 +703,7 @@ impl KeyFault {
             Self::OneKeyInComposer => "has no Ctrl or Alt; the composer keeps its letters, so its \
                                        keys need Ctrl or Alt (F-keys are the exception)"
                 .to_owned(),
-            Self::Grabbed(by) => format!("never reaches Sealwax: {by} takes it"),
+            Self::Grabbed(by) => format!("never reaches Pronto: {by} takes it"),
             Self::FocusKey => "moves the keyboard focus or opens a menu".to_owned(),
             Self::TextKey => "is a text field's or the composer's own key, and a key with Ctrl \
                               of a command that works anywhere would take it from them"
@@ -693,7 +778,7 @@ pub fn key_fault(id: ActionId, binding: &Binding) -> Option<KeyFault> {
         if step.control && step.alt && step.is_function_key() {
             return Some(KeyFault::Grabbed("virtual terminal switching"));
         }
-        if listed(FOCUS_KEYS, step) {
+        if listed(FOCUS_KEYS, step) && !(id.spec().takes_tab && takes_tab(step)) {
             return Some(KeyFault::FocusKey);
         }
         if composer && step.is_one_key() {
@@ -808,6 +893,30 @@ pub fn audit(keymap: &Keymap) -> Vec<Problem> {
         }
     }
 
+    // Keys that yield work anywhere after the focused widget: an accelerator of the same key
+    // runs before them everywhere, and the list's and the reader's keys take it there first. The
+    // composer may keep one (Ctrl+K is its Insert Link): that is what yielding is for.
+    let mut yielding: HashMap<Accelerator, (ActionId, Binding)> = HashMap::new();
+    for (key, id) in keymap.scoped_in(Scope::Window) {
+        let taken = global
+            .get(&key.first)
+            .or_else(|| yielding.get(&key.first).filter(|(other, _)| *other != id));
+        match taken {
+            Some((other, other_key)) => report(Problem {
+                action: id,
+                key: Some(key.clone()),
+                fault: Fault::Taken {
+                    other: *other,
+                    other_key: other_key.clone(),
+                    list_key: false,
+                },
+            }),
+            None => {
+                yielding.entry(key.first.clone()).or_insert((id, key));
+            }
+        }
+    }
+
     for scope in Scope::SCOPED {
         let mut placed: Vec<Placed> = Vec::new();
         if scope == Scope::List {
@@ -849,7 +958,10 @@ pub fn audit(keymap: &Keymap) -> Vec<Problem> {
             if entry.list_key {
                 continue;
             }
-            if let Some((owner, owner_key)) = global.get(&entry.key.first) {
+            let window_key = (scope != Scope::Composer)
+                .then(|| yielding.get(&entry.key.first))
+                .flatten();
+            if let Some((owner, owner_key)) = global.get(&entry.key.first).or(window_key) {
                 let fault = if entry.key.is_sequence() {
                     Fault::Prefix {
                         other: *owner,
@@ -1147,8 +1259,13 @@ fn places(id: ActionId, keymap: &Keymap) -> String {
     let (mut accels, scoped_keys): (Vec<Binding>, Vec<Binding>) = keymap
         .keys(id)
         .into_iter()
+        .filter(|key| placement(id, key) != Placement::Yielding)
         .partition(|key| is_accelerator(id, key));
     accels.sort_by_key(Binding::is_function_key);
+    add(
+        keymap.yielding(id),
+        "anywhere the focused field doesn't use it",
+    );
     add(scoped_keys, scoped);
     add(accels, "anywhere");
     add(Keymap::list_keys(id), "the list's own");
@@ -1167,9 +1284,9 @@ fn places(id: ActionId, keymap: &Keymap) -> String {
 /// commented out, grouped by category.
 pub fn default_keys_file() -> String {
     let mut out = String::from(
-        "# Sealwax keyboard shortcuts (keys.toml): your changes to Sealwax's default keys.\n\
+        "# Pronto keyboard shortcuts (keys.toml): your changes to Pronto's default keys.\n\
          #\n\
-         # Uncomment a line and change it; Sealwax applies the file when you save it. A line\n\
+         # Uncomment a line and change it; Pronto applies the file when you save it. A line\n\
          # names an action and lists its keys, which replace the default ones; [] leaves the\n\
          # action without a key. A key is a GTK accelerator, or two keys pressed one after the\n\
          # other, separated by a space:\n\
@@ -1188,6 +1305,9 @@ pub fn default_keys_file() -> String {
          # - The other commands' keys with Ctrl or Alt, and their F-keys, work anywhere in the\n\
          #   window, before the focused widget, so they can't be a text field's own keys\n\
          #   (Ctrl+Z, Ctrl+C, ...); their other keys work in the message list and the reader.\n\
+         #   The command palette's are the exception: one of those keys (its Ctrl+K) works\n\
+         #   anywhere after the focused widget, which keeps it where it uses it (the composer's\n\
+         #   Ctrl+K is Insert Link).\n\
          # - The composer's keys need Ctrl or Alt: it keeps its letters.\n\
          # A key belongs to one action where it works; to give it to another, first give the\n\
          # action that has it an empty list. No key may use Super or need AltGr on the US or the\n\
@@ -1377,8 +1497,8 @@ mod tests {
         assert!(has(ActionId::Junk, "exclam") && has(ActionId::Junk, "<Control>j"));
         assert!(has(ActionId::KeyboardShortcuts, "question"));
         assert!(has(ActionId::KeyboardShortcuts, "<Control>question"));
-        // Ctrl+? needs Shift too, on both layouts; `h` is the unshifted one.
-        assert!(has(ActionId::KeyboardShortcuts, "h"));
+        // Ctrl+? needs Shift too, on both layouts; Ctrl+H is the unshifted one.
+        assert!(has(ActionId::KeyboardShortcuts, "<Control>h"));
         for id in ActionId::ALL {
             for layout in Layout::ALL {
                 let shown = Keymap::default().shown(id);
@@ -1417,8 +1537,11 @@ mod tests {
                     !shown[0].is_function_key(),
                     "{id:?}: the first key shown is an F-key"
                 );
+                // Menus show the first accelerator, or the first key that yields when there is
+                // one (the palette's Ctrl+K, `app/src/menu.rs`).
                 assert!(
-                    !Keymap::default().accels(id)[0].starts_with('F'),
+                    !Keymap::default().yielding(id).is_empty()
+                        || !Keymap::default().accels(id)[0].starts_with('F'),
                     "{id:?}: menus show the first accelerator"
                 );
             }
@@ -1511,6 +1634,7 @@ mod tests {
                 KeyFault::Grabbed("virtual terminal switching"),
             ),
             ("Print", KeyFault::Grabbed("Omarchy's screenshot")),
+            ("F9", KeyFault::Grabbed("Omarchy's dictation (voxtype)")),
             ("Tab", KeyFault::FocusKey),
             ("F10", KeyFault::FocusKey),
             ("<Shift>1", KeyFault::ShiftedSymbol),
@@ -1574,9 +1698,9 @@ mod tests {
                 list_key: true,
             }
         );
-        // The list and the reader are separate places.
-        assert!(conflict(vec![(ActionId::Select, vec![binding("u")])]).is_empty());
-        assert!(!conflict(vec![(ActionId::Archive, vec![binding("u")])]).is_empty());
+        // The list and the reader are separate places: Escape is Back to List's in the reader.
+        assert!(conflict(vec![(ActionId::Select, vec![binding("Escape")])]).is_empty());
+        assert!(!conflict(vec![(ActionId::Archive, vec![binding("Escape")])]).is_empty());
         assert!(conflict(vec![(ActionId::Send, vec![binding("<Control>r")])]).is_empty());
     }
 
@@ -1597,6 +1721,10 @@ mod tests {
             assert_eq!(resolve("t"), [ActionId::GoToSent]);
             assert_eq!(resolve("d"), [ActionId::GoToDrafts]);
             assert_eq!(resolve("a"), [ActionId::GoToAllInboxes]);
+            assert_eq!(resolve("e"), [ActionId::GoToArchive]);
+            assert_eq!(resolve("l"), [ActionId::GoToFolder]);
+            assert_eq!(resolve("o"), [ActionId::GoToOther]);
+            assert_eq!(resolve("h"), [ActionId::GoToReminders]);
             assert_eq!(resolve("1"), [ActionId::GoToAccount1]);
             assert_eq!(resolve("9"), [ActionId::GoToAccount9]);
             assert!(
@@ -1611,7 +1739,8 @@ mod tests {
             ActionId::Star,
             vec![binding("g")],
         )]));
-        assert_eq!(problems.len(), 14, "{problems:?}");
+        // Every `g` sequence but itself, including Other and Reminders (phase C).
+        assert_eq!(problems.len(), 18, "{problems:?}");
         assert!(
             problems
                 .iter()
@@ -1653,17 +1782,184 @@ mod tests {
         assert_eq!(Keymap::default().display(ActionId::NextMessage), "j, Down");
         assert_eq!(
             Keymap::default().display(ActionId::CommandPalette),
-            "Ctrl+Shift+P, F1"
+            "Ctrl+K, Ctrl+Shift+P, F1"
         );
         assert_eq!(
             Keymap::default().label(ActionId::Delete),
             "numbersign Delete"
         );
         assert_eq!(Keymap::default().label(ActionId::GoToInbox), "g+i");
+        let caps = |key: &str| binding(key).caps();
+        assert_eq!(caps("e"), [["E"]]);
+        assert_eq!(caps("<Control><Shift>r"), [["Ctrl", "Shift", "R"]]);
+        assert_eq!(caps("g i"), [["G"], ["I"]]);
+        assert_eq!(caps("numbersign"), [["#"]]);
+        assert_eq!(caps("Escape"), [["Esc"]]);
+        assert_eq!(caps("Return"), [["Enter"]]);
+        assert_eq!(caps("<Control>question"), [["Ctrl", "?"]]);
         assert_eq!(
             Keymap::default().accels(ActionId::Refresh),
             ["<Control><Alt>r", "F5"]
         );
+    }
+
+    #[test]
+    fn the_palettes_ctrl_k_yields_to_the_focused_widget() {
+        let keymap = Keymap::default();
+        let palette = ActionId::CommandPalette;
+        assert_eq!(
+            placement(palette, &binding("<Control>k")),
+            Placement::Yielding
+        );
+        // Its Ctrl+Shift+P yields too: in a draft it is Pop Draft Out or In (the fork's phase B).
+        assert_eq!(
+            placement(palette, &binding("<Control><Shift>p")),
+            Placement::Yielding
+        );
+        assert_eq!(placement(palette, &binding("F1")), Placement::Accelerator);
+        assert_eq!(
+            keymap.accels(palette),
+            ["F1"],
+            "Ctrl+K and Ctrl+Shift+P are no accelerators"
+        );
+        assert!(keymap.scoped(palette).is_empty());
+        assert_eq!(
+            keymap.yielding(palette),
+            [binding("<Control>k"), binding("<Control><Shift>p")]
+        );
+        assert_eq!(
+            keymap.scoped_in(Scope::Window),
+            [
+                (binding("<Control>k"), palette),
+                (binding("<Control><Shift>p"), palette)
+            ]
+        );
+        assert_eq!(
+            keymap
+                .scoped_in(Scope::Composer)
+                .iter()
+                .find(|(key, _)| *key == binding("<Control><Shift>p"))
+                .map(|(_, id)| *id),
+            Some(ActionId::PopOutDraft)
+        );
+        // The composer's editor keeps it: Insert Link is the Composer scope's Ctrl+K.
+        assert_eq!(
+            keymap
+                .scoped_in(Scope::Composer)
+                .iter()
+                .find(|(key, _)| *key == binding("<Control>k"))
+                .map(|(_, id)| *id),
+            Some(ActionId::InsertLink)
+        );
+        // A command that doesn't yield still may not take a text field's key.
+        assert_eq!(
+            placement(ActionId::Compose, &binding("<Control>k")),
+            Placement::Accelerator
+        );
+        assert_eq!(
+            key_fault(ActionId::Compose, &binding("<Control>k")),
+            Some(KeyFault::TextKey)
+        );
+        assert_eq!(key_fault(palette, &binding("<Control>k")), None);
+        // A key of the palette's that no text field uses stays an accelerator.
+        assert_eq!(
+            placement(palette, &binding("<Control><Alt>k")),
+            Placement::Accelerator
+        );
+        // The table says where each works.
+        assert!(markdown_table().contains(
+            "| View | Command Palette | Ctrl+K, Ctrl+Shift+P, F1 | Ctrl+K, Ctrl+Shift+P: anywhere \
+             the focused field doesn't use it; F1: anywhere | `command-palette` |"
+        ));
+    }
+
+    #[test]
+    fn keys_that_yield_never_lose_to_another_key() {
+        let audit_of =
+            |overrides: Vec<(ActionId, Vec<Binding>)>| audit(&Keymap::with_overrides(overrides));
+        // The list's key would take Ctrl+K before the window sees it.
+        assert_eq!(
+            audit_of(vec![(ActionId::Archive, vec![binding("<Control>k")])]),
+            [Problem {
+                action: ActionId::Archive,
+                key: Some(binding("<Control>k")),
+                fault: Fault::Taken {
+                    other: ActionId::CommandPalette,
+                    other_key: binding("<Control>k"),
+                    list_key: false,
+                },
+            }]
+        );
+        // An accelerator would run before it everywhere, but none can have a text field's
+        // key: another command that takes one is refused as such.
+        let problems = audit_of(vec![
+            (ActionId::InsertLink, vec![binding("<Control><Alt>l")]),
+            (
+                ActionId::Refresh,
+                vec![binding("<Control>i"), binding("F5")],
+            ),
+            (ActionId::CommandPalette, vec![binding("<Control>i")]),
+        ]);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.action == ActionId::Refresh
+                    && problem.fault == Fault::Key(KeyFault::TextKey)),
+            "{problems:?}"
+        );
+        // Two yielding keys of one action are fine; the composer may keep one.
+        assert!(
+            audit_of(vec![(
+                ActionId::CommandPalette,
+                vec![binding("<Control>k"), binding("<Control>b"), binding("F1")]
+            )])
+            .is_empty()
+        );
+        // keys.toml says where.
+        assert_eq!(
+            parse("archive = [\"<Control>k\"]\n").unwrap_err(),
+            [
+                "line 1, column 12: “<Control>k” is already Command Palette's key \
+                 (command-palette); unbind it first with command-palette = []"
+            ]
+        );
+        assert!(parse("command-palette = [\"<Control>k\", \"F1\"]\n").is_ok());
+        assert!(parse("command-palette = [\"<Control>e\", \"F1\"]\n").is_ok());
+    }
+
+    #[test]
+    fn the_superhuman_keys_resolve_where_they_work() {
+        let keymap = Keymap::default();
+        let single = |scope: Scope, key: &str| {
+            keymap
+                .scoped_in(scope)
+                .into_iter()
+                .find(|(binding, _)| binding.canonical() == key)
+                .map(|(_, id)| id)
+        };
+        for scope in [Scope::List, Scope::Reader] {
+            assert_eq!(single(scope, "u"), Some(ActionId::ToggleRead), "{scope:?}");
+            assert_eq!(single(scope, "h"), Some(ActionId::RemindMe), "{scope:?}");
+            assert_eq!(single(scope, "e"), Some(ActionId::Archive), "{scope:?}");
+        }
+        assert_eq!(
+            single(Scope::List, "<Shift>u"),
+            Some(ActionId::ShowUnreadOnly)
+        );
+        assert_eq!(
+            single(Scope::List, "<Shift>s"),
+            Some(ActionId::ShowStarredOnly)
+        );
+        assert_eq!(single(Scope::List, "<Control>a"), Some(ActionId::SelectAll));
+        // The filters and Select All are the list's: the reader's text keeps Ctrl+A.
+        assert_eq!(single(Scope::Reader, "<Shift>u"), None);
+        assert_eq!(single(Scope::Reader, "<Control>a"), None);
+        assert_eq!(single(Scope::Reader, "Escape"), Some(ActionId::BackToList));
+        assert_eq!(
+            keymap.accels(ActionId::KeyboardShortcuts),
+            ["<Control>question", "<Control>h"]
+        );
+        assert!(keymap.accels(ActionId::ToggleSidebar) == ["<Control><Shift>s"]);
     }
 
     #[test]
@@ -1734,7 +2030,7 @@ mod tests {
         assert_eq!(
             parse("archive = [\"Up\"]\n").unwrap_err(),
             [
-                "line 1, column 12: “Up” is the message list's own key for Previous Message; pick another key"
+                "line 1, column 12: “Up” is the message list's own key for Previous Conversation; pick another key"
             ]
         );
         assert_eq!(

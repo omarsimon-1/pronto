@@ -3,7 +3,7 @@
 # first row in view the list stays at its top, so the new row shows (S3); scrolled down, the rows
 # in view stay where they are. Flag changes and removals from elsewhere update rows in place.
 # Every message is fictional.
-# Run: tools/headless.sh 36 target/debug/sealwax --self-test tests/selftest/list-insert.sealwax-test
+# Run: tools/headless.sh 36 target/debug/pronto --self-test tests/selftest/list-insert.sealwax-test
 
 desktop tiling
 fixtures --count 400 --seed 9 --folders single
@@ -37,7 +37,9 @@ assert-list-count 403
 assert-list-exact
 
 # Scrolled down: the list keeps its rows in view; the new one goes to the top, out of view.
-list-scroll 3000
+# About 20 to 30 rows down (57 px two-line rows in the split pane, 38 px single-line rows when
+# the list is wide), so the first row stays bound.
+list-scroll 1200
 mail-add inbox now "Mens du leser lenger ned"
 assert-list-count 404
 assert-list-row 0 subject "Mens du leser lenger ned"

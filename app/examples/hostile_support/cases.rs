@@ -45,7 +45,7 @@ pub enum Expect {
     Mismatch(String),
     /// A plain-text body whose links are exactly these targets, in order.
     PlainLinks(Vec<String>),
-    /// The quoted history collapses behind Sealwax's toggle, which expands it.
+    /// The quoted history collapses behind Pronto's toggle, which expands it.
     Quotes,
     /// format=flowed: the body reads as this.
     Flowed(String),
@@ -701,7 +701,7 @@ fn m5_cases(o: &str) -> Vec<Case> {
         },
         Case {
             id: "quote-toggle",
-            vector: "quoted history behind Sealwax's toggle, with handlers and an image inside",
+            vector: "quoted history behind Pronto's toggle, with handlers and an image inside",
             html: html(
                 "quote-toggle",
                 "",

@@ -1,7 +1,7 @@
 //! Check for Updates (ADR-021 amendment, 2026-10-20): only when the user runs it, the engine asks
-//! GitHub which release is the latest, and a dialog says whether this Sealwax is it. When a newer
+//! GitHub which release is the latest, and a dialog says whether this Pronto is it. When a newer
 //! one is out, the dialog shows the command that installs it, with a button that copies it;
-//! Sealwax never installs anything itself.
+//! Pronto never installs anything itself.
 
 use crate::accessibility;
 use crate::application::AppState;
@@ -31,7 +31,7 @@ thread_local! {
     static OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The running Sealwax's version.
+/// The running Pronto's version.
 pub fn running() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_default()
 }
@@ -59,25 +59,25 @@ pub fn answer(running: Version, result: Result<Version, UpdateError>, keymap: &K
     match updates::compare(running, latest) {
         Outcome::Latest => Answer {
             heading: "You have the latest version".to_owned(),
-            body: format!("Sealwax {running} is the newest release."),
+            body: format!("Pronto {running} is the newest release."),
             command: None,
         },
         Outcome::Ahead(latest) => Answer {
             heading: "You have the latest version".to_owned(),
-            body: format!("This Sealwax, {running}, is newer than the latest release, {latest}."),
+            body: format!("This Pronto, {running}, is newer than the latest release, {latest}."),
             command: None,
         },
         Outcome::Newer(latest) => {
             let quit = match keymap.shown(ActionId::Quit).first() {
-                Some(key) => format!("press {} in Sealwax", key.display()),
-                None => "choose Quit in Sealwax's menu".to_owned(),
+                Some(key) => format!("press {} in Pronto", key.display()),
+                None => "choose Quit in Pronto's menu".to_owned(),
             };
             Answer {
-                heading: format!("Sealwax {latest} is available"),
+                heading: format!("Pronto {latest} is available"),
                 body: format!(
                     "You have {running}. To update, copy this command, paste it into a terminal \
                      and press Enter; it asks for your computer's password. Then {quit} and \
-                     start Sealwax again. Your mail, accounts and settings stay as they are."
+                     start Pronto again. Your mail, accounts and settings stay as they are."
                 ),
                 command: Some(updates::update_command(latest)),
             }
@@ -88,7 +88,7 @@ pub fn answer(running: Version, result: Result<Version, UpdateError>, keymap: &K
 fn failure(error: UpdateError) -> &'static str {
     match error {
         UpdateError::Offline => {
-            "GitHub, where Sealwax's releases are, couldn't be reached. Check your internet \
+            "GitHub, where Pronto's releases are, couldn't be reached. Check your internet \
              connection and try again."
         }
         UpdateError::Timeout => "GitHub didn't answer in time. Try again later.",
@@ -99,7 +99,7 @@ fn failure(error: UpdateError) -> &'static str {
         UpdateError::Busy => {
             "GitHub is limiting requests from your network right now. Try again in an hour."
         }
-        UpdateError::NoRelease => "GitHub has no Sealwax release to compare with.",
+        UpdateError::NoRelease => "GitHub has no Pronto release to compare with.",
         UpdateError::Unreadable => "GitHub's answer couldn't be read. Try again later.",
     }
 }
@@ -142,7 +142,7 @@ fn check(state: &AppState, window: &Window) {
     });
     let dialog = adw::AlertDialog::builder()
         .heading(CHECKING)
-        .body("Asking GitHub for the latest release of Sealwax.")
+        .body("Asking GitHub for the latest release of Pronto.")
         .close_response("close")
         .default_response("close")
         .build();
@@ -235,7 +235,7 @@ mod tests {
         let keymap = Keymap::default();
         let same = answer(v("0.5.0"), Ok(v("0.5.0")), &keymap);
         assert_eq!(same.heading, "You have the latest version");
-        assert_eq!(same.body, "Sealwax 0.5.0 is the newest release.");
+        assert_eq!(same.body, "Pronto 0.5.0 is the newest release.");
         assert_eq!(same.command, None);
         let ahead = answer(v("0.5.1"), Ok(v("0.5.0")), &keymap);
         assert_eq!(ahead.heading, "You have the latest version");
@@ -250,10 +250,10 @@ mod tests {
     #[test]
     fn a_newer_release_comes_with_its_command() {
         let newer = answer(v("0.5.0"), Ok(v("0.6.0")), &Keymap::default());
-        assert_eq!(newer.heading, "Sealwax 0.6.0 is available");
+        assert_eq!(newer.heading, "Pronto 0.6.0 is available");
         assert!(newer.body.starts_with("You have 0.5.0."), "{}", newer.body);
         assert!(
-            newer.body.contains("press Ctrl+Q in Sealwax"),
+            newer.body.contains("press Ctrl+Q in Pronto"),
             "{}",
             newer.body
         );
@@ -261,7 +261,7 @@ mod tests {
         let unbound = Keymap::with_overrides([(ActionId::Quit, Vec::new())]);
         let newer = answer(v("0.5.0"), Ok(v("0.6.0")), &unbound);
         assert!(
-            newer.body.contains("choose Quit in Sealwax's menu"),
+            newer.body.contains("choose Quit in Pronto's menu"),
             "{}",
             newer.body
         );

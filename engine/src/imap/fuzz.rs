@@ -1,4 +1,4 @@
-//! The IMAP fuzz target's entry point (`crate::fuzz`): what Sealwax itself parses of a server's
+//! The IMAP fuzz target's entry point (`crate::fuzz`): what Pronto itself parses of a server's
 //! IMAP answers, past async-imap and imap-proto: modified UTF-7 folder names, the folder roles
 //! from a LIST, COPYUID's UID sets, and the names and UID sets it writes back.
 

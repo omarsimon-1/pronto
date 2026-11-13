@@ -60,7 +60,7 @@ impl Setup {
         };
         let store = Store::open(&self.dirs.store_file(), options).unwrap();
         Engine::start(EngineConfig {
-            application: "io.github.pixdevsapps.Sealwax.Test".into(),
+            application: "io.github.omarsimon1.Pronto.Test".into(),
             store: Arc::new(store),
             blobs,
             paths: AccountPaths::new(&self.dirs),
@@ -68,8 +68,10 @@ impl Setup {
             secrets: SecretBackend::Memory,
             detect: DetectOptions::default(),
             microsoft_client_id: client_id.map(str::to_owned),
+            google_client: None,
             sign_in: SignInOptions {
                 microsoft: self.microsoft.provider(),
+                google: sealwax_engine::oauth::Provider::google(),
                 servers: Some((self.imap.endpoint(), self.smtp.endpoint())),
                 wait: Duration::from_secs(10),
             },
@@ -256,7 +258,7 @@ async fn a_sign_in_checks_both_servers_as_the_token_identity_and_the_account_syn
     assert!(url.contains("prompt=select_account"));
     let page = tokio::spawn(mock::browse(url));
     assert_eq!(signed_in(&engine, 1).await, Ok(USER.to_owned()));
-    assert!(page.await.unwrap().contains("Sealwax has the sign-in."));
+    assert!(page.await.unwrap().contains("Pronto has the sign-in."));
 
     let access = setup.microsoft.state().latest("access").unwrap();
     let login = (USER.to_owned(), access);

@@ -1,0 +1,158 @@
+# The inline reply (the fork's phase B, Superhuman's reply flow), in the app's own layout
+# (Focused): in an open conversation Enter answers everyone, as Reply All does (Superhuman's
+# Enter, the default since phase C; `[reader] reply`), `r` the sender, `a` everyone,
+# each opening the reply under the conversation at once with the focus in it (timed from the key
+# to its frame); from the Focused list `r` opens the conversation first. The recipients line
+# names whom it answers; Ctrl+Shift+O, C and B show its fields, and recipients put there are the
+# reply's. Escape in an empty reply closes it and gives the focus back, a
+# second Escape goes back to the list; a reply with text stays, a draft. `f` opens a composer card
+# with the caret in To. Ctrl+Shift+P pops the reply out to a card, its text and recipients kept,
+# and from the card back under its conversation; a card with formatting stays. Keys go through
+# Broadway as real presses. The stand-in backend; every name and message is fictional.
+# Run: tools/headless.sh 65 target/debug/pronto --self-test tests/selftest/reply-inline.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+composer-backend stand-in
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+mail-add Personal:inbox 10m "Middag fredag" read from=Leah "to=Alex Berg <alex.berg@example.test>, Tomas Berg <tomas@example.test>" "cc=Sana Malik <sana@example.test>"
+folder inbox Personal
+list-wait
+focus list
+
+# Enter opens the conversation in the list's place; Enter in it answers under it, as Reply All
+# (the message went to the user alone: Tomas is everyone).
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+assert-quick-reply open false
+key Return
+assert-quick-reply focused true
+assert-quick-reply open true
+assert-quick-reply target trip-6
+assert-quick-reply kind reply-all
+wait-until assert-quick-reply to tomas@example.test
+assert-quick-reply label "Reply to Tomas Berg"
+assert-shown quick-reply-recipients true
+assert-shown quick-reply-send true
+assert-tooltip quick-reply-send "Send (Ctrl+Enter)"
+assert-tooltip quick-reply-expand "Pop out to the composer (Ctrl+Shift+P)"
+assert-compose-requests 0
+assert-labelled
+# Escape in the empty reply closes it, the focus back in the conversation; again, the list.
+key Escape
+assert-quick-reply focused false
+assert-quick-reply open false
+assert-reader-on-screen true
+key Escape
+wait-until assert-reader-on-screen false
+
+# From the Focused list, `r` opens the conversation and the reply under it at once.
+key r
+wait-until assert-reader-on-screen true
+assert-quick-reply focused true
+assert-quick-reply kind reply
+key Escape
+key Escape
+wait-until assert-reader-on-screen false
+
+# A message to several: `a` answers everyone, To then Cc; `r` the sender alone.
+list-select 0
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key a
+assert-quick-reply focused true
+assert-quick-reply kind reply-all
+wait-until assert-quick-reply cc sana@example.test
+assert-quick-reply label "Reply to Leah and 2 others"
+key Escape
+# Closed, the box is Enter's again: everyone.
+assert-quick-reply kind reply-all
+key r
+assert-quick-reply kind reply
+assert-quick-reply cc none
+assert-quick-reply label "Reply to Leah"
+
+# Ctrl+Shift+O, C and B show the fields, the focus in that one; what is put there is whom the
+# reply goes to. Escape closes the fields first, then leaves the draft.
+key <Control><Shift>c
+assert-quick-reply editing true
+assert-focus quick-reply-cc-entry
+type "kari@example.test,"
+assert-quick-reply chosen true
+assert-quick-reply cc kari@example.test
+assert-quick-reply label "Reply to Leah and 1 other"
+key <Control><Shift>b
+assert-focus quick-reply-bcc-entry
+key <Control><Shift>o
+assert-focus quick-reply-to-entry
+key Escape
+assert-quick-reply editing false
+assert-quick-reply focused true
+type "Jeg tar med dessert."
+key Escape
+assert-quick-reply focused false
+assert-quick-reply open true
+assert-quick-reply text "Jeg tar med dessert."
+assert-quick-reply chosen true
+
+# Ctrl+Shift+P pops it out to a card, its text and recipients kept; the box empties.
+action win.quick-reply
+key <Control><Shift>p
+assert-compose-last quick-reply selected "Jeg tar med dessert." reply
+composer-wait
+assert-composer focus body
+assert-composer chips cc kari@example.test
+assert-composer html-has "Jeg tar med dessert."
+assert-quick-reply text ""
+# In the card, Ctrl+Shift+P puts it back under the conversation, focused: the card goes, its
+# draft with it.
+composer-key <Control><Shift>p
+wait-until assert-composer count 0
+assert-stand-in discarded 1
+assert-quick-reply text "Jeg tar med dessert."
+assert-quick-reply focused true
+assert-quick-reply chosen true
+assert-quick-reply cc kari@example.test
+
+# Out again; a card with formatting stays (it would be lost under the conversation).
+key <Control><Shift>p
+composer-wait
+composer-focus body
+composer-select "dessert"
+composer-key <Control>b
+wait-until assert-composer pressed composer-bold true
+composer-key <Control><Shift>p
+assert-composer count 1
+wait-until assert-toast "A reply with formatting stays in the composer"
+assert-quick-reply text ""
+composer-action discard-draft
+composer-discard-answer discard
+wait-until assert-composer count 0
+
+# `f` forwards in a card, the caret in To.
+focus list
+list-select 1
+key Return
+wait-until assert-reader-on-screen true
+key f
+assert-compose-last reply selected forward
+composer-wait
+assert-composer focus to
+composer-close
+
+# Timed: Enter and `r` in the open conversation, from the key reaching the window to the frame
+# with the reply focused: about 8 ms, or about 45 when Broadway paces that frame (headless; the
+# bar here is Superhuman's 100 ms, so a loaded machine doesn't fail it).
+measure-reply Return 7 100
+measure-reply r 7 100
+assert-conversation criticals 0

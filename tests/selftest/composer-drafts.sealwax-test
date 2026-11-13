@@ -4,7 +4,7 @@
 # closes, when Quit saves them all and when the main window closes with it, and Discard asking
 # first when there is something to lose. The stand-in backend's drafts; every name and address
 # is fictional.
-# Run: tools/headless.sh 42 target/debug/sealwax --self-test tests/selftest/composer-drafts.sealwax-test
+# Run: tools/headless.sh 42 target/debug/pronto --self-test tests/selftest/composer-drafts.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -34,8 +34,23 @@ assert-composer html-has "<blockquote type=\"cite\""
 assert-composer html-has "wrote:</div>"
 assert-composer labelled
 assert-composer focus body
+# The quoted history (the trailing quote with its attribution line) folds behind a quiet "•••"
+# pill, as the reader folds it (phase C): the attribution is the one pill. The quote stays in the
+# draft and in the body's text; the fold's marks never reach the draft. A press under the pill
+# leaves it folded (the caret goes above it); a click on the pill shows the quote.
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+assert-composer eval "getComputedStyle(document.querySelector('body > blockquote[type=cite]')).display" none
+assert-composer eval "getComputedStyle(document.querySelector('body > blockquote[type=cite]').previousElementSibling, '::before').content" "\"•••\""
+assert-composer eval "document.querySelectorAll('[data-sw-fold=pill]').length" 1
+assert-composer eval "sealwaxComposer.text().includes('wrote:')" true
 composer-insert "Takk, Grace!"
 assert-composer html-has "<div>Takk, Grace!</div>"
+assert-composer html-has "wrote:</div>"
+assert-composer html-lacks "data-sw"
+composer-pointer composer-body 200 300
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+assert-composer eval "document.querySelector('body > blockquote[type=cite]').previousElementSibling.click(), sealwaxComposer.quoteFolded()" false
+assert-composer eval "getComputedStyle(document.querySelector('body > blockquote[type=cite]')).display" block
 composer-close
 wait-until assert-composer count 0
 assert-composer stored 2 html "Takk, Grace!"
@@ -47,18 +62,32 @@ assert-composer title "Reply all"
 assert-composer chips to grace@example.test
 assert-composer chips cc ada@example.test
 assert-composer shown composer-cc true
+# The caret going onto the pill (the arrow keys, Ctrl+End) shows the quote.
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+composer-focus body
+composer-caret start
+composer-key Down
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+composer-key Down
+wait-until assert-composer eval "sealwaxComposer.quoteFolded()" false
 composer-close
+# A forward's body is what it sends: nothing folds.
 composer-open forward
 composer-wait
 assert-composer title Forward
 assert-composer chips to none
 assert-composer subject "Fwd: The quarterly figures"
 assert-composer focus to
+assert-composer eval "sealwaxComposer.quoteFolded()" false
 composer-close
 composer-open quick-reply "Hei Grace,\nfint, takk."
 composer-wait
 assert-composer title Reply
 assert-composer html-has "<div>Hei Grace,</div><div>fint, takk.</div>"
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+composer-focus body
+composer-key <Control>End
+wait-until assert-composer eval "sealwaxComposer.quoteFolded()" false
 composer-close
 composer-open server-draft
 composer-wait
@@ -67,12 +96,62 @@ assert-composer subject "Notes for Thursday"
 composer-close
 wait-until assert-composer count 0
 
-# A stored draft reopens as it was saved.
+# A stored draft reopens as it was saved; a reply's folds its quoted history again.
 composer-open draft 2
 composer-wait
 assert-composer title Draft
 assert-composer chips to grace@example.test
 assert-composer html-has "Takk, Grace!"
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+composer-close
+wait-until assert-composer count 0
+
+# A reply's draft answered inline (the user's answers between the quote's parts) reopens with
+# nothing folded and no line but the attribution small: the answers keep the body's size. A last
+# quote that the user's own line heads, not an attribution, stays open too. A trailing quote with
+# a blank line after it folds, and what is typed after it opens it.
+composer-open reply
+composer-wait
+composer-body "<div>Hi Grace,</div><div><br></div><div>On Monday 5 October 2026 at 14:02, Grace Hopper wrote:</div><blockquote type=\"cite\"><div>Here are the quarterly figures.</div></blockquote><div>Thanks, they look right to me.</div><blockquote type=\"cite\"><div>The totals are on the second page.</div></blockquote><div>I'll check page two tonight.</div>"
+composer-close
+wait-until assert-composer count 0
+composer-open draft last
+composer-wait
+assert-composer eval "document.body.children[4].textContent" "Thanks, they look right to me."
+assert-composer eval "sealwaxComposer.quoteFolded()" false
+assert-composer eval "document.querySelectorAll('[data-sw-fold]').length" 0
+assert-composer eval "Array.from(document.body.children).filter((line) => getComputedStyle(line).display === 'none').length" 0
+assert-composer eval "Array.from(document.body.children).filter((line) => getComputedStyle(line).fontSize !== getComputedStyle(document.body).fontSize).map((line) => line.textContent).join(' | ')" "On Monday 5 October 2026 at 14:02, Grace Hopper wrote:"
+composer-body "<div>Hi Grace,</div><div><br></div><div>On Monday 5 October 2026 at 14:02, Grace Hopper wrote:</div><blockquote type=\"cite\"><div>Here are the quarterly figures.</div></blockquote><div>Thanks, they look right to me.</div><blockquote type=\"cite\"><div>The totals are on the second page.</div></blockquote>"
+assert-composer eval "sealwaxComposer.quoteFolded()" false
+assert-composer eval "getComputedStyle(document.body.children[4]).fontSize === getComputedStyle(document.body).fontSize" true
+composer-body "<div><br></div><div>On Monday 5 October 2026 at 14:02, Grace Hopper wrote:</div><blockquote type=\"cite\"><div>Here are the quarterly figures.</div></blockquote><div><br></div>"
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+composer-focus body
+composer-caret end
+assert-composer eval "sealwaxComposer.quoteFolded()" true
+composer-insert "PS: page two too."
+wait-until assert-composer eval "sealwaxComposer.quoteFolded()" false
+composer-close
+wait-until assert-composer count 0
+
+# A new message's quote is what the user sends, not history: it never folds, not even under an
+# attribution with nothing after it, and the user's line before a quote keeps the body's size
+# (only the attribution line reads small). Reopened, the same.
+composer-open new
+composer-wait
+composer-body "<div>Hi team,</div><div>Here is what the client asked for:</div><blockquote type=\"cite\"><div>Two more weeks for the audit.</div></blockquote><div>Can we do it?</div><div>Grace Hopper wrote:</div><blockquote type=\"cite\"><div>And the totals?</div></blockquote>"
+assert-composer eval "sealwaxComposer.quoteFolded()" false
+assert-composer eval "Array.from(document.body.children).filter((line) => getComputedStyle(line).fontSize !== getComputedStyle(document.body).fontSize).map((line) => line.textContent).join(' | ')" "Grace Hopper wrote:"
+composer-focus subject
+composer-type "Audit"
+composer-close
+wait-until assert-composer count 0
+composer-open draft last
+composer-wait
+assert-composer subject Audit
+assert-composer eval "sealwaxComposer.quoteFolded()" false
+assert-composer eval "document.querySelectorAll('[data-sw-fold]').length" 0
 composer-close
 wait-until assert-composer count 0
 
@@ -90,7 +169,7 @@ composer-focus subject
 composer-type "Emne"
 sleep 2500
 assert-composer save-lag 5000
-assert-composer stored 7 subject Emne
+assert-composer stored 9 subject Emne
 
 # Discard: asks when there is something to lose; Cancel keeps the draft.
 composer-click composer-discard
@@ -121,8 +200,8 @@ composer-focus subject
 composer-type "second"
 composer-save-all
 assert-composer count 0
-assert-composer stored 9 html "saved on quit"
-assert-composer stored 10 subject second
+assert-composer stored 11 html "saved on quit"
+assert-composer stored 12 subject second
 
 # The main window closes (into background mode): its cards save their drafts first and go
 # with it.
@@ -134,9 +213,9 @@ composer-insert "kept after the main window"
 close-window
 wait-until assert-window false
 assert-composer count 0
-assert-composer stored 11 html "kept after the main window"
+assert-composer stored 13 html "kept after the main window"
 
-# A composer with no main window shows one; Quit saves its draft, then Sealwax ends.
+# A composer with no main window shows one; Quit saves its draft, then Pronto ends.
 composer-open new
 wait-until assert-window true
 composer-wait

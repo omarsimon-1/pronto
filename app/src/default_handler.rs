@@ -1,8 +1,8 @@
-//! Make Sealwax the Default Mail App… (PRD C8, ML-078; INTEGRATIONS.md "Default mail handler"):
-//! the one change Sealwax makes outside its own folders, and only when the user says yes. A
-//! dialog says what changes and how to undo it; on yes, GIO makes Sealwax's desktop entry the
+//! Make Pronto the Default Mail App… (PRD C8, ML-078; INTEGRATIONS.md "Default mail handler"):
+//! the one change Pronto makes outside its own folders, and only when the user says yes. A
+//! dialog says what changes and how to undo it; on yes, GIO makes Pronto's desktop entry the
 //! handler for `x-scheme-handler/mailto`, writing `$XDG_CONFIG_HOME/mimeapps.list` as
-//! `xdg-mime default` does. When Sealwax already is the default it says so and changes nothing;
+//! `xdg-mime default` does. When Pronto already is the default it says so and changes nothing;
 //! a build whose desktop entry isn't installed (a development build) says why it can't. GIO's
 //! reads and the write run off the GTK thread.
 
@@ -42,7 +42,7 @@ impl Handler {
 /// What the desktop looks like before the change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
-    /// Sealwax's desktop entry for this build's app-id.
+    /// Pronto's desktop entry for this build's app-id.
     pub ours: String,
     /// Whether the desktop knows that entry (it is installed).
     pub installed: bool,
@@ -57,7 +57,7 @@ pub struct Probe {
 /// What the command does with a [`Probe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
-    /// Sealwax already handles `mailto:` links: nothing to change.
+    /// Pronto already handles `mailto:` links: nothing to change.
     Already,
     /// No desktop entry to point the handler at.
     Missing,
@@ -139,10 +139,10 @@ pub fn question(probe: &Probe) -> (String, String) {
         ),
     };
     (
-        "Make Sealwax the default mail app?".to_owned(),
+        "Make Pronto the default mail app?".to_owned(),
         format!(
             "Links that start with mailto:, in your browser and other apps, will open a new \
-             message in Sealwax.\n\nSealwax sets the desktop's handler for {MAILTO_TYPE} to {} \
+             message in Pronto.\n\nPronto sets the desktop's handler for {MAILTO_TYPE} to {} \
              in {} (now: {now}). Nothing else changes.\n\nTo undo: {undo}",
             probe.ours,
             shown(&probe.list),
@@ -154,7 +154,7 @@ pub fn question(probe: &Probe) -> (String, String) {
 pub fn explanation(probe: &Probe) -> (String, String) {
     match decide(probe) {
         Decision::Already => (
-            "Sealwax is already the default mail app".to_owned(),
+            "Pronto is already the default mail app".to_owned(),
             format!(
                 "The desktop opens mailto: links with {}. Nothing was changed.",
                 probe.ours
@@ -164,16 +164,16 @@ pub fn explanation(probe: &Probe) -> (String, String) {
             "A development build can't be the default mail app".to_owned(),
             format!(
                 "This is a development build, which has no desktop entry ({} isn't installed), \
-                 so the desktop couldn't start it for a mailto: link. Install Sealwax's package \
-                 and use this command in the installed Sealwax. Nothing was changed.",
+                 so the desktop couldn't start it for a mailto: link. Install Pronto's package \
+                 and use this command in the installed Pronto. Nothing was changed.",
                 probe.ours
             ),
         ),
         _ => (
-            "Sealwax can't be the default mail app yet".to_owned(),
+            "Pronto can't be the default mail app yet".to_owned(),
             format!(
-                "Sealwax's desktop entry, {}, isn't installed (Sealwax's package installs it), \
-                 so the desktop couldn't start Sealwax for a mailto: link. Nothing was changed.",
+                "Pronto's desktop entry, {}, isn't installed (Pronto's package installs it), \
+                 so the desktop couldn't start Pronto for a mailto: link. Nothing was changed.",
                 probe.ours
             ),
         ),
@@ -212,8 +212,8 @@ pub fn run(window: &Window, app_id: &str) {
         let ours = probe.ours.clone();
         match gio::spawn_blocking(move || apply(&ours)).await {
             Ok(Ok(Some(after))) if after.id == probe.ours => {
-                tracing::info!("Sealwax is now the desktop's mailto: handler");
-                window.add_toast(adw::Toast::new("Sealwax is now the default mail app"));
+                tracing::info!("Pronto is now the desktop's mailto: handler");
+                window.add_toast(adw::Toast::new("Pronto is now the default mail app"));
             }
             Ok(Ok(after)) => {
                 let still = after.map_or_else(|| "no app".to_owned(), |after| after.describe());
@@ -221,7 +221,7 @@ pub fn run(window: &Window, app_id: &str) {
                     &window,
                     "The desktop still opens mailto: links elsewhere",
                     &format!(
-                        "Sealwax was written to {} as the handler for {MAILTO_TYPE}, but the \
+                        "Pronto was written to {} as the handler for {MAILTO_TYPE}, but the \
                          desktop still reports {still}: a desktop-specific list (such as \
                          ~/.config/hyprland-mimeapps.list) may name another app first.",
                         shown(&probe.list)
@@ -233,7 +233,7 @@ pub fn run(window: &Window, app_id: &str) {
                 tracing::warn!("the mailto: handler couldn't be set");
                 tell(
                     &window,
-                    "Sealwax couldn't be made the default mail app",
+                    "Pronto couldn't be made the default mail app",
                     &error,
                 )
                 .await;
@@ -261,7 +261,7 @@ mod tests {
 
     fn probe(current: Option<&str>, installed: bool) -> Probe {
         Probe {
-            ours: "io.github.pixdevsapps.Sealwax.desktop".into(),
+            ours: "io.github.omarsimon1.Pronto.desktop".into(),
             installed,
             current: current.map(|id| Handler {
                 id: id.into(),
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn asks_only_when_there_is_something_to_change() {
         assert_eq!(
-            decide(&probe(Some("io.github.pixdevsapps.Sealwax.desktop"), true)),
+            decide(&probe(Some("io.github.omarsimon1.Pronto.desktop"), true)),
             Decision::Already
         );
         assert_eq!(
@@ -289,17 +289,17 @@ mod tests {
         );
         assert_eq!(decide(&probe(None, true)), Decision::Ask);
         assert_eq!(
-            desktop_id("io.github.pixdevsapps.Sealwax"),
-            "io.github.pixdevsapps.Sealwax.desktop"
+            desktop_id("io.github.omarsimon1.Pronto"),
+            "io.github.omarsimon1.Pronto.desktop"
         );
     }
 
     #[test]
     fn the_question_says_what_changes_and_how_to_undo_it() {
         let (heading, body) = question(&probe(Some("bluemail.desktop"), true));
-        assert_eq!(heading, "Make Sealwax the default mail app?");
+        assert_eq!(heading, "Make Pronto the default mail app?");
         assert!(
-            body.contains("io.github.pixdevsapps.Sealwax.desktop"),
+            body.contains("io.github.omarsimon1.Pronto.desktop"),
             "{body}"
         );
         assert!(body.contains("now: Mail, bluemail.desktop"), "{body}");
@@ -318,11 +318,11 @@ mod tests {
         missing.development = true;
         let (heading, body) = explanation(&missing);
         assert_eq!(heading, "A development build can't be the default mail app");
-        assert!(body.contains("Install Sealwax's package"), "{body}");
+        assert!(body.contains("Install Pronto's package"), "{body}");
         missing.development = false;
         assert_eq!(
             explanation(&missing).0,
-            "Sealwax can't be the default mail app yet"
+            "Pronto can't be the default mail app yet"
         );
     }
 }

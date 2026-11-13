@@ -7,7 +7,7 @@
 //! `spike` and deletes them at its end (and those an earlier run left). It needs the Docker
 //! testbed running and seeded:
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test folders_testbed -- --ignored --test-threads=1 --nocapture
 //!
 //! NAMESPACE isn't sent (imap-proto can't read its reply; `imap::manage`), so the run prints
@@ -30,7 +30,7 @@ use testbed_client::Client;
 
 const USER: &str = "spike";
 /// Every folder this suite makes starts so.
-const PREFIX: &str = "Sealwax mappe ";
+const PREFIX: &str = "Pronto mappe ";
 
 fn runtime() -> tokio::runtime::Runtime {
     sealwax_engine::runtime().unwrap()

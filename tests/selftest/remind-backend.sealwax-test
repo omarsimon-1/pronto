@@ -1,0 +1,72 @@
+# Remind Me's backend (the fork's Superhuman pass, docs/superhuman/remind.md): a conversation
+# sent to Reminders until a time leaves the Inbox at once, for a Reminders folder made for it;
+# at its time it comes back to the top of the Inbox and sorts by when it came back until it
+# leaves the Inbox again (Done), while reading or starring it keeps its place; Undo and
+# cancelling bring a waiting one back. The engine hears of it (RemindersChanged). Message rows,
+# as the harness has them; the conversation order is the store's conversation view. `h` is
+# unchanged: the picker is phase C's. Every message is fictional.
+# Run: tools/headless.sh 68 target/debug/pronto --self-test tests/selftest/remind-backend.sealwax-test
+
+desktop tiling
+resize 1440 900
+engine-attach
+mail-account Personal
+folder inbox Personal
+list-clock 2026-10-07T12:00:00
+mail-add Personal:inbox 3d "Passport renewal" from=Kari
+mail-add Personal:inbox yesterday "Lunch on Friday?" from=Tomas
+mail-add Personal:inbox today "The contract" from=Ingrid
+assert-list-count 3
+assert-conversations Personal:inbox "The contract" "Lunch on Friday?" "Passport renewal"
+engine-expect none but folder-opened,fetch-bodies,storage,load-older
+
+# Sent away until tomorrow morning: it leaves the Inbox for a new Reminders folder.
+remind "Passport renewal" 2026-10-08T09:00:00
+engine-expect reminders-changed
+assert-list-count 2
+assert-reminder "Passport renewal" waiting 2026-10-08T09:00:00
+assert-conversations Personal:inbox "The contract" "Lunch on Friday?"
+assert-conversations Personal:Reminders "Passport renewal"
+
+# Undo puts it back, and no reminder is left.
+remind-undo
+assert-list-count 3
+assert-reminder "Passport renewal" none
+assert-conversations Personal:inbox "The contract" "Lunch on Friday?" "Passport renewal"
+
+# Again; not due before its time.
+remind "Passport renewal" 2026-10-08T09:00:00
+wake-reminders 2026-10-08T08:59:00
+assert-list-count 2
+assert-reminder "Passport renewal" waiting 2026-10-08T09:00:00
+
+# Due: back in the Inbox, at the top, dated when it came back.
+wake-reminders 2026-10-08T09:00:30
+assert-list-count 3
+assert-reminder "Passport renewal" reminded 2026-10-08T09:00:30
+assert-conversations Personal:inbox "Passport renewal" "The contract" "Lunch on Friday?"
+assert-conversation-date Personal:inbox "Passport renewal" 2026-10-08T09:00:30
+assert-conversations Personal:Reminders
+
+# Newer mail goes above it.
+list-clock 2026-10-08T12:00:00
+mail-add Personal:inbox now "Board meeting" from=Ingrid
+assert-conversations Personal:inbox "Board meeting" "Passport renewal" "The contract" "Lunch on Friday?"
+
+# Starred, it keeps its place (message rows list by their own dates); Done ends it.
+list-select 3
+assert-list-row 3 subject "Passport renewal"
+action win.star
+assert-conversations Personal:inbox "Board meeting" "Passport renewal" "The contract" "Lunch on Friday?"
+assert-reminder "Passport renewal" reminded
+action win.archive
+assert-reminder "Passport renewal" none
+assert-conversations Personal:inbox "Board meeting" "The contract" "Lunch on Friday?"
+
+# Cancelled while it waits: back where it came from, sorting by its own mail.
+remind "Lunch on Friday?" +2d
+assert-reminder "Lunch on Friday?" waiting +2d
+assert-conversations Personal:inbox "Board meeting" "The contract"
+remind-cancel "Lunch on Friday?"
+assert-reminder "Lunch on Friday?" none
+assert-conversations Personal:inbox "Board meeting" "The contract" "Lunch on Friday?"

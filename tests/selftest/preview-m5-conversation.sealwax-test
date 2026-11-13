@@ -5,7 +5,7 @@
 # catppuccin-latte rounded). Messages aren't marked read, so the unread marks stay. Every name,
 # address and message is fictional (app/src/reader/samples.rs).
 # Not run by CI: it writes into tools/progress/public/.
-# Run: tools/headless.sh 32 target/debug/sealwax --self-test tests/selftest/preview-m5-conversation.sealwax-test
+# Run: tools/headless.sh 32 target/debug/pronto --self-test tests/selftest/preview-m5-conversation.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -24,9 +24,9 @@ assert-conversation expanded trip-5,trip-6
 conversation-scroll top
 screenshot $DIR/../../tools/progress/public/m5-conversation-rows-matte-black-square-2026-10-06.png
 
-# 150 messages: the first, the fold, the latest ten.
+# 150 messages: the first, the fold, the one before the latest, the latest.
 conversation-show long-150
-assert-conversation folded 139
+assert-conversation folded 147
 conversation-scroll top
 screenshot $DIR/../../tools/progress/public/m5-conversation-long-matte-black-square-2026-10-06.png
 

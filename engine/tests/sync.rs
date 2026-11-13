@@ -213,6 +213,7 @@ fn new_mail_flag_changes_and_expunges_reach_the_store_on_every_flavour() {
                     assert_eq!(stats.full_flag_scans, 2, "{stats:?}");
                     assert_eq!(stats.uid_diffs, 0, "{stats:?}");
                 }
+                Flavor::Gmail => unreachable!("not one of Flavor::ALL"),
             }
 
             let third = account_pass(&mut conn, &store, account, &options()).await;
@@ -634,8 +635,9 @@ fn a_cut_first_sync_resumes_without_loss_or_duplication() {
                 let mut world = fake.world();
                 world.create("INBOX", &[]);
                 world.append_many("INBOX", 700, |_| 1);
-                // The second batch's FETCH is cut after 120 of its 200 responses.
-                world.cut("BODY.PEEK[HEADER.FIELDS", 1, 120);
+                // The third batch's FETCH, the first of 200 after the ramp's 25 and 100, is cut
+                // after 120 of its responses.
+                world.cut("BODY.PEEK[HEADER.FIELDS", 2, 120);
             }
             let (_dir, store, account) = store();
             let mut conn = fake.connect().await;
@@ -657,17 +659,17 @@ fn a_cut_first_sync_resumes_without_loss_or_duplication() {
             let inbox = folder(&store, account, "INBOX").await;
             let cut_state = state(&store, inbox).await;
             assert_eq!(
-                cut_state.messages, 200,
-                "{flavor:?}: the first batch committed"
+                cut_state.messages, 125,
+                "{flavor:?}: the first two batches committed"
             );
             assert!(matches!(
                 cut_state.state,
-                SyncState::Initial { floor: 501, .. }
+                SyncState::Initial { floor: 576, .. }
             ));
             let mut conn = fake.connect().await;
             let report = account_pass(&mut conn, &store, account, &options()).await;
             assert_eq!(
-                report.stats.stored, 500,
+                report.stats.stored, 575,
                 "{flavor:?}: resumed, not refetched"
             );
             assert_eq!(diverged(&fake, &store, account).await, Vec::<String>::new());

@@ -2,10 +2,10 @@ use crate::xdg;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-/// Points Sealwax at another Omarchy state directory instead of `~/.local/state/omarchy`:
+/// Points Pronto at another Omarchy state directory instead of `~/.local/state/omarchy`:
 /// `<dir>/current/theme/colors.toml` and `<dir>/current/theme.name`, so tests and headless
 /// checks can switch themes in a scratch directory. Must be absolute.
-pub const STATE_DIR_ENV: &str = "SEALWAX_OMARCHY_STATE";
+pub const STATE_DIR_ENV: &str = "PRONTO_OMARCHY_STATE";
 
 const THEME_COLOR_SCRIPT: &str = "usr/share/omarchy/bin/omarchy-theme-color";
 
@@ -61,7 +61,7 @@ impl OmarchyPaths {
 }
 
 /// `~/.local/state/omarchy`, or `override_dir` when it is an absolute path. Omarchy's
-/// scripts write `$HOME/.local/state` whatever `$XDG_STATE_HOME` says, so Sealwax reads there.
+/// scripts write `$HOME/.local/state` whatever `$XDG_STATE_HOME` says, so Pronto reads there.
 pub fn state_dir(override_dir: Option<&OsStr>, home: &Path) -> PathBuf {
     match override_dir.map(Path::new) {
         Some(dir) if dir.is_absolute() => dir.to_path_buf(),

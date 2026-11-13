@@ -26,7 +26,7 @@ use super::{
 use crate::api::{Event, SyncStatus};
 use crate::imap::Progress;
 use crate::pop3::{self, Busy, Credentials, Expire, Listing, Mailbox, Pop3Error};
-use crate::service::{Shared, password, tls};
+use crate::service::{Shared, password, password_failed, tls};
 use sealwax_domain::account::{AccountSettings, AuthMethod, LoginFailure, Pop3Policy, Receive};
 use sealwax_domain::message;
 use sealwax_domain::model::{AccountId, Flags, FolderId, MessageId};
@@ -115,7 +115,11 @@ impl Connect for Network {
                 Ok((session, offers))
             }
             Err(Pop3Error::Busy(busy)) => Err(Refused::Busy(busy)),
-            Err(error) => Err(Refused::Login(error.failure())),
+            Err(error) => {
+                let failure = error.failure();
+                password_failed(shared, settings, failure);
+                Err(Refused::Login(failure))
+            }
         }
     }
 }
@@ -164,7 +168,7 @@ pub(super) fn to_download<'a>(listing: &'a [Listing], known: &HashSet<&str>) -> 
     new
 }
 
-/// Whether the message's header says it was read: an mbox `Status:` field with `R`. Sealwax's
+/// Whether the message's header says it was read: an mbox `Status:` field with `R`. Pronto's
 /// read state is its own otherwise: what the server does at QUIT (Dovecot marks downloaded mail
 /// read, Stalwart doesn't) never shows.
 pub(super) fn read_by_header(raw: &[u8]) -> bool {
@@ -622,12 +626,23 @@ impl<C: Connect> Passes<C> {
         let now = unix_seconds();
         let shared = shared_uidls(&listing);
         let mut marked = Vec::new();
+        let mut on_disk = false;
         for entry in &listing {
             let Some((at, whole)) = downloaded.get(&entry.uidl) else {
                 continue;
             };
             if !whole || shared.contains(entry.uidl.as_str()) || !deletes(self.policy, now, *at) {
                 continue;
+            }
+            // The server's copy is the only other one. The store's commits reach the disk
+            // some time after they return, so a power cut could take a row this pass stored:
+            // nothing is marked until they are there, and what stays is deleted by a later pass.
+            if !on_disk {
+                if let Err(error) = self.shared.store.flush().recv().await {
+                    tracing::warn!(account = self.account.0, %error, "downloaded mail isn't on disk yet, so the server keeps its copies");
+                    break;
+                }
+                on_disk = true;
             }
             match race(&self.signals, seen, mailbox.delete(entry.number)).await? {
                 Ok(()) => marked.push(entry.uidl.clone()),

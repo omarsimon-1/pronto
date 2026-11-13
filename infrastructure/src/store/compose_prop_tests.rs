@@ -1,6 +1,6 @@
 //! At-most-once delivery (ADR-015) as a property test: random interleavings of queueing, Undo
 //! send, time passing, the account's actor sending what is due (accepted, a transient failure
-//! before DATA or a 4xx after it, a permanent refusal, the connection cut after DATA, Sealwax
+//! before DATA or a 4xx after it, a permanent refusal, the connection cut after DATA, Pronto
 //! stopped while the message is built, before or after DATA or before the answer is recorded),
 //! reopening the store with the engine's recovery, the user's answers to uncertain sends, the
 //! Sent copy, edits and discards.

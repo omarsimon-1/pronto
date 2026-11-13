@@ -25,6 +25,15 @@ pub const MEASURE_CSS: &str =
 /// beside a design narrower than the view.
 pub const MARGINS_COLOR: &str = "--sealwax-margins-color";
 
+/// The custom properties the reader's "•••" toggle of collapsed quoted history takes its fill
+/// and text from (a themed body sets them; a paper body keeps the toggle's neutral defaults).
+pub const QUOTE_TOGGLE_FILL: &str = "--sealwax-quote-fill";
+pub const QUOTE_TOGGLE_TEXT: &str = "--sealwax-quote-text";
+
+/// The reading measure of a themed HTML body (in CSS `ch`) and of a plain-text one (the app's
+/// reader, in `0`s of its font): DESIGN.md "Typography", about 70 characters a line.
+pub const READING_MEASURE: u32 = 70;
+
 /// How a body is shown, decided by the reader's colour heuristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BodyStyle {
@@ -94,8 +103,10 @@ impl Theme {
         let _ = write!(
             css,
             ":root{{color-scheme:{scheme}}}\n\
-             html{{background-color:{background};color:{fg};font:{size}px/{line} {family}}}\n\
-             body{{margin:0;padding:0;overflow-wrap:anywhere}}\n\
+             :root{{{QUOTE_TOGGLE_FILL}:{pill};{QUOTE_TOGGLE_TEXT}:{secondary}}}\n\
+             html{{background-color:{background};color:{fg};font:{size}px/{line} {family};\
+             font-weight:{weight}}}\n\
+             body{{margin:0;padding:0;overflow-wrap:anywhere;max-width:{READING_MEASURE}ch}}\n\
              a{{color:{accent}!important}}\n\
              blockquote{{margin:0 0 0 2px;padding-left:12px;border-left:3px solid {border};color:{secondary}}}\n\
              pre,code,kbd,samp,tt{{font-family:{mono};font-size:{mono_size}px}}\n\
@@ -107,14 +118,23 @@ impl Theme {
              ::selection{{background-color:{selection}}}\n",
             background = p.background,
             fg = p.foreground,
+            pill = p.foreground.with_alpha(0.1),
             size = fonts.default_size,
             line = READING_LINE_HEIGHT,
             family = css_family(&self.fonts.reading, generic),
+            weight = self.reading_weight(),
             accent = p.accent,
             secondary = self.mail.secondary_text,
             mono = css_family(&fonts.monospace, "monospace"),
             mono_size = fonts.monospace_size,
         );
+    }
+
+    /// Message text's weight: the theme's regular weight (`--sw-weight-regular`).
+    pub fn reading_weight(&self) -> u32 {
+        self.font_weights()
+            .find(|(name, _)| *name == "regular")
+            .map_or(400, |(_, weight)| weight)
     }
 
     /// WebKit's default fonts and sizes for message text.
@@ -173,12 +193,22 @@ mod tests {
             format!("color:{}", p.foreground),
             format!("a{{color:{}!important}}", p.accent),
             format!("color:{}}}", theme.mail.secondary_text),
-            "font:15px/1.55 \"Test Sans\", sans-serif".to_owned(),
+            format!(
+                ":root{{{QUOTE_TOGGLE_FILL}:{};{QUOTE_TOGGLE_TEXT}:{}}}",
+                p.foreground.with_alpha(0.1),
+                theme.mail.secondary_text
+            ),
+            "body{margin:0;padding:0;overflow-wrap:anywhere;max-width:70ch}".to_owned(),
+            "font:15px/1.55 \"Test Sans\", sans-serif;font-weight:450}".to_owned(),
             "font-family:\"Test Mono\", monospace;font-size:13px".to_owned(),
         ] {
             assert!(css.contains(&expected), "{expected}\n{css}");
         }
         assert_eq!(theme.webview_background(BodyStyle::Themed), p.background);
+        let adwaita = self::theme(Mode::Light, ReadingFont::Adwaita);
+        let css = adwaita.webview_css(BodyStyle::Themed);
+        let expected = "font:15px/1.55 \"Adwaita Sans\", sans-serif;font-weight:500}";
+        assert!(css.contains(expected), "{expected}\n{css}");
     }
 
     #[test]

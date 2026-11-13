@@ -4,7 +4,7 @@
 # answer. A newer release comes with the command that installs it and a button that copies the
 # command. Cancel while it checks leaves a late answer unused. The engine is the script's: nothing
 # reaches the network.
-# Run: tools/headless.sh 57 target/debug/sealwax --self-test tests/selftest/updates.sealwax-test
+# Run: tools/headless.sh 57 target/debug/pronto --self-test tests/selftest/updates.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -38,16 +38,16 @@ action app.check-for-updates
 wait-until assert-shown check-for-updates true
 engine-expect check-for-updates
 engine-reply update-checked 99.1.2
-assert-text-contains check-for-updates "Sealwax 99.1.2 is available"
+assert-text-contains check-for-updates "Pronto 99.1.2 is available"
 assert-text-contains check-for-updates "paste it into a terminal"
-assert-text-contains check-for-updates "press Ctrl+Q in Sealwax"
-assert-text-contains update-command "curl -L -o /tmp/sealwax.pkg.tar.zst https://github.com/PixDevsApps/sealwax/releases/download/v99.1.2/sealwax-x86_64.pkg.tar.zst && sudo pacman -U /tmp/sealwax.pkg.tar.zst"
+assert-text-contains check-for-updates "press Ctrl+Q in Pronto"
+assert-text-contains update-command "curl -L -o /tmp/pronto.pkg.tar.zst https://github.com/omarsimon-1/pronto/releases/download/v99.1.2/pronto-x86_64.pkg.tar.zst && sudo pacman -U /tmp/pronto.pkg.tar.zst"
 assert-accessible dialog
 tab-chain window forward 10
 assert-tab-chain update-command,update-copy
 setup-click update-copy
 assert-text-contains update-copy Copied
-assert-clipboard "curl -L -o /tmp/sealwax.pkg.tar.zst https://github.com/PixDevsApps/sealwax/releases/download/v99.1.2/sealwax-x86_64.pkg.tar.zst && sudo pacman -U /tmp/sealwax.pkg.tar.zst"
+assert-clipboard "curl -L -o /tmp/pronto.pkg.tar.zst https://github.com/omarsimon-1/pronto/releases/download/v99.1.2/pronto-x86_64.pkg.tar.zst && sudo pacman -U /tmp/pronto.pkg.tar.zst"
 key Escape
 wait-until assert-shown check-for-updates false
 

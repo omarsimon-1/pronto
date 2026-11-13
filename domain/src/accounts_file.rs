@@ -1,4 +1,4 @@
-//! `accounts.toml` (ADR-009): the accounts, in `$XDG_CONFIG_HOME/sealwax/`. The setup assistant
+//! `accounts.toml` (ADR-009): the accounts, in `$XDG_CONFIG_HOME/pronto/`. The setup assistant
 //! adds and removes entries, and the user may edit the file by hand. It is read like
 //! `config.toml`: every mistake with its line and column, and a file with mistakes is not
 //! applied at all. It never holds a secret: a password, secret or token field is a mistake.
@@ -74,7 +74,7 @@ fn is_secret_name(name: &str) -> bool {
 
 fn secret_message(name: &str) -> String {
     format!(
-        "{name} looks like a password or token: Sealwax keeps those in the keyring, never in \
+        "{name} looks like a password or token: Pronto keeps those in the keyring, never in \
          accounts.toml; remove this line"
     )
 }
@@ -140,6 +140,7 @@ fn auth_name(auth: AuthMethod) -> &'static str {
     match auth {
         AuthMethod::Password => "password",
         AuthMethod::OAuth(OAuthProvider::Microsoft) => "microsoft",
+        AuthMethod::OAuth(OAuthProvider::Google) => "google",
     }
 }
 
@@ -307,11 +308,7 @@ impl Reader<'_> {
             );
             return None;
         }
-        let text = text.replace("\r\n", "\n");
-        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
-        let first = lines.iter().position(|line| !line.is_empty())?;
-        let last = lines.iter().rposition(|line| !line.is_empty())?;
-        Some(lines[first..=last].join("\n"))
+        normalize_signature(text)
     }
 
     /// The `[[account.identity]]` tables of an account.
@@ -494,10 +491,12 @@ impl Reader<'_> {
                 "auth" => match value.get_ref().as_str() {
                     Some("password") => auth = AuthMethod::Password,
                     Some("microsoft") => auth = AuthMethod::OAuth(OAuthProvider::Microsoft),
+                    Some("google") => auth = AuthMethod::OAuth(OAuthProvider::Google),
                     _ => self.error(
                         span,
-                        "auth is \"password\" (a password or app password, kept in the keyring) \
-                         or \"microsoft\" (Sign in with Microsoft)",
+                        "auth is \"password\" (a password or app password, kept in the keyring), \
+                         \"microsoft\" (Sign in with Microsoft) or \"google\" (Sign in with \
+                         Google)",
                     ),
                 },
                 "imap" | "pop3" => {
@@ -682,7 +681,7 @@ impl Reader<'_> {
                             Some("none" | "plain" | "plaintext" | "off" | "insecure")
                         );
                         let hint = if never {
-                            "; Sealwax never connects without TLS"
+                            "; Pronto never connects without TLS"
                         } else {
                             ""
                         };
@@ -1136,16 +1135,17 @@ pub fn remove(text: &str, key: &AccountKey) -> Result<Option<String>, EditError>
     Ok(Some(output))
 }
 
-/// `text` with the account `key`'s `label` and `color` set as given, `None` taking the line
+/// `text` with the account `key`'s `label`, `color` and `signature` set as given, `None` taking the line
 /// out; `None` when the file has no such account. A value already written is replaced in place,
 /// its comment kept; a new one goes after the address (the colour after the label). Everything
-/// else stays byte for byte. A file with mistakes, or a label that couldn't be read back, is
+/// else stays byte for byte. A file with mistakes, or a setting that couldn't be read back, is
 /// refused.
 pub fn relabel(
     text: &str,
     key: &AccountKey,
     label: Option<&str>,
     color: Option<AccountColor>,
+    signature: Option<&str>,
 ) -> Result<Option<String>, EditError> {
     if label.is_some_and(|label| !is_plain_text(label)) {
         return Err(EditError::Account(
@@ -1177,6 +1177,13 @@ pub fn relabel(
         "address"
     };
     set_value(table, "color", color.map(AccountColor::name), after_label);
+    let signature = signature.and_then(normalize_signature);
+    let after_color = if table.contains_key("color") {
+        "color"
+    } else {
+        after_label
+    };
+    set_value(table, "signature", signature.as_deref(), after_color);
     let output = document.to_string();
     let expected: Vec<AccountSettings> = before
         .into_iter()
@@ -1184,6 +1191,7 @@ pub fn relabel(
             if &account.key == key {
                 account.label = label.map(str::to_owned);
                 account.color = color;
+                account.signature = signature.clone();
             }
             account
         })
@@ -1194,6 +1202,16 @@ pub fn relabel(
         ));
     }
     Ok(Some(output))
+}
+
+/// Normalizes line endings and surrounding blank lines in a plain-text signature; an empty
+/// signature is absent. The settings parser also checks its length and control characters.
+pub fn normalize_signature(text: &str) -> Option<String> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let first = lines.iter().position(|line| !line.is_empty())?;
+    let last = lines.iter().rposition(|line| !line.is_empty())?;
+    Some(lines[first..=last].join("\n"))
 }
 
 /// Sets the string `name` in `table`: in place when it is there (its comment kept), else right
@@ -1224,8 +1242,8 @@ fn set_value(table: &mut Table, name: &str, text: Option<&str>, after: &str) {
 /// The `accounts.toml` the assistant starts from: a header and a commented example, so the
 /// file explains itself to someone who opens it.
 pub fn default_accounts_file() -> String {
-    "# Sealwax accounts (accounts.toml). The setup assistant adds and removes accounts here, and\n\
-     # you can edit the file by hand: Sealwax keeps your comments and layout when it writes, and\n\
+    "# Pronto accounts (accounts.toml). The setup assistant adds and removes accounts here, and\n\
+     # you can edit the file by hand: Pronto keeps your comments and layout when it writes, and\n\
      # applies the file when you save it. A mistake is shown with its line and column, and the\n\
      # previous accounts stay until the file is fixed. Passwords and tokens are never in this\n\
      # file; they live in the keyring.\n\
@@ -1236,7 +1254,7 @@ pub fn default_accounts_file() -> String {
      # key = \"work\"                   # its name in the keyring and the store; keep it\n\
      # name = \"Ada Lovelace\"          # the sender name on your mail\n\
      # address = \"ada@example.test\"\n\
-     # label = \"Work\"                 # optional: the account's name in Sealwax; the address\n\
+     # label = \"Work\"                 # optional: the account's name in Pronto; the address\n\
      #                                # by default\n\
      # color = \"sage\"                 # optional: its colour in the sidebar: rose, clay,\n\
      #                                # olive, sage, teal, slate, iris or mauve\n\
@@ -1249,7 +1267,7 @@ pub fn default_accounts_file() -> String {
      # [account.imap]\n\
      # host = \"imap.example.test\"\n\
      # port = 993                     # optional: 993 for \"tls\", 143 for \"starttls\"\n\
-     # security = \"tls\"               # or \"starttls\"; Sealwax never connects without TLS\n\
+     # security = \"tls\"               # or \"starttls\"; Pronto never connects without TLS\n\
      #\n\
      # [account.pop3]                 # in place of [account.imap], for an account that\n\
      #                                # downloads its mail by POP3 into folders on this\n\
@@ -1386,6 +1404,18 @@ mod tests {
     }
 
     #[test]
+    fn google_accounts_are_written_and_read_back() {
+        let text = "[[account]]\nkey = \"g1\"\nname = \"Omar\"\naddress = \"one@gmail.com\"\n\
+                    auth = \"google\"\n[account.imap]\nhost = \"imap.gmail.com\"\n\
+                    [account.smtp]\nhost = \"smtp.gmail.com\"\n";
+        let account = &parse(text).unwrap()[0];
+        assert_eq!(account.auth, AuthMethod::OAuth(OAuthProvider::Google));
+        let written = entry(account);
+        assert!(written.contains("auth = \"google\""), "{written}");
+        assert_eq!(&parse(&written).unwrap()[0], account);
+    }
+
+    #[test]
     fn reads_every_field() {
         let text = "[[account]]\nkey = \"k3j5x8m2q9wa\"\nname = \" Ada \"\n\
                     address = \"ada@example.test\"\nusername = \"ada\"\nauth = \"microsoft\"\n\
@@ -1487,7 +1517,7 @@ mod tests {
     fn relabel_sets_the_label_and_the_color_after_the_address() {
         let text = format!("# my accounts\n\n{ONE}");
         let work = AccountKey("work".to_owned());
-        let named = relabel(&text, &work, Some("Work"), Some(AccountColor::Sage))
+        let named = relabel(&text, &work, Some("Work"), Some(AccountColor::Sage), None)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1503,14 +1533,17 @@ mod tests {
             ("Work", Some(AccountColor::Sage))
         );
         // Changed again: in place; taken out: the file as it was.
-        let renamed = relabel(&named, &work, Some("Jobb"), Some(AccountColor::Teal))
+        let renamed = relabel(&named, &work, Some("Jobb"), Some(AccountColor::Teal), None)
             .unwrap()
             .unwrap();
         assert!(
             renamed.contains("label = \"Jobb\"\ncolor = \"teal\"\n"),
             "{renamed}"
         );
-        assert_eq!(relabel(&named, &work, None, None).unwrap().unwrap(), text);
+        assert_eq!(
+            relabel(&named, &work, None, None, None).unwrap().unwrap(),
+            text
+        );
     }
 
     #[test]
@@ -1522,14 +1555,20 @@ mod tests {
                     [account.imap]\nhost = \"imap.example.test\"\n\n[account.smtp]\n\
                     host = \"smtp.example.test\"\n";
         let club = AccountKey("club".to_owned());
-        let changed = relabel(text, &AccountKey("work".to_owned()), Some("New"), None)
-            .unwrap()
-            .unwrap();
+        let changed = relabel(
+            text,
+            &AccountKey("work".to_owned()),
+            Some("New"),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             changed,
             text.replace("\"Old\"   # mine", "\"New\"   # mine")
         );
-        let colored = relabel(text, &club, None, Some(AccountColor::Iris))
+        let colored = relabel(text, &club, None, Some(AccountColor::Iris), None)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1546,18 +1585,18 @@ mod tests {
     fn relabel_refuses_what_it_cant_write() {
         let work = AccountKey("work".to_owned());
         assert_eq!(
-            relabel(ONE, &AccountKey("nobody".to_owned()), Some("X"), None),
+            relabel(ONE, &AccountKey("nobody".to_owned()), Some("X"), None, None),
             Ok(None)
         );
-        assert_eq!(relabel("", &work, Some("X"), None), Ok(None));
+        assert_eq!(relabel("", &work, Some("X"), None, None), Ok(None));
         assert_eq!(
-            relabel(ONE, &work, Some(" "), None),
+            relabel(ONE, &work, Some(" "), None, None),
             Err(EditError::Account(
                 "the label is empty or has control characters".to_owned()
             ))
         );
         assert!(matches!(
-            relabel(&format!("{ONE}oops = 1\n"), &work, Some("X"), None),
+            relabel(&format!("{ONE}oops = 1\n"), &work, Some("X"), None, None),
             Err(EditError::Invalid(_))
         ));
     }
@@ -2086,7 +2125,7 @@ mod tests {
             (
                 ONE.replace("security = \"starttls\"", "security = \"none\""),
                 "line 11, column 12: security is \"tls\" (TLS from the first byte) or \
-                 \"starttls\"; Sealwax never connects without TLS",
+                 \"starttls\"; Pronto never connects without TLS",
             ),
             (
                 ONE.replace("security = \"starttls\"", "port = 70000"),
@@ -2101,7 +2140,7 @@ mod tests {
                 "line 3, column 1: unknown setting adress in [[account]]; did you mean address?",
             ),
             (
-                ONE.replace("name = ", "auth = \"google\"\nname = "),
+                ONE.replace("name = ", "auth = \"yahoo\"\nname = "),
                 "line 3, column 8: auth is \"password\"",
             ),
             (

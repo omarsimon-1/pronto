@@ -4,7 +4,7 @@
 # domains that can't be added, and nothing found, which opens the manual settings. Then "Set up
 # manually" from each step, the manual fields' checks, and the app without an engine. Every
 # address and server is fictional. Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/setup-detect.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/setup-detect.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -87,7 +87,7 @@ assert-setup step microsoft
 assert-label setup-title "Outlook.com account"
 assert-shown setup-microsoft true
 assert-sensitive setup-microsoft-button false
-assert-label setup-microsoft-note "Microsoft sign-in isn't available in this build of Sealwax yet."
+assert-label setup-microsoft-note "Microsoft sign-in isn't available in this build of Pronto yet."
 assert-label setup-microsoft-footnote "Outlook.com and Microsoft 365 accept only Microsoft sign-in for mail apps."
 assert-shown setup-password false
 assert-shown setup-primary false
@@ -170,6 +170,8 @@ engine-expect verify address=kari@example.test name=kari@example.test imap=imap.
 engine-reply verified ok
 engine-expect add-account smtp=smtp.example.test:587:starttls
 engine-reply added ok
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 assert-setup open false
 wait-until assert-shown welcome false
 
@@ -218,7 +220,7 @@ setup-key enter
 assert-setup step address
 assert-shown setup-alert true
 assert-label setup-alert-title "Not connected to the mail engine"
-assert-label setup-alert-body "This build of Sealwax has no mail engine attached yet, so it can't look up or check an account."
+assert-label setup-alert-body "This build of Pronto has no mail engine attached yet, so it can't look up or check an account."
 screenshot $DIR/../../.local/selftest/setup-not-connected.png
 setup-click setup-manual-link
 setup-type setup-imap-host imap.example.test

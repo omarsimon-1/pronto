@@ -43,7 +43,7 @@ id!(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
     pub id: AccountId,
-    /// What Sealwax calls the account: `accounts.toml`'s label, else the address. The sender
+    /// What Pronto calls the account: `accounts.toml`'s label, else the address. The sender
     /// name is the settings' own.
     pub name: String,
     pub address: String,
@@ -118,7 +118,7 @@ pub struct Folder {
     pub unread: u32,
 }
 
-/// IMAP system flags plus the keywords Sealwax filters on, as a bit set. Other keywords are kept
+/// IMAP system flags plus the keywords Pronto filters on, as a bit set. Other keywords are kept
 /// as text beside it, so the cache can equal the server (S1).
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Flags(u32);
@@ -274,6 +274,65 @@ pub struct MessageSummary {
     pub thread_count: u32,
 }
 
+/// One sender of a conversation, as its list row names them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Participant {
+    /// The display name of the sender's newest message that gave one; may be empty.
+    pub name: String,
+    pub email: String,
+    /// The user: one of the account's own addresses, or the sender of a copy in its Sent or
+    /// Drafts folder (which also covers the identities the store doesn't know).
+    pub is_me: bool,
+    /// Sent a member that is unread in the view's folders.
+    pub unread: bool,
+    /// When they last wrote: the date of their newest message that counts, Unix seconds (the
+    /// row names the latest writers, phase C).
+    pub last: i64,
+}
+
+/// What a conversation list row shows (the fork's conversation grouping, docs/superhuman/
+/// store.md). The conversation's "latest" message gives the row its date, sender, snippet and
+/// place: its newest shown message outside Trash, Junk and drafts, so a reply in Sent moves it
+/// up; in a Trash, Junk or Drafts folder view, the newest member there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationSummary {
+    pub thread: ThreadId,
+    pub account: AccountId,
+    /// Where the reader opens it: the oldest unread member in the view's folders, else the
+    /// newest member there.
+    pub anchor: MessageId,
+    /// The folder of `anchor`.
+    pub folder: FolderId,
+    /// The newest member in the view's folders (what Mark unread and Star act on).
+    pub last_member: MessageId,
+    /// The latest message: the row's date, sender and snippet, and its sort key with `date`.
+    pub latest: MessageId,
+    /// The latest message's date, Unix seconds; rows are ordered by `(date, latest)`, newest
+    /// first.
+    pub date: i64,
+    pub sender_name: String,
+    pub sender_email: String,
+    pub snippet: String,
+    /// The conversation's subject without Re:/Fwd:-style prefixes (`message::base_subject`).
+    pub subject: String,
+    /// Distinct senders in the order they first wrote, at most four: the first one and the
+    /// three who wrote last when there are more.
+    pub participants: Vec<Participant>,
+    /// Distinct senders in all.
+    pub participant_count: u32,
+    /// Shown messages of the conversation outside Trash, Junk and drafts, each Message-ID once
+    /// (all its shown messages when it has none there).
+    pub messages: u32,
+    /// Its shown messages in the view's folders: what triage on the row acts on.
+    pub members: u32,
+    /// Members in the view's folders that are unread, starred, or have attachments.
+    pub unread: u32,
+    pub flagged: u32,
+    pub attachments: u32,
+    /// The conversation holds a draft: a shown message in a Drafts folder or flagged `\Draft`.
+    pub has_draft: bool,
+}
+
 /// Which body alternatives a message has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BodyKind {
@@ -313,7 +372,7 @@ impl BodyKind {
     }
 }
 
-/// The header fields Sealwax keeps, decoded (RFC 2047 names and subjects included).
+/// The header fields Pronto keeps, decoded (RFC 2047 names and subjects included).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Headers {
     pub from: Vec<Address>,
@@ -331,6 +390,9 @@ pub struct Headers {
     pub list_id: Option<String>,
     /// The conversation Outlook's `Thread-Index` names.
     pub thread_index: Option<ThreadIndex>,
+    /// What the header says about how the message was sent, for the Split Inbox (the fork's
+    /// Superhuman pass, docs/superhuman/split.md).
+    pub facts: crate::split::HeaderFacts,
 }
 
 /// A non-body MIME part. `part` indexes mail-parser's part list of the raw message.

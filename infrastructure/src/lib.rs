@@ -6,8 +6,11 @@ pub mod blobs;
 pub mod ingest;
 pub mod layout;
 pub mod logging;
+pub mod migration;
 pub mod omarchy;
 pub mod rules;
 pub mod settings_files;
 pub mod store;
 pub mod xdg;
+
+pub mod agent;

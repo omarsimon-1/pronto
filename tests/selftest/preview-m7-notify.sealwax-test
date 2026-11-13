@@ -7,7 +7,7 @@
 # on a message gone since says. Dark matte-black with square corners, light catppuccin-latte
 # rounded. Every name, subject and text is fictional.
 # Not run by CI: it writes into tools/progress/public/.
-# Run: tools/headless.sh 55 target/debug/sealwax --self-test tests/selftest/preview-m7-notify.sealwax-test
+# Run: tools/headless.sh 55 target/debug/pronto --self-test tests/selftest/preview-m7-notify.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -27,7 +27,7 @@ folder archive Work
 notify-mail trip Work:inbox "Hyttetur i oktober" "from=Kari Nordmann" "text=Hei! Skal vi leie hytta på Geilo den siste helga i oktober? Jeg har sjekket ledige datoer."
 notify-arrive trip
 wait-until assert-notify-count 1
-assert-notify 1 app-name Sealwax
+assert-notify 1 app-name Pronto
 assert-notify 1 summary "Kari Nordmann"
 assert-notify 1 body "Hyttetur i oktober"
 assert-notify 1 actions "default,Archive,Mark Read"
@@ -65,7 +65,7 @@ corners 8
 close-window
 assert-window false
 wait-until assert-notify-count 4
-assert-notify 4 summary "Sealwax keeps running"
+assert-notify 4 summary "Pronto keeps running"
 notify-mail dinner Work:inbox "Middag fredag?" "from=Ingrid Solberg" "text=Vi lager taco hos oss på fredag. Kom gjerne ved sjutiden!"
 notify-arrive dinner
 wait-until assert-notify-count 5

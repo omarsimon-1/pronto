@@ -8,19 +8,25 @@
 //! | Command | What it does |
 //! | --- | --- |
 //! | `outbox-draft NAME ACCOUNT` | Saves a draft from ACCOUNT (`triage-account`'s, which has a server) in the store, closed |
-//! | `outbox-queue NAME` | Queues it for the undo window (`queue_send`) and calls `outbox::queued`, as the backend's send does |
+//! | `outbox-queue NAME [MS]` | Queues it for the undo window (`queue_send`) and calls `outbox::queued`, as the backend's send does; with MS, for MS from now and `outbox::scheduled`, as Send Later does |
+//! | `outbox-name NAME` | Names the outbox's newest entry NAME (a send the app queued itself), for the commands below |
+//! | `outbox-copy NAME` | Files the draft's copy in its account's Drafts folder (its Message-ID, subject and sender), as the engine's upload and the next sync would |
 //! | `outbox-quick NAME ACCOUNT MESSAGE TEXT` | A reply to MESSAGE from ACCOUNT, sent from the quick reply with TEXT: saved, marked as the quick reply's, queued |
 //! | `outbox-engine start\|sent\|uncertain NAME [stopped\|no-reply\|unreadable]` | The engine's step on it: `send_started`; `send_done` and `Event::Sent`; `send_uncertain` and `Event::SendUncertain` with why (`stopped` when none is named) |
 //! | `outbox-engine failed NAME ERROR` | `send_failed` (permanent) and `Event::SendFailed`: `recipients-refused` (two), `too-large`, `refused`, `needs-sign-in`, `other` |
 //! | `outbox-expect KIND [KEY=VALUE]` | The app sent KIND to the engine (`outbox-queued`, `ops-queued`, `drafts-changed`) within a second; other commands are passed over |
 //! | `toast-click LABEL` | Clicks the toast button labelled LABEL (`Undo`, `Open`) |
-//! | `quick-store-draft MESSAGE TEXT` | A closed reply draft to MESSAGE whose body is TEXT, in the store, as an earlier session's quick reply left it |
+//! | `reply-draft-name NAME MESSAGE` | Names the store's newest closed reply draft to MESSAGE (the inline reply's, as `assert-reply-draft` reads it) NAME, for the commands here |
+//! | `outbox-discard NAME` | Discards the draft in the store, as a card in another window would: the app isn't told |
+//! | `quick-store-draft MESSAGE TEXT [KIND] [TO]` | A closed reply draft to MESSAGE whose body is TEXT, in the store, as an earlier session's quick reply left it: a `reply` (or `reply-all`) to Tomas Berg (or the addresses TO, comma-separated) |
 //! | `assert-outbox NAME queued\|sending\|uncertain\|sent\|draft\|gone` | Where the draft stands in the store |
 //! | `assert-outbox-entries N` | The outbox as the window last read it holds N entries |
+//! | `assert-outbox-at NAME WHEN` | The store's outbox entry of NAME goes at WHEN, as the window says it (`tomorrow 08:00`, `Tue 08:00`; Send Later) |
 //! | `stand-in-mark` | Notes the time, for `assert-stand-in saved-between` |
 //! | `assert-stand-in sent\|discarded\|closed N` | The stand-in backend's count |
 //! | `assert-stand-in saved-between MIN MAX` | A save came MIN to MAX ms after `stand-in-mark`; prints every save's time since |
 //! | `assert-stand-in last-sent TEXT` | The stand-in's last sent draft starts with TEXT's lines |
+//! | `assert-stand-in last-saved TEXT` | The stand-in's last saved draft starts with TEXT's lines |
 //! | `assert-stand-in quick-draft MESSAGE TEXT\|none` | The stand-in's newest kept reply draft to MESSAGE: its body is TEXT (closed), or it was discarded |
 //! | `assert-compose-draft NAME` | The latest `composer::open` request is `Draft(NAME)` |
 
@@ -32,8 +38,9 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use sealwax_domain::compose::text::to_html;
 use sealwax_domain::compose::{Draft, DraftSource, ReplyKind};
-use sealwax_domain::model::{Address, DraftId};
+use sealwax_domain::model::{Address, DraftId, Flags, FolderRole};
 use sealwax_engine::api::{Event, SendError, UncertainReason};
+use sealwax_infrastructure::ingest::{self, RawMessage};
 use sealwax_infrastructure::store::{
     DraftSaved, Prepared, SaveDraft, SendFailed, SendFailure, SendQueued, SendState,
 };
@@ -43,14 +50,19 @@ use std::time::{Duration, Instant};
 
 pub const COMMANDS: &[(&str, usize, usize)] = &[
     ("outbox-draft", 2, 2),
-    ("outbox-queue", 1, 1),
+    ("outbox-queue", 1, 2),
+    ("outbox-name", 1, 1),
+    ("outbox-copy", 1, 1),
     ("outbox-quick", 4, 4),
     ("outbox-engine", 2, 3),
     ("outbox-expect", 1, 2),
     ("toast-click", 1, 1),
-    ("quick-store-draft", 2, 2),
+    ("quick-store-draft", 2, 4),
+    ("reply-draft-name", 2, 2),
+    ("outbox-discard", 1, 1),
     ("assert-outbox", 2, 2),
     ("assert-outbox-entries", 1, 1),
+    ("assert-outbox-at", 2, 2),
     ("assert-stand-in", 2, 3),
     ("stand-in-mark", 0, 0),
     ("assert-compose-draft", 1, 1),
@@ -71,7 +83,7 @@ fn now_ms() -> i64 {
     glib::real_time() / 1000
 }
 
-fn draft(name: &str) -> Result<(DraftId, sealwax_domain::model::AccountId), String> {
+pub(super) fn draft(name: &str) -> Result<(DraftId, sealwax_domain::model::AccountId), String> {
     DRAFTS
         .with(|drafts| drafts.borrow().get(name).copied())
         .ok_or_else(|| format!("no draft {name}; save it with outbox-draft"))
@@ -91,13 +103,73 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
     let arg = |index: usize| args[index].as_str();
     match command {
         "outbox-draft" => save_draft(harness, arg(0), arg(1)).await,
-        "outbox-queue" => queue(harness, arg(0)).await,
+        "outbox-queue" => {
+            let later = args.get(1).map(|ms| number(ms)).transpose()?;
+            queue(harness, arg(0), later.map(|ms| ms as i64)).await
+        }
+        "outbox-name" => {
+            let entries = store(harness)?
+                .outbox(None)
+                .recv()
+                .await
+                .map_err(|error| error.to_string())?;
+            let newest = entries
+                .iter()
+                .max_by_key(|entry| entry.draft.0)
+                .ok_or("the outbox is empty")?;
+            println!("  # {} is draft {}", arg(0), newest.draft.0);
+            DRAFTS.with(|drafts| {
+                drafts
+                    .borrow_mut()
+                    .insert(arg(0).to_owned(), (newest.draft, newest.account))
+            });
+            Ok(())
+        }
+        "outbox-copy" => copy_draft(harness, arg(0)).await,
+        "reply-draft-name" => {
+            let message = super::conversation::id(arg(1))?;
+            let stored = store(harness)?
+                .reply_draft(message)
+                .recv()
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("no reply draft to {}", arg(1)))?;
+            println!("  # {} is draft {}", arg(0), stored.id.0);
+            DRAFTS.with(|drafts| {
+                drafts
+                    .borrow_mut()
+                    .insert(arg(0).to_owned(), (stored.id, stored.draft.account))
+            });
+            Ok(())
+        }
+        "outbox-discard" => {
+            let (id, _) = draft(arg(0))?;
+            let discarded = store(harness)?
+                .discard_draft(id)
+                .recv()
+                .await
+                .map_err(|error| error.to_string())?;
+            match discarded.refused {
+                None if discarded.found => Ok(()),
+                None => Err(format!("{} wasn't in the store", arg(0))),
+                Some(state) => Err(format!("{} wasn't discarded: {state:?}", arg(0))),
+            }
+        }
         "outbox-quick" => {
             save_draft(harness, arg(0), arg(1)).await?;
             let (id, _) = draft(arg(0))?;
             let message = super::conversation::id(arg(2))?;
-            outbox::from_quick_reply(id, message, arg(3).to_owned());
-            queue(harness, arg(0)).await
+            outbox::from_quick_reply(
+                id,
+                crate::reader::QuickDraft {
+                    message,
+                    kind: sealwax_domain::compose::ReplyKind::Reply,
+                    text: arg(3).to_owned(),
+                    recipients: None,
+                    signature: None,
+                },
+            );
+            queue(harness, arg(0), None).await
         }
         "outbox-engine" => engine(harness, args).await,
         "outbox-expect" => expect(harness, arg(0), args.get(1).map(String::as_str)).await,
@@ -105,7 +177,21 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
             let button = toast_button(harness, arg(0))?;
             triage::click_button(harness, &button).await
         }
-        "quick-store-draft" => store_quick_draft(harness, arg(0), arg(1)).await,
+        "quick-store-draft" => {
+            let kind = match args.get(2).map(String::as_str) {
+                None | Some("reply") => ReplyKind::Reply,
+                Some("reply-all") => ReplyKind::ReplyAll,
+                Some(other) => return Err(format!("use reply or reply-all, not {other}")),
+            };
+            let to: Vec<Address> = match args.get(3) {
+                Some(list) => list
+                    .split(',')
+                    .map(|email| Address::new("", email.trim()))
+                    .collect(),
+                None => vec![Address::new("Tomas Berg", "tomas@example.test")],
+            };
+            store_quick_draft(harness, arg(0), arg(1), kind, to).await
+        }
         "assert-outbox" => {
             let (id, _) = draft(arg(0))?;
             let stored = store(harness)?
@@ -127,6 +213,23 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
         }
         "assert-outbox-entries" => {
             equal("outbox entries", outbox::entries().len(), number(arg(0))?)
+        }
+        "assert-outbox-at" => {
+            let (id, _) = draft(arg(0))?;
+            let entries = store(harness)?
+                .outbox(None)
+                .recv()
+                .await
+                .map_err(|error| error.to_string())?;
+            let entry = entries
+                .iter()
+                .find(|entry| entry.draft == id)
+                .ok_or_else(|| format!("{} isn't in the outbox", arg(0)))?;
+            equal(
+                &format!("when {} goes", arg(0)),
+                crate::time_picker::describe(entry.not_before).as_str(),
+                arg(1),
+            )
         }
         "assert-stand-in" => stand_in(harness, args),
         "stand-in-mark" => {
@@ -187,22 +290,77 @@ async fn save_draft(harness: &Harness, name: &str, account: &str) -> StepResult 
     Ok(())
 }
 
+/// The engine's upload of draft `name` to its account's Drafts folder, and the sync that brings
+/// that copy into the store: a message with the draft's Message-ID there.
+async fn copy_draft(harness: &Harness, name: &str) -> StepResult {
+    let (id, account) = draft(name)?;
+    let stored = store(harness)?
+        .draft(id)
+        .recv()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no draft {name} in the store"))?;
+    let mailbox = harness.state.mailbox();
+    let folder = mailbox
+        .folders()
+        .into_iter()
+        .find(|folder| folder.account == account && folder.role == FolderRole::Drafts)
+        .ok_or("the draft's account has no Drafts folder")?
+        .id;
+    let draft = stored.draft;
+    let date = glib::DateTime::now_local()
+        .and_then(|now| now.format("%a, %d %b %Y %H:%M:%S %z"))
+        .map_err(|error| error.to_string())?;
+    let raw = format!(
+        "Message-ID: <{}>\r\nFrom: {} <{}>\r\nTo: Kari Nordmann <kari@example.test>\r\n\
+         Subject: {}\r\nDate: {date}\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\nA fictional draft.\r\n",
+        draft.message_id, draft.from.name, draft.from.email, draft.subject,
+    )
+    .into_bytes();
+    let store = mailbox.shared_store().ok_or("the store is not open")?;
+    let blobs = mailbox.blobs().ok_or("the blob store is not open")?;
+    let ingested = blocking(move || {
+        ingest::ingest_raw(
+            &store,
+            &blobs,
+            vec![RawMessage {
+                folder,
+                flags: Flags::SEEN.union(Flags::DRAFT),
+                raw,
+                ..RawMessage::default()
+            }],
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await??;
+    let copy = ingested
+        .ids
+        .first()
+        .copied()
+        .flatten()
+        .ok_or("the store already held the copy")?;
+    println!("  # {name}'s copy is message {}", copy.0);
+    super::mail::settled(harness).await
+}
+
 /// What the backend's send does: the store's queue for the undo window, then the window's toast.
-async fn queue(harness: &Harness, name: &str) -> StepResult {
+async fn queue(harness: &Harness, name: &str, later: Option<i64>) -> StepResult {
     let (id, _) = draft(name)?;
-    let window = harness
-        .state
-        .triage()
-        .map_or(crate::triage::UNDO_WINDOW, |triage| triage.window());
+    let window = outbox::send_window(&harness.state).as_millis() as i64;
+    let not_before = now_ms() + later.unwrap_or(window);
     let queued = store(harness)?
-        .queue_send(id, now_ms() + window.as_millis() as i64)
+        .queue_send(id, not_before)
         .recv()
         .await
         .map_err(|error| error.to_string())?;
     let SendQueued::Queued { account, .. } = queued else {
         return Err(format!("not queued: {queued:?}"));
     };
-    outbox::queued(&harness.state, id, account);
+    match later {
+        Some(_) => outbox::scheduled(&harness.state, id, account, not_before),
+        None => outbox::queued(&harness.state, id, account),
+    }
     harness.wait_until_settled().await;
     Ok(())
 }
@@ -372,7 +530,13 @@ fn toast_button(harness: &Harness, label: &str) -> Result<gtk::Button, String> {
 
 /// A closed reply draft to `message` with `text` as its body, in the store: what an earlier
 /// session's quick reply left.
-async fn store_quick_draft(harness: &Harness, message: &str, text: &str) -> StepResult {
+async fn store_quick_draft(
+    harness: &Harness,
+    message: &str,
+    text: &str,
+    kind: ReplyKind,
+    to: Vec<Address>,
+) -> StepResult {
     let id = super::conversation::id(message)?;
     let account = harness
         .state
@@ -384,14 +548,11 @@ async fn store_quick_draft(harness: &Harness, message: &str, text: &str) -> Step
     let draft = Draft {
         account: account.id,
         from: Address::new(account.name.clone(), account.address.clone()),
-        to: vec![Address::new("Tomas Berg", "tomas@example.test")],
+        to,
         subject: "Re: Cabin trip in November?".into(),
         html: to_html(text),
         message_id: format!("quick.{}@example.test", glib::uuid_string_random()),
-        source: Some(DraftSource {
-            message: id,
-            kind: ReplyKind::Reply,
-        }),
+        source: Some(DraftSource { message: id, kind }),
         ..Draft::default()
     };
     let saved = store(harness)?
@@ -434,6 +595,18 @@ fn stand_in(harness: &Harness, args: &[String]) -> StepResult {
                 Err(format!("no save {low}–{high} ms after the mark"))
             }
         }
+        "last-saved" => {
+            let (id, _) = stand_in.saves().pop().ok_or("nothing was saved")?;
+            let saved = stand_in.draft(id).ok_or("the last saved draft is gone")?;
+            if saved.html.starts_with(&to_html(arg(1))) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the last saved draft's body doesn't start with the text ({} bytes)",
+                    saved.html.len()
+                ))
+            }
+        }
         "last-sent" => {
             let (_, sent) = stand_in.sent().pop().ok_or("nothing was sent")?;
             let typed = to_html(arg(1));
@@ -474,7 +647,7 @@ fn stand_in(harness: &Harness, args: &[String]) -> StepResult {
             }
         }
         other => Err(format!(
-            "use sent, discarded, closed, last-sent or quick-draft, not {other}"
+            "use sent, discarded, closed, last-saved, last-sent or quick-draft, not {other}"
         )),
     }
 }

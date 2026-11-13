@@ -1,5 +1,5 @@
 //! Timings of the HTML parse limit (M9, F14; `message::HTML_PARSE_LIMIT`). html5ever's tree
-//! builder takes time quadratic in the nesting depth, so Sealwax parses at most 256 KiB of a
+//! builder takes time quadratic in the nesting depth, so Pronto parses at most 256 KiB of a
 //! message's HTML for its search text and snippet, and quotes a larger original as text. Ignored
 //! in CI (a debug build is far slower); run in release:
 //!

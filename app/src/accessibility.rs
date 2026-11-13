@@ -286,7 +286,7 @@ mod tab_through {
 
     #[glib::object_subclass]
     impl ObjectSubclass for TabThrough {
-        const NAME: &'static str = "SealwaxTabThrough";
+        const NAME: &'static str = "ProntoTabThrough";
         type Type = super::TabThrough;
         type ParentType = adw::Bin;
     }

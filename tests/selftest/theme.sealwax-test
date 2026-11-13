@@ -3,7 +3,7 @@
 # does, corners set as config.toml's corner_radius, and the shell's surfaces, colours, corners,
 # fonts, contrast and tooltips checked against the theme the follower applied. Fictional sample
 # accounts, list and message. Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/theme.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/theme.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -12,11 +12,14 @@ resize 1440 900
 theme matte-black
 corners 0
 assert-color welcome background window
-assert-label welcome-hint "or press Ctrl+Shift+P / F1 for every command"
+assert-label welcome-hint "or press Ctrl+K for every command"
 assert-sensitive add-account true
+assert-color add-account background accent
 assert-contrast add-account 4.5
 assert-labelled
 sidebar sample
+# Two accounts open on All Inboxes (phase C); the samples are the first account's Inbox.
+action nav.folder::personal/inbox
 list sample
 reader sample
 assert-layout wide
@@ -29,14 +32,16 @@ assert-color reader-pane background window
 assert-font folder-list chrome
 assert-font list-title chrome
 
-# Compose opens a composer (M6): the accent fill with its text. Text on the accent is held to
-# 3:1 on every stock theme (docs/m1/theme.md): 4.34:1 on catppuccin-latte and 4.24:1 on the
-# built-in light palette, so the light checks below ask 3:1, matte-black 4.5:1.
+# Compose opens a composer (M6). Quiet since the Superhuman pass's phase B (the saturated
+# full-width button was the loudest thing on screen): the selected chip's pair, the width of its
+# words, the icon buttons' height, in a row as high as the list's header. The accent fill stays
+# for the primary buttons (Add an account, above), whose text is held to 3:1 on every stock
+# theme (docs/m1/theme.md).
 assert-sensitive compose true
-assert-color compose background accent
-assert-color compose text on-accent
+assert-color compose background chip
+assert-color compose text chip-text
 assert-contrast compose 4.5
-assert-height compose 34
+assert-height compose 32
 assert-radius compose 0
 
 # Folder rows: 30 px, square with square corners (libadwaita's sidebar rows were 36 px with
@@ -57,39 +62,37 @@ assert-color list-subtitle text secondary
 # Tooltips name the keys in use, and follow keys.toml.
 assert-tooltip compose "New message (c, Ctrl+N)"
 assert-tooltip config "Open config.toml (Ctrl+,)"
-assert-tooltip reader-back "Back to the list (Escape, u)"
-write-file $TMP/config/sealwax/keys.toml "compose = [\"<Control>m\"]\ncommand-palette = [\"<Control><Shift>k\", \"F1\"]\n"
+assert-tooltip reader-back "Back to the list (Escape)"
+write-file $TMP/config/pronto/keys.toml "compose = [\"<Control>m\"]\ncommand-palette = [\"<Control><Shift>k\", \"F1\"]\n"
 wait-until assert-tooltip compose "New message (Ctrl+M)"
-assert-label welcome-hint "or press Ctrl+Shift+K / F1 for every command"
-write-file $TMP/config/sealwax/keys.toml ""
+assert-label welcome-hint "or press Ctrl+Shift+K for every command"
+write-file $TMP/config/pronto/keys.toml ""
 wait-until assert-tooltip compose "New message (c, Ctrl+N)"
 
-# The rail: an accent badge on unread mail only, the other account as initial and count.
+# Below 1280 px the sidebar waits behind the list bar's button (the 56 px rail went with the
+# Superhuman pass); over the list, it keeps its surface.
 resize 1100 900
-assert-layout rail
-assert-width rail:personal/inbox 40
-assert-height rail:personal/inbox 36
-assert-radius rail:personal/inbox 0
-assert-color badge:personal/inbox background accent
-assert-color badge:personal/inbox text on-accent
-assert-shown badge:personal/drafts false
-assert-shown rail-account:work true
-assert-shown rail-account:personal false
+assert-layout medium
+assert-shown sidebar false
+assert-tooltip list-sidebar "Toggle Sidebar (Ctrl+Shift+S)"
+sidebar shown
+assert-sidebar overlay
+assert-color sidebar background sidebar
 assert-labelled
 screenshot $DIR/../../.local/selftest/theme-1100-matte-black.png
+sidebar hidden
 
 # Light and rounded: catppuccin-latte with Hyprland's rounding of 8 (6 for rows and controls).
 theme catppuccin-latte
 corners 8
-assert-radius rail:personal/inbox 6
 resize 1440 900
 assert-layout wide
-# Back from the rail, the sidebar still marks the folder shown (GTK's own list selection
-# followed the focus to Drafts).
+# Back at 1440, the sidebar beside the list still marks the folder shown (GTK's own list
+# selection followed the focus to Drafts).
 assert-folder personal/inbox
 assert-color sidebar background sidebar
 assert-color reader-pane background window
-assert-color compose background accent
+assert-color compose background chip
 assert-contrast compose 3
 assert-radius compose 8
 assert-radius folder:personal/inbox 6
@@ -98,13 +101,13 @@ assert-color status:personal background accent
 assert-width status:personal 6
 screenshot $DIR/../../.local/selftest/theme-1440-catppuccin-latte.png
 
-# One pane at a time: the list keeps the sidebar surface without the pane borders.
+# One pane at a time: the list takes the window's surface, the reader's, without the pane
+# borders; its bar's compose button is a quiet icon.
 resize 800 900
 assert-layout narrow
-assert-color list-pane background sidebar
-assert-color list-compose background accent
-assert-contrast list-compose 3
+assert-color list-pane background window
 assert-tooltip list-compose "New message (c, Ctrl+N)"
+assert-tooltip list-search-button "Search (/, Ctrl+F)"
 
 # Back to the built-in palette when no Omarchy theme is installed.
 theme none
@@ -112,3 +115,36 @@ resize 1440 900
 assert-color sidebar background sidebar
 assert-color reader-pane background window
 assert-contrast compose 3
+
+# The palettes config.toml chooses (the visual polish, 2026-10-22): Tokyo Night, always dark,
+# and Adwaita's look, light or dark as the desktop prefers; surfaces and text by role, the
+# chrome in Adwaita Sans (the default chrome_font). Secondary text's 4.5:1 is held in
+# domain/tests/theme.rs; here it takes its role.
+palette tokyo-night
+assert-color sidebar background sidebar
+assert-color reader-pane background window
+assert-color compose background chip
+assert-contrast compose 4.5
+assert-color sidebar-summary text secondary
+assert-font folder-list chrome
+screenshot $DIR/../../.local/selftest/theme-1440-tokyo-night.png
+palette adwaita
+color-scheme dark
+assert-color sidebar background sidebar
+assert-color reader-pane background window
+assert-contrast compose 3
+assert-color sidebar-summary text secondary
+color-scheme light
+assert-color reader-pane background window
+assert-color sidebar-summary text secondary
+screenshot $DIR/../../.local/selftest/theme-1440-adwaita-light.png
+color-scheme default
+palette config
+
+# Motion follows the desktop: the harness runs with animations off, so every transition is off;
+# turned on, the fades run.
+assert-motion reduced
+animations on
+assert-motion full
+animations off
+assert-motion reduced

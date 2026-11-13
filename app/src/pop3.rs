@@ -1,5 +1,5 @@
 //! Where the app treats a POP3 account (M8, ML-088) differently from an IMAP one: its folders
-//! are local. Sealwax downloads its mail into them and no server holds them, so the list never
+//! are local. Pronto downloads its mail into them and no server holds them, so the list never
 //! asks for older mail ("Loading older messages…") and the engine isn't told such a folder was
 //! opened. Everything else is shared: triage, Move to… and Mark Folder as Read go through the
 //! store's op queue as for IMAP, and the account's actor applies them locally; the sidebar and

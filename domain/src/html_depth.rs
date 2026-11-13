@@ -26,7 +26,7 @@ use std::cell::{Cell, RefCell};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-/// The deepest nesting of elements Sealwax hands to html2text or ammonia: WebKit's limit
+/// The deepest nesting of elements Pronto hands to html2text or ammonia: WebKit's limit
 /// (`maximumHTMLParserDOMTreeDepth`), beyond which WebKit's own parser stops nesting.
 pub const MAX_DEPTH: usize = 512;
 

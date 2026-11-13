@@ -9,7 +9,7 @@
 # Not in CI: it needs the testbed and the POP3 client (ML-087) and accounts (ML-088), which
 # phase B merges; on the setup branch alone the login check answers that it can't reach the
 # server (the contract's client answers NotBuilt).
-# Run: tools/headless.sh 65 target/debug/sealwax --self-test tests/selftest/testbed-pop3-setup.sealwax-test
+# Run: tools/headless.sh 65 target/debug/pronto --self-test tests/selftest/testbed-pop3-setup.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -42,9 +42,9 @@ assert-field setup-incoming POP3
 setup-type setup-password testbed-password
 setup-key enter
 wait-until assert-setup open false
-assert-file-contains $TMP/config/sealwax/accounts.toml "\n[account.pop3]\nhost = \"127.0.0.1\"\nport = 16995\nsecurity = \"tls\"\nleave_on_server = true\n"
-assert-file-lacks $TMP/config/sealwax/accounts.toml "\n[account.imap]"
-assert-file-lacks $TMP/config/sealwax/accounts.toml testbed-password
+assert-file-contains $TMP/config/pronto/accounts.toml "\n[account.pop3]\nhost = \"127.0.0.1\"\nport = 16995\nsecurity = \"tls\"\nleave_on_server = true\n"
+assert-file-lacks $TMP/config/pronto/accounts.toml "\n[account.imap]"
+assert-file-lacks $TMP/config/pronto/accounts.toml testbed-password
 wait-until assert-account-status alice@example.test synced
 assert-account-folders alice@example.test Inbox,Drafts,Sent,Archive,Junk,Trash
 folder inbox Alice

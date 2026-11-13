@@ -3,35 +3,24 @@
 
 use super::Writer;
 use crate::store::api::{
-    ChangeEvent, NewAccount, StoreVersion, Versioned, ViewChange, ViewDiff, ViewId, ViewScope,
+    ChangeEvent, NewAccount, StoreVersion, Versioned, ViewChange, ViewGrouping, ViewId, ViewScope,
     ViewSpec,
 };
-use crate::store::{RemovedAccount, StoreError, compose, views};
+use crate::store::{RemovedAccount, StoreError, compose};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sealwax_domain::account::AccountKey;
 use sealwax_domain::model::{AccountId, BlobKey, DraftId, FolderId, MessageId};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-/// Every open view `affected` picks, reopened at its new size.
+/// Every open view `affected` picks, reopened at its new size, after the conversation table
+/// is settled (with the diffs of the other conversation views).
 fn reloads(
     tx: &Connection,
     open: &BTreeMap<ViewId, ViewSpec>,
-    affected: impl Fn(ViewScope) -> bool,
+    affected: impl Fn(&ViewSpec) -> bool,
 ) -> rusqlite::Result<Vec<ViewChange>> {
-    let mut changes = Vec::new();
-    for (view, spec) in open {
-        if affected(spec.scope) {
-            let folders = views::folders(tx, spec.scope)?;
-            changes.push(ViewChange {
-                view: *view,
-                diff: ViewDiff::Reload {
-                    total: views::count(tx, &folders, spec.filter)?,
-                },
-            });
-        }
-    }
-    Ok(changes)
+    super::reload_after_settle(tx, open, affected)
 }
 
 impl Writer {
@@ -111,7 +100,11 @@ impl Writer {
         }
         let shared = Arc::clone(&self.state.shared);
         let open = shared.registry.lock();
-        let views = reloads(&tx, &open.open, |scope| scope == ViewScope::UnifiedInbox)?;
+        // The unified inbox's folders may have changed; an address that changed may make
+        // another sender the user in the conversation rows.
+        let views = reloads(&tx, &open.open, |spec| {
+            spec.scope == ViewScope::UnifiedInbox || spec.grouping == ViewGrouping::Conversations
+        })?;
         let version = self.state.commit(
             tx,
             ChangeEvent {
@@ -209,7 +202,7 @@ impl Writer {
         orphaned_blobs.extend(compose::unreferenced(&tx, held_by_drafts)?);
         let shared = Arc::clone(&self.state.shared);
         let open = shared.registry.lock();
-        let views = reloads(&tx, &open.open, |scope| match scope {
+        let views = reloads(&tx, &open.open, |spec| match spec.scope {
             ViewScope::Folder(folder) => folders.contains(&folder),
             ViewScope::UnifiedInbox => had_inbox,
         })?;

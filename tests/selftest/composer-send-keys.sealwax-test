@@ -1,0 +1,89 @@
+# Send right after typing keeps every key (the fork's phase B): WebKit hands the editor's keys
+# to its page one at a time, so the end of text typed just before Ctrl+Enter could still be on
+# its way when Send read the body: it was left out of the message, and once the card went WebKit
+# handed those keys to whatever had the focus (here the reply under the conversation). Send now
+# waits until the page has seen every key. Typed at machine speed through Broadway, after a
+# refused send (it made the page lag behind); then the same with Send Later, and with Close
+# (Ctrl+W), whose saved draft keeps every key too. The stand-in backend; every name, address and
+# text is fictional.
+# Run: tools/headless.sh 67 target/debug/pronto --self-test tests/selftest/composer-send-keys.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+composer-backend stand-in
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+folder inbox Personal
+list-wait
+focus list
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+type "Vi ses fredag."
+# Kept as a draft first (2 s after the typing), so the stand-in's last save at the end is the
+# card's own, not the reply's racing it.
+wait-until assert-stand-in quick-draft trip-6 "Vi ses fredag."
+
+# Send.
+composer-open new
+composer-wait
+composer-focus body
+key <Control>Return
+wait-until assert-composer toast "Add a recipient first"
+composer-focus to
+composer-type "kari@example.com,"
+composer-focus body
+composer-type "Agenda for mandag."
+key <Control>Return
+wait-until assert-composer count 0
+assert-composer last-sent html "Agenda for mandag."
+assert-quick-reply text "Vi ses fredag."
+sleep 300
+assert-quick-reply text "Vi ses fredag."
+
+# Send Later.
+composer-open new
+composer-wait
+composer-focus body
+key <Control><Shift>l
+wait-until assert-composer toast "Add a recipient first"
+assert-picker shown false
+composer-focus to
+composer-type "ola@example.org,"
+composer-focus body
+composer-type "Referat fra tirsdag."
+key <Control><Shift>l
+wait-until assert-picker shown true
+picker-type "tomorrow 9am"
+key Return
+wait-until assert-composer count 0
+assert-composer last-sent html "Referat fra tirsdag."
+assert-sent-at "tomorrow 09:00"
+assert-quick-reply text "Vi ses fredag."
+sleep 300
+assert-quick-reply text "Vi ses fredag."
+
+# Close: the saved draft keeps every key, and none reaches the reply the focus goes back to.
+composer-open new
+composer-wait
+composer-focus body
+key <Control>Return
+wait-until assert-composer toast "Add a recipient first"
+composer-focus to
+composer-type "kari@example.com,"
+composer-focus body
+composer-type "Notater fra torsdag."
+key <Control>w
+wait-until assert-composer count 0
+wait-until assert-stand-in last-saved "Notater fra torsdag."
+assert-quick-reply text "Vi ses fredag."
+sleep 300
+assert-quick-reply text "Vi ses fredag."

@@ -1,0 +1,101 @@
+# The list's polish in Split, beside the reader (the Superhuman pass, phase B;
+# docs/superhuman/conversations.md "Part 2"): a click selects and shows; the date headers stay;
+# typing a search never makes the panes jump width, whatever the results, and the reader beside a
+# search that found nothing is blank, not a second empty state; Undo from Inbox Zero selects the
+# conversation it brings back and shows it. Every name and message is fictional.
+# Run: tools/headless.sh 62 target/debug/pronto --self-test tests/selftest/list-polish-split.sealwax-test
+
+desktop tiling
+resize 1440 900
+grouping conversations
+triage-mark-read-on-open false
+mail-account Personal
+mail-add Personal:inbox 10m "Hyttetur i oktober" "from=Ingrid Solberg" "text=Skal vi dra fredag?"
+mail-add Personal:inbox 20m "Styremøte torsdag" "from=Marius Dahl" "text=Agendaen kommer i morgen."
+mail-add Personal:inbox 2d "Lunsj fredag" "from=Leah Kim" "text=Klokka tolv?"
+folder inbox Personal
+list-wait
+assert-view-mode split
+assert-sidebar inline
+assert-width list 380
+assert-list-headers "TODAY,THIS WEEK"
+
+# A click selects and shows, in Split; the list stays beside the reader.
+focus list
+click-row 1
+assert-list-selected 1
+wait-until assert-reader-selected
+assert-reader-on-screen true
+assert-width list 380
+
+# Typing a search: no results, results, none again; the panes keep their widths throughout.
+key slash
+assert-search-shown true
+assert-width list 380
+type zz
+search-wait
+assert-list-empty "No results"
+assert-width list 380
+assert-shown reader-empty-state false
+assert-shown reader-empty true
+key BackSpace
+key BackSpace
+type Hytte
+search-wait
+assert-list-count 1
+assert-width list 380
+type qq
+search-wait
+assert-list-empty "No results"
+assert-width list 380
+search-escape
+assert-search-shown false
+assert-width list 380
+assert-list-count 3
+
+# Under a filter, the search keeps it and its pill stays, after the scope; an empty search says
+# what narrowed it; the panes keep their widths (phase C, the visual QA: the pill hid with the
+# view's name, and a search under Unread found nothing with no word of why).
+chip unread
+assert-shown list-filter true
+focus list
+key slash
+type zz
+search-wait
+assert-list-empty "No results" "No unread conversations in Inbox match “zz”."
+assert-shown list-filter true
+assert-shown list-search-scope true
+assert-width list 380
+# The scope compact beside the pill ("Inbox · All · Unread ×"), so the field keeps its room
+# (phase C's review: "workshop" showed cut); a screen reader still hears "All folders".
+assert-label search-scope-all All
+assert-accessible-name search-scope-all "All folders"
+search-escape
+assert-search-shown false
+assert-shown list-filter true
+assert-width list 380
+chip all
+assert-shown list-filter false
+assert-label search-scope-all "All folders"
+
+# Undo from Inbox Zero: the last conversation archived comes back selected, shown beside the
+# list, which leaves Inbox Zero's whole-window page for its own width again.
+focus list
+list-select 0
+wait-until assert-reader-selected
+key e
+wait-until assert-list-count 2
+key e
+wait-until assert-list-count 1
+key e
+wait-until assert-list-count 0
+assert-list-empty "Inbox Zero"
+assert-width list 1220
+wait-until assert-focus inbox-zero-area
+key z
+wait-until assert-list-count 1
+wait-until assert-list-selected 0
+wait-until assert-reader-selected
+assert-reader-on-screen true
+assert-width list 380
+wait-until assert-focus-row 0

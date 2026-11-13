@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Startup with a cached INBOX, measured as S6 measured it: process start (the launcher's
-CLOCK_MONOTONIC just before the spawn, passed as SEALWAX_EXEC_NS) to the first painted frame
+CLOCK_MONOTONIC just before the spawn, passed as PRONTO_EXEC_NS) to the first painted frame
 (`first-frame-from-exec`). The first window waits for the list's first rows (≤ 300 ms), so the
 frame has rows unless the log says the wait ran out. S6 measured painted → on screen at about
 12 ms more (Vulkan); that part isn't included here.
 
 Every run uses scratch config, data, state and cache folders and a scratch Omarchy theme
 (matte-black from tests/theme/) under target/startup-live/; the desktop's theme is never read
-or changed. Runs open a fullscreen window that closes itself after SEALWAX_EXIT_AFTER_MS.
+or changed. Runs open a fullscreen window that closes itself after PRONTO_EXIT_AFTER_MS.
 
-    cargo build --release -p sealwax -p sealwax-fixtures
+    cargo build --release -p pronto -p sealwax-fixtures
     python3 tools/live/startup.py [--runs 21] [--count 10000] [--headless DISPLAY]
 
 On the live session this needs the user's live-window authorization (PLAN.md's log). With
@@ -37,7 +37,7 @@ def percentile(values, p):
 
 
 def prepare(count):
-    data = SCRATCH / "data" / "sealwax"
+    data = SCRATCH / "data" / "pronto"
     store = data / "store.sqlite"
     marker = SCRATCH / f"store-{count}"
     if not marker.exists():
@@ -67,15 +67,15 @@ def run_once(headless):
         "XDG_DATA_HOME": str(SCRATCH / "data"),
         "XDG_STATE_HOME": str(SCRATCH / "state"),
         "XDG_CACHE_HOME": str(SCRATCH / "cache"),
-        "SEALWAX_OMARCHY_STATE": str(SCRATCH / "omarchy"),
-        "SEALWAX_EXIT_AFTER_MS": "1500",
-        "SEALWAX_START_FULLSCREEN": "1",
+        "PRONTO_OMARCHY_STATE": str(SCRATCH / "omarchy"),
+        "PRONTO_EXIT_AFTER_MS": "1500",
+        "PRONTO_START_FULLSCREEN": "1",
         "RUST_LOG": "info,sealwax_app::application=debug",
     })
-    command = [str(ROOT / "target/release/sealwax")]
+    command = [str(ROOT / "target/release/pronto")]
     if headless is not None:
         command = [str(ROOT / "tools/headless.sh"), str(headless)] + command
-    env["SEALWAX_EXEC_NS"] = str(time.clock_gettime_ns(time.CLOCK_MONOTONIC))
+    env["PRONTO_EXEC_NS"] = str(time.clock_gettime_ns(time.CLOCK_MONOTONIC))
     done = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
     log = done.stdout + done.stderr
     exec_ms = re.search(r"first-frame-from-exec ([0-9.]+)", log)

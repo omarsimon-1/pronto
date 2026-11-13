@@ -4,7 +4,7 @@
 //! whole, the third as its text parts, one of its attachments then on demand. Nothing is marked
 //! `\Seen`. Needs the testbed running and seeded, and is skipped otherwise:
 //!
-//! SEALWAX_TESTBED_CA=tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test bodies_testbed -- --ignored --nocapture
 
 mod common;

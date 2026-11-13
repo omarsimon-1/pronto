@@ -10,7 +10,9 @@
 //! meantime gets its request ended unanswered.
 
 use super::view::MessageView;
+use super::widgets::{BodyBox, Stage};
 use crate::part_cache;
+use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use sealwax_domain::model::MessageId;
 use sealwax_domain::theme::WebViewFonts;
@@ -48,11 +50,22 @@ pub const NETWORK_FEATURES: [&str; 5] = [
 pub const RETIRED_FEATURES: [(&str, (u32, u32)); 1] = [("LinkDNSPrefetch", (2, 54))];
 
 /// The most views that exist at once (ADR-011 amendment, memory bar decided; M5 sets the final
-/// number from its measurement).
-pub const MAX_LIVE_VIEWS: usize = 4;
+/// number from its measurement). The fork raised it from 4 to 8 for the conversations laid out
+/// ahead next to the selection (docs/superhuman/reader.md: a memory budget of about 450 MB for
+/// the process tree, measured with `reader_memory`).
+pub const MAX_LIVE_VIEWS: usize = 8;
 
-/// Idle views kept ready, blank, so the next message doesn't wait for a new page.
-const IDLE_LIMIT: usize = 2;
+/// The most views one page's bodies hold, the shown conversation's or one laid out ahead: the
+/// rest of [`MAX_LIVE_VIEWS`] is for the others.
+pub const PAGE_VIEWS: usize = 4;
+
+/// Idle views kept ready while a window is open, so the next message doesn't wait for a new
+/// page (creating one costs about 16 ms on the show that pays it). Background rest trims this
+/// to [`PREWARMED`].
+const IDLE_LIMIT: usize = MAX_LIVE_VIEWS;
+
+/// Blank views made ahead of the first message, and the most retained without a window.
+const PREWARMED: usize = 2;
 
 /// Blocks every load except `cid:`, `data:` and `about:` until the user allows remote images
 /// for a message. WebKit's filter regexes have no alternation, so each exception is a rule.
@@ -117,6 +130,17 @@ impl InlineParts {
 
     pub fn len(&self) -> usize {
         self.parts.len()
+    }
+
+    /// The decoded bytes held; parts left to the loader count nothing.
+    pub fn bytes(&self) -> usize {
+        self.parts
+            .values()
+            .map(|source| match source {
+                Source::Ready(part) => part.data.len(),
+                Source::Fetch { .. } => 0,
+            })
+            .sum()
     }
 
     /// Some part must come from the server: not stored, and not kept in [`part_cache`] since
@@ -249,6 +273,9 @@ pub struct Engine {
     /// share its web process. Kept for the life of the process.
     root: RefCell<Option<webkit6::WebView>>,
     pool: RefCell<Pool>,
+    /// Blank idle views get real layout and frames here, clipped by Stage. Attached to the
+    /// window's always-mapped overlay, not the reader stack hidden before the first click.
+    warm_stage: Stage,
 }
 
 thread_local! {
@@ -257,7 +284,7 @@ thread_local! {
 
 impl Engine {
     /// The process's engine, created on first use. The content filters compile into
-    /// `cache/content-filters` (Sealwax's cache folder) in the background.
+    /// `cache/content-filters` (Pronto's cache folder) in the background.
     pub fn shared(cache: &Path) -> Rc<Engine> {
         ENGINE.with(|engine| engine.get_or_init(|| Engine::new(cache)).clone())
     }
@@ -296,6 +323,12 @@ impl Engine {
             ),
         );
         let (done, filter_done) = async_channel::bounded(1);
+        let warm_stage = Stage::default();
+        warm_stage.set_can_target(false);
+        warm_stage.set_can_focus(false);
+        warm_stage.set_height_request(1);
+        warm_stage.set_valign(gtk4::Align::Start);
+        warm_stage.update_state(&[gtk4::accessible::State::Hidden(true)]);
         let engine = Rc::new(Engine {
             context,
             session,
@@ -312,6 +345,7 @@ impl Engine {
                 idle: Vec::new(),
                 live: 0,
             }),
+            warm_stage,
         });
         let directory = cache.join("content-filters");
         let weak = Rc::downgrade(&engine);
@@ -396,9 +430,15 @@ impl Engine {
     pub fn acquire(self: &Rc<Self>, fonts: &WebViewFonts) -> Option<MessageView> {
         let idle = self.pool.borrow_mut().idle.pop();
         if let Some(view) = idle {
+            self.unstage_idle(&view);
             view.set_fonts(fonts);
             return Some(view);
         }
+        self.create(fonts)
+    }
+
+    /// A new view while fewer than [`MAX_LIVE_VIEWS`] exist.
+    fn create(self: &Rc<Self>, fonts: &WebViewFonts) -> Option<MessageView> {
         if self.pool.borrow().live >= MAX_LIVE_VIEWS {
             tracing::warn!(cap = MAX_LIVE_VIEWS, "reader: every live view is in use");
             return None;
@@ -431,7 +471,9 @@ impl Engine {
             .is_some_and(|root| root == view.web_view());
         let mut pool = self.pool.borrow_mut();
         if is_root || pool.idle.len() < IDLE_LIMIT {
-            pool.idle.push(view);
+            pool.idle.push(view.clone());
+            drop(pool);
+            self.stage_idle(&view);
         } else {
             pool.live -= 1;
             drop(pool);
@@ -440,14 +482,76 @@ impl Engine {
         }
     }
 
-    /// Starts the web process ahead of the first message: one idle view with a blank page.
-    pub async fn prewarm(self: &Rc<Self>, fonts: &WebViewFonts) {
-        let filter = self.filter().await;
-        if !self.pool.borrow().idle.is_empty() {
+    /// Lets blank idle views render before the reader's first selection. Stage takes their
+    /// frames without drawing pixels or making them reachable by input or accessibility.
+    pub fn warm_in(&self, overlay: &gtk4::Overlay) {
+        if self.warm_stage.parent().as_ref() == Some(overlay.upcast_ref()) {
             return;
         }
-        if let Some(view) = self.acquire(fonts) {
+        self.detach_warm_stage();
+        overlay.add_overlay(&self.warm_stage);
+        overlay.set_measure_overlay(&self.warm_stage, false);
+    }
+
+    fn detach_warm_stage(&self) {
+        if let Some(overlay) = self.warm_stage.parent().and_downcast::<gtk4::Overlay>() {
+            overlay.remove_overlay(&self.warm_stage);
+        }
+    }
+
+    /// Keep the web process and just two blank views across a background close. The caller
+    /// releases the reader's pages first; neither the stage nor its views retain the window.
+    pub fn rest(&self) {
+        self.detach_warm_stage();
+        loop {
+            let removed = {
+                let mut pool = self.pool.borrow_mut();
+                if pool.idle.len() <= PREWARMED {
+                    break;
+                }
+                let root = self.root.borrow();
+                let at = pool
+                    .idle
+                    .iter()
+                    .position(|view| root.as_ref() != Some(view.web_view()))
+                    .expect("only one view is the root");
+                pool.live -= 1;
+                pool.idle.remove(at)
+            };
+            self.unstage_idle(&removed);
+            removed.destroy();
+        }
+        tracing::debug!(
+            live = self.live_views(),
+            "reader: warm views kept without a window"
+        );
+    }
+
+    fn stage_idle(&self, view: &MessageView) {
+        // Hide the holder, not the view: acquisition can move the view straight into a body
+        // without carrying the stage's disabled focus/accessibility state with it.
+        self.warm_stage.stage(&BodyBox::new(view.web_view()));
+    }
+
+    fn unstage_idle(&self, view: &MessageView) {
+        if let Some(holder) = view.web_view().parent() {
+            self.warm_stage.unstage(&holder);
+            view.web_view().unparent();
+        }
+    }
+
+    /// Starts the web process ahead of the first message: [`PREWARMED`] idle views with a blank
+    /// page. Without a window the loads still start the process; [`Self::warm_in`] also lets
+    /// them render as soon as a window exists. Repeated requests never add extra spare views.
+    pub async fn prewarm(self: &Rc<Self>, fonts: &WebViewFonts) {
+        let filter = self.filter().await;
+        let missing = PREWARMED.saturating_sub(self.pool.borrow().idle.len());
+        for _ in 0..missing {
+            let Some(view) = self.create(fonts) else {
+                return;
+            };
             view.blank(filter.as_ref());
+            self.stage_idle(&view);
             self.pool.borrow_mut().idle.push(view);
         }
     }
@@ -591,6 +695,8 @@ mod tests {
         assert!(parts.find("LOGO@EXAMPLE.TEST").is_some());
         assert!(parts.find("other@example.test").is_none());
         assert_eq!(parts.len(), 2);
+        parts.insert_missing("later@example.test".into(), 3, "image/png".into());
+        assert_eq!(parts.bytes(), 2, "decoded bytes only");
     }
 
     #[test]

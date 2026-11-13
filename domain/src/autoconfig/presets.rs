@@ -152,6 +152,13 @@ pub fn microsoft_host(host: &str) -> bool {
 /// Gmail's IMAP is always on (Google's help, read on 2026-10-05; INTEGRATIONS.md), so an "enable
 /// IMAP" link for its hosts, such as the ISPDB's for gmail.com, is out of date.
 pub fn imap_always_on(host: &str) -> bool {
+    google_host(host)
+}
+
+/// Gmail's own hosts (`imap.gmail.com`, `smtp.gmail.com`, and any under `gmail.com` or
+/// `googlemail.com`): where Sign in with Google is offered when a Google client is configured
+/// (ADR-023). Google Workspace domains use the same hosts.
+pub fn google_host(host: &str) -> bool {
     super::dns::within(host, "gmail.com") || super::dns::within(host, "googlemail.com")
 }
 
@@ -525,6 +532,15 @@ mod tests {
         assert_eq!(by_domain("Hotmail.com.").map(|p| p.id), Some("outlook"));
         assert!(by_domain("mail.hotmail.com").is_none());
         assert!(by_domain("example.com").is_none());
+    }
+
+    #[test]
+    fn gmails_hosts_are_googles() {
+        assert!(google_host("imap.gmail.com"));
+        assert!(google_host("SMTP.Gmail.com."));
+        assert!(google_host("imap.googlemail.com"));
+        assert!(!google_host("notgmail.com"));
+        assert!(!google_host("imap.example.com"));
     }
 
     #[test]

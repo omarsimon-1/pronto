@@ -13,6 +13,17 @@ struct Entry {
     widget: glib::WeakRef<gtk::Widget>,
     label: String,
     id: ActionId,
+    /// A line above the command, such as the account the list bar's sidebar button points out.
+    note: Option<String>,
+}
+
+impl Entry {
+    fn text(&self, keymap: &Keymap) -> String {
+        noted(
+            self.note.as_deref(),
+            with_keys(&self.label, &keymap.display(self.id)),
+        )
+    }
 }
 
 /// The widgets whose tooltips name a command's keys, and the keymap they show.
@@ -33,7 +44,23 @@ impl Tooltips {
             widget: widget.downgrade(),
             label: label.to_owned(),
             id,
+            note: None,
         });
+    }
+
+    /// Puts `note` on a line above the command in `widget`'s tooltip (`None`: the command
+    /// alone), so what a coloured mark means is in words too (DESIGN.md "Accessibility").
+    pub fn set_note(&self, widget: &impl IsA<gtk::Widget>, note: Option<&str>) {
+        let widget = widget.as_ref();
+        let keymap = self.keymap.borrow();
+        for entry in self.entries.borrow_mut().iter_mut() {
+            // Unchanged, the tooltip is left alone: GTK asks the widget under the pointer for
+            // its tooltip again on every change, and the sidebar's model comes often.
+            if entry.widget.upgrade().as_ref() == Some(widget) && entry.note.as_deref() != note {
+                entry.note = note.map(str::to_owned);
+                widget.set_tooltip_text(Some(&entry.text(&keymap)));
+            }
+        }
     }
 
     pub fn set_keymap(&self, keymap: &Keymap) {
@@ -42,10 +69,7 @@ impl Tooltips {
             .borrow_mut()
             .retain(|entry| match entry.widget.upgrade() {
                 Some(widget) => {
-                    widget.set_tooltip_text(Some(&with_keys(
-                        &entry.label,
-                        &keymap.display(entry.id),
-                    )));
+                    widget.set_tooltip_text(Some(&entry.text(keymap)));
                     true
                 }
                 None => false,
@@ -59,6 +83,14 @@ pub fn with_keys(label: &str, keys: &str) -> String {
         label.to_owned()
     } else {
         format!("{label} ({keys})")
+    }
+}
+
+/// `note` on a line over `command`, or the command alone.
+fn noted(note: Option<&str>, command: String) -> String {
+    match note {
+        Some(note) => format!("{note}\n{command}"),
+        None => command,
     }
 }
 
@@ -90,6 +122,17 @@ mod tests {
         assert_eq!(
             with_keys("New message", &unbound.display(ActionId::Compose)),
             "New message"
+        );
+    }
+
+    #[test]
+    fn a_note_goes_over_the_command() {
+        let keymap = Keymap::default();
+        let command = || with_keys("Toggle Sidebar", &keymap.display(ActionId::ToggleSidebar));
+        assert_eq!(noted(None, command()), "Toggle Sidebar (Ctrl+Shift+S)");
+        assert_eq!(
+            noted(Some("Work: offline"), command()),
+            "Work: offline\nToggle Sidebar (Ctrl+Shift+S)"
         );
     }
 }

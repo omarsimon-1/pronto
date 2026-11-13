@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Pronto
+GenericName=Email Client
+Comment=A fast, minimal email client
+Exec=pronto %u
+Icon=io.github.omarsimon1.Pronto
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.omarsimon1.Pronto
+DBusActivatable=true
+Categories=Network;Email;
+Keywords=mail;email;inbox;imap;smtp;
+MimeType=x-scheme-handler/mailto;

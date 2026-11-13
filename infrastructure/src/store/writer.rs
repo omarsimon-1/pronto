@@ -4,14 +4,15 @@
 //! diffs are computed inside the transaction.
 
 use super::api::{
-    BodyUpgrade, ChangeEvent, Evicted, FirstSyncStep, FolderCounts, FolderSpec, Ingested,
-    NewAccount, NewMessage, Positioned, StoreVersion, ThreadCount, ThreadMerge, Upgraded,
-    Versioned, ViewChange, ViewDiff, ViewFilter, ViewId, ViewScope, ViewSpec,
+    BlobsDiscarded, BodyUpgrade, ChangeEvent, Evicted, FirstSyncStep, FolderCounts, FolderSpec,
+    Ingested, NewAccount, NewMessage, Positioned, StoreVersion, ThreadCount, ThreadMerge, Upgraded,
+    Versioned, ViewChange, ViewDiff, ViewFilter, ViewGrouping, ViewId, ViewScope, ViewSpec,
 };
 use super::maintenance::Maintenance;
 use super::{
-    RefusedChange, Removed, RemovedAccount, Shared, StoreError, codec, contacts, fts, views,
+    RefusedChange, Removed, RemovedAccount, Shared, StoreError, codec, contacts, fork, fts, views,
 };
+use crate::blobs::BlobStore;
 use rusqlite::hooks::Wal;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sealwax_domain::account::AccountKey;
@@ -21,18 +22,24 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::c_int;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod accounts;
 mod bodies;
 pub(crate) mod compose;
+pub(crate) mod conversations;
 pub(crate) mod folders;
 mod index;
 pub(crate) mod ops;
 pub(crate) mod overlay;
 pub(crate) mod pop3;
+pub(crate) mod remind;
 mod remote;
+pub(crate) mod split;
 pub(crate) mod sync;
+
+#[cfg(test)]
+mod fts_mark_tests;
 
 /// Messages per header transaction (S3: 500 held the writer for up to 258 ms with text).
 pub(crate) const MAX_BATCH: usize = 200;
@@ -125,6 +132,15 @@ pub(crate) enum WriteJob {
         keep: Vec<MessageId>,
         reply: Sender<Evicted>,
     },
+    Flush {
+        reply: Sender<()>,
+    },
+    DiscardBlobs {
+        blobs: BlobStore,
+        keys: Vec<BlobKey>,
+        older_than: Option<Duration>,
+        reply: Sender<BlobsDiscarded>,
+    },
     AllowRemoteSender {
         address: String,
         at: i64,
@@ -134,6 +150,19 @@ pub(crate) enum WriteJob {
         address: String,
         reply: Sender<()>,
     },
+    SetSenderSplit {
+        address: String,
+        split: Option<sealwax_domain::split::Split>,
+        /// Conversations to classify again in the first transaction (the ones the user acted
+        /// on).
+        first: Vec<ThreadId>,
+        reply: Sender<StoreVersion>,
+    },
+    SetCategories {
+        categories: Vec<(MessageId, sealwax_domain::split::Split)>,
+        reply: Sender<StoreVersion>,
+    },
+    Remind(remind::RemindJob),
     RebuildIndex {
         reply: Sender<super::IndexRebuilt>,
     },
@@ -175,6 +204,9 @@ pub(crate) struct Writer {
     state: State,
     /// Rebuild Search Index, while it runs.
     rebuild: Option<index::Rebuild>,
+    /// The Split Inbox's choices for senders still classifying their mail again, oldest first
+    /// (`writer/split.rs`): a transaction at a time, before the full-text and bulk work.
+    reclassify: VecDeque<split::Reclassify>,
 }
 
 /// Everything but the connection, so a method can hold a transaction and still commit.
@@ -187,6 +219,12 @@ struct State {
     inserted_since_optimize: u64,
     /// Outbox changes of the transaction under way, published with its commit.
     outbox: Vec<super::OutboxChange>,
+    /// The transaction under way made or dropped a Reminders folder (the fork's Remind Me): its
+    /// commit says the folder list changed.
+    folders_made: bool,
+    /// The first id of each batch whose rows are committed and whose full-text entries are
+    /// not: `fts_through` stays below them all (`fts_owed`, `index_docs`).
+    unindexed: Vec<i64>,
 }
 
 impl State {
@@ -196,10 +234,19 @@ impl State {
         tx: Transaction<'_>,
         mut event: ChangeEvent,
     ) -> Result<StoreVersion, StoreError> {
+        // The paths that change messages settle the conversation table with their diffs
+        // (`view_changes`, the reload paths); this keeps it exact should one ever not.
+        if fork::settle_quietly(&tx)? {
+            debug_assert!(false, "a commit changed conversations without their diffs");
+            tracing::warn!("conversations recounted without their diffs");
+        }
         event.outbox = std::mem::take(&mut self.outbox);
+        event.folders_changed |= std::mem::take(&mut self.folders_made);
+        event.reminders |= fork::take_reminders_touched(&tx)?;
         let version = self.version + 1;
         tx.prepare_cached("UPDATE store_version SET version = ?1")?
             .execute([version as i64])?;
+        fork::mark_through(&tx, version)?;
         tx.commit()?;
         self.version = version;
         event.version = StoreVersion(version);
@@ -248,8 +295,11 @@ impl Writer {
                 checkpoint_frames: c_int::try_from(checkpoint_frames).unwrap_or(c_int::MAX),
                 inserted_since_optimize: 0,
                 outbox: Vec::new(),
+                folders_made: false,
+                unindexed: Vec::new(),
             },
             rebuild: None,
+            reclassify: VecDeque::new(),
         })
     }
 
@@ -265,6 +315,7 @@ impl Writer {
             if interactive.is_empty()
                 && bulk.is_empty()
                 && index.is_empty()
+                && self.reclassify.is_empty()
                 && self.rebuild.is_none()
             {
                 match queue.recv_blocking() {
@@ -280,6 +331,8 @@ impl Writer {
             }
             if let Some(job) = interactive.pop_front() {
                 self.interactive(job);
+            } else if !self.reclassify.is_empty() {
+                self.reclassify_step();
             } else if let Some(job) = index.pop_front() {
                 if let Some(next) = self.index(job) {
                     bulk.push_front(next);
@@ -379,12 +432,33 @@ impl Writer {
             WriteJob::EvictBodies { limit, keep, reply } => {
                 let _ = reply.try_send(self.evict_bodies(limit, &keep));
             }
+            WriteJob::Flush { reply } => {
+                let _ = reply.try_send(self.flush());
+            }
+            WriteJob::DiscardBlobs {
+                blobs,
+                keys,
+                older_than,
+                reply,
+            } => {
+                let _ = reply.try_send(self.discard_blobs(&blobs, keys, older_than));
+            }
             WriteJob::AllowRemoteSender { address, at, reply } => {
                 let _ = reply.try_send(self.allow_remote_sender(&address, at));
             }
             WriteJob::ForgetRemoteSender { address, reply } => {
                 let _ = reply.try_send(self.forget_remote_sender(&address));
             }
+            WriteJob::SetSenderSplit {
+                address,
+                split,
+                first,
+                reply,
+            } => self.set_sender_split(&address, split, &first, reply),
+            WriteJob::SetCategories { categories, reply } => {
+                let _ = reply.try_send(self.set_categories(&categories));
+            }
+            WriteJob::Remind(job) => self.remind_job(job),
             WriteJob::RebuildIndex { reply } => self.start_rebuild(reply),
             WriteJob::Ingest { .. } => unreachable!("ingest jobs are bulk"),
         }
@@ -429,18 +503,11 @@ impl Writer {
         let (ids, counted) = upsert_rows(&tx, folders)?;
         let shared = Arc::clone(&self.state.shared);
         let open = shared.registry.lock();
-        let mut views = Vec::new();
-        for (view, spec) in &open.open {
-            if spec.scope == ViewScope::UnifiedInbox {
-                let folders = views::folders(&tx, spec.scope)?;
-                views.push(ViewChange {
-                    view: *view,
-                    diff: ViewDiff::Reload {
-                        total: views::count(&tx, &folders, spec.filter)?,
-                    },
-                });
-            }
-        }
+        // A folder's new role moves its conversations' latest messages (Trash, Junk and drafts
+        // are aside), so the other conversation views get their diffs.
+        let views = reload_after_settle(&tx, &open.open, |spec| {
+            spec.scope == ViewScope::UnifiedInbox
+        })?;
         let event = ChangeEvent {
             folders: folder_counts(&tx, &counted)?,
             folders_changed: true,
@@ -520,6 +587,21 @@ impl Writer {
             ..ChangeEvent::default()
         };
         self.state.commit(tx, event)
+    }
+
+    /// One small commit with `synchronous=FULL`, which syncs the WAL: the file holds every
+    /// earlier commit before this one, so all of them are on disk when it returns.
+    fn flush(&mut self) -> Result<(), StoreError> {
+        self.conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let written = self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('flushes', 1) \
+             ON CONFLICT(key) DO UPDATE SET value = value + 1",
+            [],
+        );
+        self.conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        written?;
+        self.state.after_commit();
+        Ok(())
     }
 
     /// The folder's pending ops survive: they wait for its next sync to bring their messages
@@ -628,8 +710,21 @@ impl Writer {
     }
 
     /// Indexes `docs` in one transaction and records the highest id indexed, so a crash between
-    /// a header commit and its full-text commit is repaired at the next start.
+    /// a header commit and its full-text commit is repaired at the next start. The mark stays
+    /// below every other batch that still waits for its entries (a sync step or a POP3
+    /// download commits and indexes between a bulk batch's two transactions), and a batch
+    /// whose indexing failed keeps it down until the next start repairs it.
     fn index_docs(&mut self, docs: &[FtsDoc]) -> Result<(), StoreError> {
+        let first = docs.iter().map(|doc| doc.id.0).min();
+        let own = first.and_then(|first| self.state.unindexed.iter().position(|id| *id == first));
+        let waiting = self
+            .state
+            .unindexed
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != own)
+            .map(|(_, id)| *id)
+            .min();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -652,25 +747,40 @@ impl Writer {
             }
         }
         if let Some(last) = docs.iter().map(|doc| doc.id.0).max() {
+            let through = waiting.map_or(last, |waiting| last.min(waiting - 1));
             tx.prepare_cached(
                 "INSERT INTO meta(key, value) VALUES ('fts_through', ?1) \
                  ON CONFLICT(key) DO UPDATE SET value = max(value, excluded.value)",
             )?
-            .execute([last])?;
+            .execute([through])?;
         }
         tx.commit()?;
+        if let Some(own) = own {
+            self.state.unindexed.swap_remove(own);
+        }
         self.state.after_commit();
         Ok(())
     }
 
     /// Indexes messages a crash left without full text: those past the recorded high-water mark
-    /// with no index row. The body text comes from the blob store when the store has one.
+    /// with no index row. The body text comes from the blob store when the store has one. The
+    /// first start of a build that keeps the mark exact looks at every message once: older
+    /// builds could raise it past rows that had no entry yet.
     fn recover_index(&mut self) -> Result<(), StoreError> {
-        let through: i64 = self.conn.query_row(
-            "SELECT coalesce((SELECT value FROM meta WHERE key = 'fts_through'), 0)",
+        let rescanned: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'fts_rescanned')",
             [],
             |row| row.get(0),
         )?;
+        let through: i64 = if rescanned {
+            self.conn.query_row(
+                "SELECT coalesce((SELECT value FROM meta WHERE key = 'fts_through'), 0)",
+                [],
+                |row| row.get(0),
+            )?
+        } else {
+            0
+        };
         let missing = self
             .conn
             .prepare(
@@ -694,7 +804,7 @@ impl Writer {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if missing.is_empty() {
-            return Ok(());
+            return self.index_rescanned(rescanned);
         }
         let blobs = self.state.shared.blobs.clone();
         for chunk in missing.chunks(MAX_BATCH) {
@@ -725,6 +835,17 @@ impl Writer {
             messages = missing.len(),
             "full-text index repaired after a crash"
         );
+        self.index_rescanned(rescanned)
+    }
+
+    /// Records that every message was looked at for its full-text entry once.
+    fn index_rescanned(&mut self, rescanned: bool) -> Result<(), StoreError> {
+        if !rescanned {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES ('fts_rescanned', 1)",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -775,6 +896,8 @@ impl Writer {
         for merge in &merged_threads {
             threads.remove(&merge.from);
         }
+        retire_merged(&tx, &merged_threads)?;
+        final_merges(&mut merged_threads);
         let shared = Arc::clone(&self.state.shared);
         let open = shared.registry.lock();
         let views = view_changes(&tx, &open.open, &rows, &BTreeMap::new())?;
@@ -786,8 +909,10 @@ impl Writer {
             views,
             ..ChangeEvent::default()
         };
+        let owed = fts_owed(&tx, &docs)?;
         let version = self.state.commit(tx, event)?;
         drop(open);
+        self.state.unindexed.extend(owed);
         Ok((version, ids, docs))
     }
 
@@ -1051,6 +1176,22 @@ fn resolve_thread(
     Ok((ThreadId(thread), merged))
 }
 
+/// Points each merge of a transaction at the conversation its rows end in: a later message
+/// can merge that one again (the fork's replay found it), and a model that maps each `from`
+/// once must not land on a thread that is gone. Only later merges count ([`retire_merged`]
+/// keeps a merged thread's id from coming back as a new thread's in the same commit, but this
+/// rule doesn't lean on it).
+pub(crate) fn final_merges(merges: &mut [ThreadMerge]) {
+    for n in (0..merges.len()).rev() {
+        if let Some(next) = merges[n + 1..]
+            .iter()
+            .find(|later| later.from == merges[n].into)
+        {
+            merges[n].into = next.into;
+        }
+    }
+}
+
 /// Joins `threads` into the one with the most messages; returns it and the ones merged away.
 fn merge_threads(tx: &Connection, threads: &[i64]) -> rusqlite::Result<(i64, Vec<ThreadId>)> {
     let mut sized = Vec::with_capacity(threads.len());
@@ -1068,6 +1209,9 @@ fn merge_threads(tx: &Connection, threads: &[i64]) -> rusqlite::Result<(i64, Vec
             .execute([target, other])?;
         tx.prepare_cached("UPDATE thread_aliases SET thread_id = ?1 WHERE thread_id = ?2")?
             .execute([target, other])?;
+        // A reminder found by its thread (the fork's Remind Me) follows it.
+        tx.prepare_cached("UPDATE fork_reminders SET thread_id = ?1 WHERE thread_id = ?2")?
+            .execute([target, other])?;
         tx.prepare_cached(
             "UPDATE threads SET \
                message_count = threads.message_count + o.message_count, \
@@ -1078,11 +1222,22 @@ fn merge_threads(tx: &Connection, threads: &[i64]) -> rusqlite::Result<(i64, Vec
              FROM (SELECT * FROM threads WHERE id = ?2) AS o WHERE threads.id = ?1",
         )?
         .execute([target, other])?;
-        tx.prepare_cached("DELETE FROM threads WHERE id = ?1")?
-            .execute([other])?;
+        // Its row stays until the commit ends ([`retire_merged`]): deleted now, its id (often
+        // the highest) would be the next new conversation's in the same commit, and the commit's
+        // `merged_threads` would move that conversation's rows too.
         merged.push(ThreadId(other));
     }
     Ok((target, merged))
+}
+
+/// Deletes the conversations `merges` merged away, empty since: at the end of the commit, so
+/// none of their ids came back as a new conversation's in it ([`merge_threads`]).
+pub(crate) fn retire_merged(tx: &Connection, merges: &[ThreadMerge]) -> rusqlite::Result<()> {
+    let mut delete = tx.prepare_cached("DELETE FROM threads WHERE id = ?1")?;
+    for merge in merges {
+        delete.execute([merge.from.0])?;
+    }
+    Ok(())
 }
 
 fn insert_message(
@@ -1174,6 +1329,13 @@ fn insert_message(
             |row| row.get(0),
         )?,
     );
+    fork::note_new(
+        tx,
+        id,
+        headers.facts,
+        message.category,
+        sender.map_or("", |address| address.email.as_str()),
+    )?;
     {
         let mut part = tx.prepare_cached(
             "INSERT OR IGNORE INTO message_parts(message, part, role, mime_type, name, size, \
@@ -1238,6 +1400,19 @@ fn people(list: &[Address]) -> String {
         .map(|address| format!("{} {}", address.name, address.email))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// In the transaction that inserts the rows of `docs`: lowers `fts_through` below them, so a
+/// crash before their full-text entries are committed finds them at the next start, whatever
+/// was indexed meanwhile. Returns the first id, which the writer keeps in `State::unindexed`
+/// once the transaction is committed.
+fn fts_owed(tx: &Connection, docs: &[FtsDoc]) -> rusqlite::Result<Option<i64>> {
+    let Some(first) = docs.iter().map(|doc| doc.id.0).min() else {
+        return Ok(None);
+    };
+    tx.prepare_cached("UPDATE meta SET value = min(value, ?1) WHERE key = 'fts_through'")?
+        .execute([first - 1])?;
+    Ok(Some(first))
 }
 
 fn fts_doc(id: MessageId, message: &NewMessage) -> FtsDoc {
@@ -1332,18 +1507,62 @@ fn thread_counts(
     Ok(counts)
 }
 
+/// Whether a row in `folder` with `state` is in a message view diffed from its rows: any but
+/// the Split Inbox's, which are diffed from the split rows (`writer/split.rs`).
 fn in_view(
     filter: ViewFilter,
     folders: &[FolderId],
     folder: FolderId,
     state: Option<(u32, bool)>,
 ) -> bool {
+    debug_assert!(
+        filter.split().is_none(),
+        "a split view diffed from its rows"
+    );
     state.is_some_and(|(flags, has_attachments)| {
-        folders.contains(&folder) && views::passes(filter, flags, has_attachments)
+        folders.contains(&folder) && views::passes(filter, flags, has_attachments, fork::HIDDEN)
     })
 }
 
-/// Positions, before any change of this transaction, of the rows that leave each open view.
+/// A message view whose diffs come from the rows a transaction changed: not a conversation
+/// view, and not one of the Split Inbox's (a split filter, or a side under another filter),
+/// whose rows change with their conversations (`writer/split.rs`).
+fn by_rows(spec: &ViewSpec) -> bool {
+    spec.grouping == ViewGrouping::Messages && spec.side().is_none()
+}
+
+/// What each message a transaction changed was and is: its flags and whether it has
+/// attachments, before and after (`None`: not stored). The Split Inbox's message views under
+/// another filter tell from it which of them the filter keeps (`writer/split.rs`).
+pub(crate) type Touched = BTreeMap<MessageId, (Option<(u32, bool)>, Option<(u32, bool)>)>;
+
+/// Settles the conversation table (`writer/conversations.rs`) with the diffs of the open
+/// conversation views `reload` doesn't pick, then reloads every open view it picks, at its
+/// total after the transaction.
+fn reload_after_settle(
+    tx: &Connection,
+    open: &BTreeMap<ViewId, ViewSpec>,
+    reload: impl Fn(&ViewSpec) -> bool,
+) -> rusqlite::Result<Vec<ViewChange>> {
+    let reloaded: BTreeSet<ViewId> = open
+        .iter()
+        .filter(|(_, spec)| reload(spec))
+        .map(|(view, _)| *view)
+        .collect();
+    let mut changes = conversations::settle(tx, open, &reloaded, &Touched::new())?;
+    for view in reloaded {
+        changes.push(ViewChange {
+            view,
+            diff: ViewDiff::Reload {
+                total: views::total(tx, open[&view])?,
+            },
+        });
+    }
+    Ok(changes)
+}
+
+/// Positions, before any change of this transaction, of the rows that leave each open message
+/// view (conversation and split views need none: `writer/conversations.rs`).
 fn removed_positions(
     tx: &Connection,
     open: &BTreeMap<ViewId, ViewSpec>,
@@ -1351,6 +1570,9 @@ fn removed_positions(
 ) -> rusqlite::Result<BTreeMap<ViewId, Vec<u32>>> {
     let mut removed = BTreeMap::new();
     for (view, spec) in open {
+        if !by_rows(spec) {
+            continue;
+        }
         let folders = views::folders(tx, spec.scope)?;
         let leaving: Vec<&RowChange> = rows
             .iter()
@@ -1374,14 +1596,30 @@ fn removed_positions(
 }
 
 /// Each open view's diff after this transaction's changes; views it didn't touch get none.
+/// Message views are diffed from `rows`, conversation views from the threads the
+/// transaction's writes left dirty, which this settles: call it after the last write.
 fn view_changes(
     tx: &Connection,
     open: &BTreeMap<ViewId, ViewSpec>,
     rows: &[RowChange],
     removed: &BTreeMap<ViewId, Vec<u32>>,
 ) -> rusqlite::Result<Vec<ViewChange>> {
+    view_changes_except(tx, open, rows, removed, &BTreeSet::new())
+}
+
+/// `view_changes` for the open views but `skip`, which the caller reloads.
+fn view_changes_except(
+    tx: &Connection,
+    open: &BTreeMap<ViewId, ViewSpec>,
+    rows: &[RowChange],
+    removed: &BTreeMap<ViewId, Vec<u32>>,
+    skip: &BTreeSet<ViewId>,
+) -> rusqlite::Result<Vec<ViewChange>> {
     let mut changes = Vec::new();
     for (view, spec) in open {
+        if !by_rows(spec) || skip.contains(view) {
+            continue;
+        }
         let folders = views::folders(tx, spec.scope)?;
         let mut leaving = 0;
         let mut entering = Vec::new();
@@ -1432,5 +1670,13 @@ fn view_changes(
         };
         changes.push(ViewChange { view: *view, diff });
     }
+    // A move is two changes of one message: out of its folder, then into another.
+    let mut touched = Touched::new();
+    for row in rows {
+        let entry = touched.entry(row.id).or_insert((row.before, row.after));
+        entry.0 = entry.0.or(row.before);
+        entry.1 = row.after.or(entry.1);
+    }
+    changes.extend(conversations::settle(tx, open, skip, &touched)?);
     Ok(changes)
 }

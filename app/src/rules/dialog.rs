@@ -877,8 +877,7 @@ impl Inner {
                     }
                     Some(Err(SaveError::Changed)) => {
                         inner.saving.set(false);
-                        inner
-                            .toast("The rules file changed outside Sealwax; it shows as it is now");
+                        inner.toast("The rules file changed outside Pronto; it shows as it is now");
                         inner.load(None);
                         return;
                     }

@@ -40,7 +40,7 @@ pub struct Outcome {
     /// the folder it arrived in. When it isn't kept, the engine moves it into one of them and
     /// copies it into the rest; when it is, it copies it into each.
     pub filed: Vec<Filed>,
-    /// `discard` ran. A message neither kept nor filed goes to Trash; Sealwax never expunges.
+    /// `discard` ran. A message neither kept nor filed goes to Trash; Pronto never expunges.
     pub discard: bool,
     /// The script ended at a `stop`.
     pub stopped: bool,
@@ -101,7 +101,7 @@ impl FlagChange {
         self.add.is_empty() && self.remove.is_empty()
     }
 
-    /// The change as Sealwax's flag bits, plus the other keywords to add and to remove.
+    /// The change as Pronto's flag bits, plus the other keywords to add and to remove.
     pub fn to_model(&self) -> (Flags, Flags, Vec<String>, Vec<String>) {
         let (add, add_keywords) = Flags::from_imap(self.add.iter().map(String::as_str));
         let (remove, remove_keywords) = Flags::from_imap(self.remove.iter().map(String::as_str));
@@ -118,7 +118,7 @@ impl fmt::Debug for FlagChange {
     }
 }
 
-/// The IMAP names of Sealwax's flag bits, for [`MessageView::flags`].
+/// The IMAP names of Pronto's flag bits, for [`MessageView::flags`].
 pub fn flag_names(flags: Flags) -> Vec<&'static str> {
     [
         (Flags::SEEN, "\\Seen"),
@@ -289,7 +289,7 @@ impl<M: MessageView + ?Sized> Run<'_, M> {
             Test::HasFlag { matcher, keys } => {
                 self.flags.0.iter().any(|flag| any_key(matcher, flag, keys))
             }
-            // RFC 5183: an item Sealwax doesn't know doesn't exist, and the test is false.
+            // RFC 5183: an item Pronto doesn't know doesn't exist, and the test is false.
             Test::Environment {
                 matcher,
                 name,

@@ -3,7 +3,7 @@
 # a light stock theme (matte-black with square corners, catppuccin-latte rounded). On a scripted
 # engine; every message is fictional. ML-048's previews are preview-m3-status.sealwax-test's.
 # Not run by CI: it writes into tools/progress/public/.
-# Run: tools/headless.sh 35 target/debug/sealwax --self-test tests/selftest/preview-m3.sealwax-test
+# Run: tools/headless.sh 35 target/debug/pronto --self-test tests/selftest/preview-m3.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -54,12 +54,12 @@ mail-add Older:archive 3d "Bilder fra turen"
 folder archive Older
 engine-expect folder-opened
 engine-expect load-older
-assert-shown list-older true
+wait-until assert-shown list-older true
 assert-label list-older "Loading older messages…"
 screenshot $DIR/../../tools/progress/public/m3-list-older-catppuccin-latte-rounded-2026-10-05.png
 theme matte-black
 corners 0
-assert-shown list-older true
+wait-until assert-shown list-older true
 screenshot $DIR/../../tools/progress/public/m3-list-older-matte-black-square-2026-10-05.png
 engine-reply older-loaded 0 complete
 wait-until assert-shown list-older false

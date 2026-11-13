@@ -7,7 +7,7 @@
 //! testbed running and seeded, and use only the users `ops` (direct) and `opsfault` (through
 //! the proxy), whose folders they empty and fill with synthetic messages:
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test write_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -652,9 +652,9 @@ struct Tally {
     cut_neither: usize,
 }
 
-/// Seeds per fault scenario: `SEALWAX_WRITE_SEEDS`, else 5.
+/// Seeds per fault scenario: `PRONTO_WRITE_SEEDS`, else 5.
 fn seeds() -> u64 {
-    std::env::var("SEALWAX_WRITE_SEEDS")
+    std::env::var("PRONTO_WRITE_SEEDS")
         .ok()
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(5)

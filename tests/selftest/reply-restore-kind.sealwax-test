@@ -1,0 +1,197 @@
+# An inline reply that answers another way after its draft was first saved comes back as the user
+# left it (the fork's phase B; the review's repro): Reply, saved, then `a` comes back as Reply
+# All after a restart, and Reply All narrowed to Reply comes back as Reply, so Send never goes
+# to someone `r` took out. The draft keeper makes the draft again for the new kind, so the
+# stored draft (and its Drafts-folder copy) goes to whom the box says. Recipients the user chose
+# stay chosen through a kind change and a restart; a conversation laid out again in the same
+# session gets its reply back as it was (its kind, its recipients, the message it answers);
+# Undo of a send whose box holds another draft opens the undone reply in a card instead of
+# losing it; and a window closed right after typing saves the draft first. "Restart": the
+# window closes into background mode and a new one opens (a new reader and draft keeper, which
+# read the store). The store backend and the fake engine; the account's address isn't the
+# samples' Alex Berg, so Reply All answers Alex too. Every name, address and text is fictional.
+# Run: tools/headless.sh 65 target/debug/pronto --self-test tests/selftest/reply-restore-kind.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+engine-attach
+triage-account Work work
+conversation-add trip Work
+conversation-add links Work
+composer-backend store
+composer-limit none
+triage-mark-read-on-open false
+folder inbox Work
+list-wait
+focus list
+
+# Reply, saved; then Reply All: the draft is made again, to everyone.
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+type "Vi ses."
+assert-quick-reply kind reply
+wait-until assert-reply-draft trip-6 reply tomas@example.test none
+key Escape
+assert-quick-reply focused false
+key a
+assert-quick-reply kind reply-all
+assert-quick-reply text "Vi ses."
+assert-quick-reply chosen false
+assert-quick-reply label "Reply to Tomas Berg and 1 other"
+wait-until assert-reply-draft trip-6 reply-all tomas@example.test,alex.berg@example.test none
+
+# After a restart it answers everyone still.
+close-window
+wait-until assert-window false
+bus-activate
+wait-until assert-window true
+folder inbox Work
+list-wait
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Vi ses."
+assert-quick-reply kind reply-all
+assert-quick-reply chosen false
+wait-until assert-quick-reply label "Reply to Tomas Berg and 1 other"
+
+# Narrowed to Reply after that save: after a restart it answers the sender alone, and Send goes
+# to him alone (the compose rules' Reply).
+key r
+assert-quick-reply kind reply
+assert-quick-reply focused true
+assert-quick-reply label "Reply to Tomas Berg"
+key Escape
+assert-quick-reply text "Vi ses."
+wait-until assert-reply-draft trip-6 reply tomas@example.test none
+close-window
+wait-until assert-window false
+bus-activate
+wait-until assert-window true
+folder inbox Work
+list-wait
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Vi ses."
+assert-quick-reply kind reply
+assert-quick-reply chosen false
+wait-until assert-quick-reply label "Reply to Tomas Berg"
+assert-quick-reply cc none
+action win.quick-reply
+key <Control>Return
+wait-until assert-quick-sends 1
+assert-quick-send-last trip-6 "Vi ses." reply none
+wait-until assert-toast "Sending…"
+# The box emptied: its draft goes.
+wait-until assert-reply-draft trip-6 none
+
+# Recipients the user chose stay chosen through a change of kind and a restart: the draft is
+# made again as Reply All, to them.
+key Escape
+wait-until assert-reader-on-screen false
+conversation-show links-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+type "Takk for lenkene."
+key <Control><Shift>c
+type "kari@example.test,"
+assert-quick-reply chosen true
+assert-quick-reply cc kari@example.test
+wait-until assert-reply-draft links-6 reply tomas@example.test kari@example.test
+key Escape
+assert-quick-reply editing false
+key Escape
+assert-quick-reply focused false
+key a
+assert-quick-reply kind reply-all
+assert-quick-reply chosen true
+assert-quick-reply to tomas@example.test
+assert-quick-reply cc kari@example.test
+wait-until assert-reply-draft links-6 reply-all tomas@example.test kari@example.test
+close-window
+wait-until assert-window false
+bus-activate
+wait-until assert-window true
+folder inbox Work
+list-wait
+conversation-show links-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Takk for lenkene."
+assert-quick-reply kind reply-all
+wait-until assert-quick-reply chosen true
+assert-quick-reply to tomas@example.test
+assert-quick-reply cc kari@example.test
+assert-quick-reply label "Reply to Tomas Berg and 1 other"
+
+# Laid out again in the same session (fallen out of the reader's warm set), the reply comes
+# back as it was: its kind and its chosen recipients, not the defaults.
+reply-relayout
+wait-until assert-quick-reply text "Takk for lenkene."
+assert-quick-reply kind reply-all
+assert-quick-reply chosen true
+assert-quick-reply cc kari@example.test
+# A reply to an older message of the conversation answers that one again.
+focus reader
+key Escape
+wait-until assert-reader-on-screen false
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+assert-quick-reply text ""
+key p
+wait-until assert-conversation top-of trip-5
+key a
+assert-quick-reply target trip-5
+type "Om forrige melding."
+key Escape
+reply-relayout
+wait-until assert-quick-reply text "Om forrige melding."
+assert-quick-reply target trip-5
+assert-quick-reply kind reply-all
+
+# Undo of a send whose box holds another draft by then: the undone reply opens in a card, the
+# box keeps its own.
+action win.quick-reply
+key <Control>Return
+wait-until assert-quick-sends 2
+assert-quick-send-last trip-5 "Om forrige melding." reply-all none
+wait-until assert-toast "Sending…"
+action win.quick-reply
+type "Noe annet."
+toast-click Undo
+wait-until assert-compose-last quick-reply trip-5 "Om forrige melding." reply-all none
+wait-until assert-toast "Send undone"
+assert-quick-reply text "Noe annet."
+composer-wait
+assert-composer html-has "Om forrige melding."
+assert-labelled
+composer-close
+wait-until assert-composer count 0
+
+# The window closed right after typing: the inline reply's draft is saved before it goes (else
+# 2 s after the typing rests), so nothing typed is lost.
+action win.quick-reply
+assert-quick-reply target trip-6
+type " Ha det."
+close-window
+wait-until assert-window false
+bus-activate
+wait-until assert-window true
+folder inbox Work
+list-wait
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Noe annet. Ha det."

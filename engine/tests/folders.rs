@@ -21,7 +21,7 @@ use sealwax_engine::net::Trust;
 use sealwax_engine::service::{Engine, EngineConfig, SecretBackend, SignInOptions, SyncConfig};
 use sealwax_infrastructure::accounts::AccountPaths;
 use sealwax_infrastructure::blobs::BlobStore;
-use sealwax_infrastructure::store::{Store, StoreOptions};
+use sealwax_infrastructure::store::{Store, StoreOptions, SyncState};
 use sealwax_infrastructure::xdg::SealwaxDirs;
 use std::path::Path;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ impl Running {
             .unwrap(),
         );
         let engine = Engine::start(EngineConfig {
-            application: "io.github.pixdevsapps.Sealwax.Test".into(),
+            application: "io.github.omarsimon1.Pronto.Test".into(),
             store: store.clone(),
             blobs,
             paths: AccountPaths::new(&dirs),
@@ -81,6 +81,7 @@ impl Running {
             secrets: SecretBackend::Memory,
             detect: DetectOptions::default(),
             microsoft_client_id: None,
+            google_client: None,
             sign_in: SignInOptions::default(),
             sync: config(),
         })
@@ -335,7 +336,8 @@ async fn a_rename_moves_the_folders_under_it_their_subscriptions_and_keeps_their
         let deadline = Instant::now() + WAIT;
         loop {
             let state = store.folder_sync(acme.id).recv().await.unwrap().unwrap();
-            if state.messages >= 4 {
+            // The first sync done, not only its messages stored: its UIDNEXT comes last.
+            if state.messages >= 4 && state.state == SyncState::Ready {
                 return state;
             }
             assert!(Instant::now() < deadline, "the opened folder never synced");
@@ -441,7 +443,14 @@ async fn a_delete_goes_deepest_first_with_folders_the_store_never_saw() {
             "DELETE \"Kunder\"",
         ]
     );
-    assert_eq!(fake.world().count("UNSUBSCRIBE"), 4);
+    // Commands, not the header FETCH's LIST-UNSUBSCRIBE field.
+    let unsubscribes = fake
+        .world()
+        .commands
+        .iter()
+        .filter(|command| command.starts_with("UNSUBSCRIBE"))
+        .count();
+    assert_eq!(unsubscribes, 4);
     assert_eq!(run.names(account).await, ["INBOX", "Kunderservice"]);
 }
 

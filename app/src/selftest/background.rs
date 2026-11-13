@@ -1,12 +1,12 @@
 //! Self-test commands for background mode (M7: ML-084): the notices `background.rs` sent (its
-//! record, so no notification server is needed), its marker, Start Sealwax at Login's entry in
-//! a sandboxed configuration home (`reply-sandbox`), a Sealwax of its own that closes its
+//! record, so no notification server is needed), its marker, Start Pronto at Login's entry in
+//! a sandboxed configuration home (`reply-sandbox`), a Pronto of its own that closes its
 //! window as a user would, and activation → first frame from background mode. Every name and
 //! address is fictional.
 //!
 //! | Command | What it does |
 //! | --- | --- |
-//! | `background-spawn NAME [ARGS…]` | As `spawn-bg` (its own id and folders under `$TMP/NAME/`, output in `$TMP/NAME.err`), and it closes its main window 300 ms after its first frame (`SEALWAX_CLOSE_WINDOW_AFTER_MS`) |
+//! | `background-spawn NAME [ARGS…]` | As `spawn-bg` (its own id and folders under `$TMP/NAME/`, output in `$TMP/NAME.err`), and it closes its main window 300 ms after its first frame (`PRONTO_CLOSE_WINDOW_AFTER_MS`) |
 //! | `background-menu [close]` | Opens (or closes) the main window's menu, for screenshots |
 //! | `background-measure N` | N times: closes the main window, waits until it is gone, calls D-Bus `Activate` on this instance and times it to the new window's first frame; prints every run, p50, p95 and the rows bound at that frame |
 //! | `background-watch [composer]` | Watches the main window, its list and its reader (or the newest composer window) for `assert-freed` |
@@ -15,13 +15,13 @@
 //! | `assert-notices N` | `background.rs` sent N notices in this run |
 //! | `assert-notice title\|body TEXT` | The latest one's title is TEXT, or its body holds TEXT |
 //! | `assert-notice-marker BOOL` | The one-time notice's marker is in this run's state folder |
-//! | `assert-autostart on\|off` | The run's autostart entry exists and starts Sealwax (on), or doesn't (off); prints it. Fails outside the run's scratch directory |
-//! | `assert-autostart-toggle BOOL` | Start Sealwax at Login's check mark |
-//! | `assert-hidden-start BOOL` | A `--background` start holds Sealwax |
+//! | `assert-autostart on\|off` | The run's autostart entry exists and starts Pronto (on), or doesn't (off); prints it. Fails outside the run's scratch directory |
+//! | `assert-autostart-toggle BOOL` | Start Pronto at Login's check mark |
+//! | `assert-hidden-start BOOL` | A `--background` start holds Pronto |
 //! | `assert-reader-built BOOL` | The main window's reader (its WebKit view) exists: released when the window closes, built after a new window's first frame |
 //! | `assert-reader-selected` | The reader shows the list's selected message, in the window on screen |
 //! | `assert-file-count PATH TEXT N` | PATH (a log in `$TMP`) has N lines holding TEXT; prints them |
-//! | `assert-login-dialog heading\|body TEXT` | Start Sealwax at Login's question on screen: its heading, or text its body holds |
+//! | `assert-login-dialog heading\|body TEXT` | Start Pronto at Login's question on screen: its heading, or text its body holds |
 
 use super::{Harness, StepResult, WAIT_TIMEOUT, equal, number};
 use crate::application::APP_ID_ENV;
@@ -65,10 +65,10 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-/// How long after its first frame a `background-spawn` Sealwax closes its window.
+/// How long after its first frame a `background-spawn` Pronto closes its window.
 const CLOSE_AFTER_MS: &str = "300";
 
-/// A spawned Sealwax quits by itself after this long, should a test lose track of it.
+/// A spawned Pronto quits by itself after this long, should a test lose track of it.
 const SAFETY_EXIT_MS: &str = "120000";
 
 pub fn handles(command: &str) -> bool {
@@ -167,9 +167,9 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
                 .app
                 .action_state(ActionId::StartAtLogin.name())
                 .and_then(|state| state.get::<bool>())
-                .ok_or("Start Sealwax at Login has no state")?;
+                .ok_or("Start Pronto at Login has no state")?;
             equal(
-                "Start Sealwax at Login",
+                "Start Pronto at Login",
                 state,
                 super::script::boolean(arg(0))?,
             )
@@ -239,7 +239,7 @@ pub async fn step(harness: &Harness, command: &str, args: &[String]) -> StepResu
     }
 }
 
-/// A Sealwax of its own, as `spawn-bg` starts one, that closes its window as a user would.
+/// A Pronto of its own, as `spawn-bg` starts one, that closes its window as a user would.
 fn spawn(harness: &Harness, name: &str, args: &[String]) -> StepResult {
     let app_id = format!("{}.{name}", harness.app_id);
     if !gtk::gio::Application::id_is_valid(&app_id) {
@@ -294,8 +294,8 @@ fn check_autostart(harness: &Harness, wanted: &str) -> StepResult {
         Err(_) => println!("  # {} doesn't exist", probe.path.display()),
     }
     match wanted {
-        "on" => equal("Sealwax starts at login", probe.on, true),
-        "off" => equal("Sealwax starts at login", probe.on, false),
+        "on" => equal("Pronto starts at login", probe.on, true),
+        "off" => equal("Pronto starts at login", probe.on, false),
         other => Err(format!("use on or off, not {other}")),
     }
 }
@@ -448,7 +448,7 @@ fn memory(label: &str) {
         .map(|(name, kib)| format!("{name} {:.1}", mib(*kib)))
         .collect();
     println!(
-        "  # {label}: PSS {:.1} MiB in all; sealwax {:.1} MiB; {} processes under it: {}",
+        "  # {label}: PSS {:.1} MiB in all; pronto {:.1} MiB; {} processes under it: {}",
         mib(total),
         mib(own_pss),
         children.len(),

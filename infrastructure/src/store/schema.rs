@@ -266,7 +266,7 @@ CREATE TABLE remote_senders(
 /// attempt). `draft_blobs` holds every blob a draft ever referenced, so none is evicted or
 /// reported orphaned before the draft is discarded or sent. An `outbox` row makes a draft a
 /// send: queued (until `not_before`), sending (from just before SMTP DATA, with the built bytes
-/// and envelope), uncertain (sending when Sealwax stopped: never sent again without the user) or
+/// and envelope), uncertain (sending when Pronto stopped: never sent again without the user) or
 /// sent, with its Sent copy. `draft_deletions` are server copies to delete that the store holds
 /// no row for. `contacts` are the addresses seen in From, To and Cc per account, with
 /// `contact_terms` (folded address, domain and name words) for prefix suggestions; the Rust step
@@ -415,7 +415,7 @@ CREATE INDEX messages_date ON messages(date, id, folder_id, flags, has_attachmen
 /// the message, so none is downloaded twice: the row it became while the store holds it, when
 /// it was downloaded (Unix seconds, for deleting it from the server after N days), whether it
 /// was downloaded whole (a message above the client's size cap is stored as its header and
-/// stays on the server, never deleted there), and when Sealwax deleted it from the server
+/// stays on the server, never deleted there), and when Pronto deleted it from the server
 /// (DELE, then a QUIT sent: its reply may be lost, so the next listing tells).
 /// `blob_deletions` holds the raw messages that ops done at once (local and POP3 accounts) left
 /// unreferenced: their replies go to the app, which deletes no blobs, so an actor takes them.
@@ -439,7 +439,7 @@ CREATE INDEX pop3_uidls_message ON pop3_uidls(message);
 CREATE TABLE blob_deletions(blob_key BLOB PRIMARY KEY) WITHOUT ROWID;
 ";
 
-/// M9's guard against building a message again that stopped Sealwax while it was built (the
+/// M9's guard against building a message again that stopped Pronto while it was built (the
 /// depth limit's report, docs/m9/depth.md). `outbox.building` is when a queued send's message
 /// started to be built, cleared once the build returns; `drafts.upload_building` is the revision
 /// whose Drafts-folder copy is being built. A start that finds either set doesn't build it again
@@ -519,6 +519,7 @@ pub fn open_writer(path: &Path) -> Result<Connection, StoreError> {
     )?;
     conn.set_prepared_statement_cache_capacity(128);
     migrate(&mut conn)?;
+    super::fork::open(&mut conn, version < VERSION)?;
     Ok(conn)
 }
 

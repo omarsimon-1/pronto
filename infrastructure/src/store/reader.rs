@@ -3,16 +3,20 @@
 //! fast scroll isn't stuck behind stale pages; a request whose reply was dropped is skipped.
 
 use super::api::{
-    BodyCandidate, BodyTarget, BodyUsage, FolderSync, OpenView, Page, PartSource, StoreVersion,
-    SyncState, Versioned, ViewOpened, ViewSpec,
+    BodyCandidate, BodyTarget, BodyUsage, ConversationHit, ConversationMember, FolderSync,
+    OpenView, Page, PartSource, StoreVersion, SyncState, Versioned, ViewGrouping, ViewOpened,
+    ViewSpec,
 };
+use super::conversations::{self, Shape};
+use super::views::Kept;
 use super::{Shared, StoreError, check, codec, views};
 use rusqlite::{Connection, OptionalExtension};
 use sealwax_domain::account::AccountKey;
 use sealwax_domain::model::{
     Account, AccountId, Attachment, BlobKey, BodyKind, Folder, FolderId, FolderRole, Headers,
-    MessageDetail, MessageId, MessageSummary, ThreadIndex,
+    MessageDetail, MessageId, MessageSummary, ThreadId, ThreadIndex,
 };
+use sealwax_domain::split::HeaderFacts;
 use std::sync::Arc;
 
 mod sync;
@@ -20,9 +24,12 @@ mod sync;
 pub(crate) use sync::SyncRead;
 mod bodies;
 pub(crate) mod compose;
+pub(crate) mod contact;
 mod conversation;
 mod pop3;
+mod remind;
 mod remote;
+mod split;
 
 type Sender<T> = async_channel::Sender<Result<T, StoreError>>;
 
@@ -61,6 +68,17 @@ pub(crate) enum ReadJob {
         limit: u32,
         reply: Sender<Versioned<Vec<MessageSummary>>>,
     },
+    SearchConversations {
+        text: String,
+        folder: Option<FolderId>,
+        limit: u32,
+        reply: Sender<Versioned<Vec<ConversationHit>>>,
+    },
+    ConversationMembers {
+        threads: Vec<ThreadId>,
+        spec: ViewSpec,
+        reply: Sender<Versioned<Vec<ConversationMember>>>,
+    },
     Check {
         reply: Sender<Vec<String>>,
     },
@@ -94,6 +112,26 @@ pub(crate) enum ReadJob {
     RemoteSenders {
         reply: Sender<Vec<String>>,
     },
+    SenderSplits {
+        reply: Sender<Vec<(String, sealwax_domain::split::Split)>>,
+    },
+    SplitCounts {
+        spec: ViewSpec,
+        reply: Sender<Versioned<super::api::SplitCounts>>,
+    },
+    Uncategorized {
+        folder: FolderId,
+        limit: u32,
+        reply: Sender<Vec<super::api::Uncategorized>>,
+    },
+    Reminders {
+        reply: Sender<Vec<super::Reminder>>,
+    },
+    FoldersToPrepare {
+        account: AccountId,
+        now: i64,
+        reply: Sender<Vec<super::FolderToPrepare>>,
+    },
     Conversation {
         id: MessageId,
         reply: Sender<Versioned<Option<crate::store::Conversation>>>,
@@ -105,6 +143,11 @@ pub(crate) enum ReadJob {
     IsPop3 {
         account: AccountId,
         reply: Sender<bool>,
+    },
+    Contact {
+        address: String,
+        limit: u32,
+        reply: Sender<Versioned<super::ContactFacts>>,
     },
 }
 
@@ -119,6 +162,8 @@ impl ReadJob {
             ReadJob::Detail { reply, .. } => reply.is_closed(),
             ReadJob::Raw { reply, .. } => reply.is_closed(),
             ReadJob::Search { reply, .. } => reply.is_closed(),
+            ReadJob::SearchConversations { reply, .. } => reply.is_closed(),
+            ReadJob::ConversationMembers { reply, .. } => reply.is_closed(),
             ReadJob::Check { reply } => reply.is_closed(),
             ReadJob::FolderSync { reply, .. } => reply.is_closed(),
             ReadJob::Sync(read) => read.cancelled(),
@@ -129,9 +174,15 @@ impl ReadJob {
             ReadJob::BodyUsage { reply } => reply.is_closed(),
             ReadJob::PendingOps { reply, .. } => reply.is_closed(),
             ReadJob::RemoteSenders { reply } => reply.is_closed(),
+            ReadJob::SenderSplits { reply } => reply.is_closed(),
+            ReadJob::SplitCounts { reply, .. } => reply.is_closed(),
+            ReadJob::Uncategorized { reply, .. } => reply.is_closed(),
+            ReadJob::Reminders { reply } => reply.is_closed(),
+            ReadJob::FoldersToPrepare { reply, .. } => reply.is_closed(),
             ReadJob::Conversation { reply, .. } => reply.is_closed(),
             ReadJob::Pop3Uidls { reply, .. } => reply.is_closed(),
             ReadJob::IsPop3 { reply, .. } => reply.is_closed(),
+            ReadJob::Contact { reply, .. } => reply.is_closed(),
         }
     }
 }
@@ -213,6 +264,21 @@ impl Reader {
             } => {
                 let _ = reply.try_send(self.search(&text, folder, limit));
             }
+            ReadJob::SearchConversations {
+                text,
+                folder,
+                limit,
+                reply,
+            } => {
+                let _ = reply.try_send(self.search_conversations(&text, folder, limit));
+            }
+            ReadJob::ConversationMembers {
+                threads,
+                spec,
+                reply,
+            } => {
+                let _ = reply.try_send(self.conversation_members(&threads, spec));
+            }
             ReadJob::Check { reply } => {
                 let _ = reply.try_send(check::run(&self.conn).map_err(StoreError::from));
             }
@@ -247,6 +313,29 @@ impl Reader {
             ReadJob::RemoteSenders { reply } => {
                 let _ = reply.try_send(self.remote_senders());
             }
+            ReadJob::SenderSplits { reply } => {
+                let _ = reply.try_send(self.sender_splits());
+            }
+            ReadJob::SplitCounts { spec, reply } => {
+                let _ = reply.try_send(self.split_counts(spec));
+            }
+            ReadJob::Uncategorized {
+                folder,
+                limit,
+                reply,
+            } => {
+                let _ = reply.try_send(self.uncategorized(folder, limit));
+            }
+            ReadJob::Reminders { reply } => {
+                let _ = reply.try_send(self.reminders());
+            }
+            ReadJob::FoldersToPrepare {
+                account,
+                now,
+                reply,
+            } => {
+                let _ = reply.try_send(self.folders_to_prepare(account, now));
+            }
             ReadJob::Conversation { id, reply } => {
                 let _ = reply.try_send(self.conversation(id));
             }
@@ -255,6 +344,13 @@ impl Reader {
             }
             ReadJob::IsPop3 { account, reply } => {
                 let _ = reply.try_send(self.is_pop3(account));
+            }
+            ReadJob::Contact {
+                address,
+                limit,
+                reply,
+            } => {
+                let _ = reply.try_send(self.contact(&address, limit));
             }
         }
     }
@@ -275,34 +371,97 @@ impl Reader {
             let view = self.shared.registry.register(&mut open, spec);
             (tx, version, view)
         };
+        if spec.grouping == ViewGrouping::Conversations {
+            let shape = Shape::of(&tx, spec)?;
+            let total = conversations::count(&tx, &shape)?;
+            let section_counts = request
+                .section_starts
+                .iter()
+                .map(|start| conversations::count_since(&tx, &shape, *start))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = conversations::page(&tx, &shape, total, 0, request.first_page)?;
+            return Ok(ViewOpened {
+                version,
+                view,
+                total,
+                section_counts,
+                rows: Vec::new(),
+                conversations: rows,
+            });
+        }
         let folders = views::folders(&tx, spec.scope)?;
-        let total = views::count(&tx, &folders, spec.filter)?;
+        let kept = Kept::of(spec);
+        let total = views::count(&tx, &folders, kept)?;
         let section_counts = request
             .section_starts
             .iter()
-            .map(|start| views::count_since(&tx, &folders, spec.filter, *start))
+            .map(|start| views::count_since(&tx, &folders, kept, *start))
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let rows = views::page(&tx, &folders, spec.filter, total, 0, request.first_page)?;
+        let rows = views::page(&tx, &folders, kept, total, 0, request.first_page)?;
         Ok(ViewOpened {
             version,
             view,
             total,
             section_counts,
             rows,
+            conversations: Vec::new(),
         })
     }
 
     fn page(&self, spec: ViewSpec, offset: u32, limit: u32) -> Result<Page, StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let version = version(&tx)?;
+        if spec.grouping == ViewGrouping::Conversations {
+            let shape = Shape::of(&tx, spec)?;
+            let total = conversations::count(&tx, &shape)?;
+            return Ok(Page {
+                version,
+                offset,
+                rows: Vec::new(),
+                conversations: conversations::page(&tx, &shape, total, offset, limit)?,
+            });
+        }
         let folders = views::folders(&tx, spec.scope)?;
-        let total = views::count(&tx, &folders, spec.filter)?;
-        let rows = views::page(&tx, &folders, spec.filter, total, offset, limit)?;
+        let kept = Kept::of(spec);
+        let total = views::count(&tx, &folders, kept)?;
+        let rows = views::page(&tx, &folders, kept, total, offset, limit)?;
         Ok(Page {
             version,
             offset,
             rows,
+            conversations: Vec::new(),
         })
+    }
+
+    /// The members of conversations in a view's folders that pass its filter (not its side:
+    /// triage acts on a conversation's members whatever their side).
+    fn conversation_members(
+        &self,
+        threads: &[ThreadId],
+        spec: ViewSpec,
+    ) -> Result<Versioned<Vec<ConversationMember>>, StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let version = version(&tx)?;
+        let folders = views::folders(&tx, spec.scope)?;
+        let value = conversations::members(&tx, threads, &folders, spec.filter)?;
+        Ok(Versioned { version, value })
+    }
+
+    fn search_conversations(
+        &self,
+        text: &str,
+        folder: Option<FolderId>,
+        limit: u32,
+    ) -> Result<Versioned<Vec<ConversationHit>>, StoreError> {
+        let query = sealwax_domain::search::parse_typed(text);
+        let tx = self.conn.unchecked_transaction()?;
+        let version = version(&tx)?;
+        let value = if query.is_empty() {
+            Vec::new()
+        } else {
+            conversations::search(&tx, &query, folder, limit)?
+        };
+        Ok(Versioned { version, value })
     }
 
     /// The account with `key`, detached or not.
@@ -375,7 +534,8 @@ impl Reader {
         let mut detail = tx
             .prepare_cached(
                 "SELECT to_addrs, cc_addrs, reply_to, sent_date, message_id, in_reply_to, refs, \
-                   list_id, keywords, body_kind, size, blob_key, thread_index \
+                   list_id, keywords, body_kind, size, blob_key, thread_index, \
+                   (SELECT facts FROM fork_message_split WHERE id = ?1) \
                  FROM messages WHERE id = ?1",
             )?
             .query_row([id.0], |row| {
@@ -397,6 +557,7 @@ impl Reader {
                         thread_index: row
                             .get::<_, Option<Vec<u8>>>(12)?
                             .and_then(|index| ThreadIndex::from_slice(&index)),
+                        facts: HeaderFacts::from_bits(row.get::<_, Option<u8>>(13)?.unwrap_or(0)),
                     },
                     keywords: codec::decode_words(&row.get::<_, String>(8)?),
                     body_kind: BodyKind::from_code(row.get(9)?),

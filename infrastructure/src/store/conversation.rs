@@ -33,6 +33,9 @@ pub struct Conversation {
     /// `\Deleted`, or in the Trash or Junk, by id. A change to one of them, or to a copy, changes
     /// what the conversation shows.
     pub left_out: Vec<MessageId>,
+    /// The conversation's subject, as its list row says it (`threads.subject`, the subject its
+    /// first message came with, without "Re:"); empty when the thread has none.
+    pub subject: String,
 }
 
 impl Conversation {
@@ -66,8 +69,8 @@ pub(crate) struct Row {
 
 /// Which copy of a message the conversation shows: the one the user selected, else by the role
 /// of its folder (Inbox, Archive, All Mail, Sent, other folders, Drafts, Junk, Trash), then the
-/// oldest stored.
-fn rank(role: FolderRole) -> u8 {
+/// oldest stored. The body prefetch ranks copies the same way (`reader/bodies.rs`).
+pub(crate) fn rank(role: FolderRole) -> u8 {
     match role {
         FolderRole::Inbox => 0,
         FolderRole::Archive => 1,
@@ -145,6 +148,7 @@ pub(crate) fn assemble(
         selected,
         messages,
         left_out,
+        subject: String::new(),
     })
 }
 

@@ -1,11 +1,13 @@
-# The composer's body (M6: ML-067, ADR-014): typing through the helper and as key presses, every
-# toolbar command and the state it shows, the paragraph styles, Link… with its dialog, Undo and
+# The composer's body (M6: ML-067, ADR-014): typing through the helper and as key presses, the
+# formatting toolbar hidden until the card's menu shows it (the fork's phase B; its keys work
+# all the same), every toolbar command and the state it shows, the paragraph styles, Link… with
+# its dialog, Undo and
 # Redo following WebKit, and every Composer-scope key: Ctrl+B, Ctrl+I and Ctrl+U toggle once,
 # Ctrl+K opens Link…, Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y undo and redo typing (never the main
 # window's mail Undo), Ctrl+Shift+V pastes plain text, Ctrl+Enter sends. One-key shortcuts
 # never fire while typing. Norwegian text round-trips. The stand-in backend; every address is
 # fictional.
-# Run: tools/headless.sh 41 target/debug/sealwax --self-test tests/selftest/composer-editing.sealwax-test
+# Run: tools/headless.sh 41 target/debug/pronto --self-test tests/selftest/composer-editing.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -19,6 +21,12 @@ assert-composer spell false
 assert-composer enabled bold true
 assert-composer enabled composer-undo false
 assert-composer labelled
+# Hidden until Formatting Toolbar in the card's menu shows it; layout.toml remembers it.
+assert-composer shown composer-toolbar false
+assert-composer enabled show-formatting true
+composer-action show-formatting
+assert-composer shown composer-toolbar true
+assert-composer shown composer-bold true
 
 # Typing through the helper; Norwegian text round-trips.
 composer-focus body

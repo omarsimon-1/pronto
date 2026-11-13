@@ -1,0 +1,40 @@
+# The palette's recent commands outlive the window that ran them (docs/superhuman/polish.md):
+# a command run from the palette is written to palette.toml in the state folder, and a main
+# window built afresh, as a new launch builds one, reads it back and lists it under Recent.
+# Every name and message is fictional.
+# Run: tools/headless.sh 71 target/debug/pronto --self-test tests/selftest/palette-recent.sealwax-test
+
+desktop tiling
+fixtures --count 12 --seed 5
+resize 1440 900
+list-wait
+focus list
+
+# A fresh state folder: nothing ran yet, so no Recent group. (Compose lists track B2's snippet
+# and scheduled-message commands, which apply without a selection.)
+key <Control>k
+assert-palette open true
+assert-palette headings "Suggested|Navigation|Messages|Compose|View|General"
+key Escape
+
+# Go to Starred runs from the palette and is written down.
+key <Control>k
+type "go to starred"
+assert-palette first "Go to Starred"
+key Return
+assert-palette open false
+wait-until assert-file-contains $TMP/state/pronto/palette.toml go-to-starred
+
+# The window goes (Pronto keeps running) and a launcher builds a new one, which reads the file:
+# Go to Starred is listed under Recent, after the suggestions.
+close-window
+wait-until assert-window false
+bus-activate
+wait-until assert-window true
+list-wait
+focus list
+key <Control>k
+wait-until assert-palette open true
+wait-until assert-palette headings "Suggested|Recent|Navigation|Messages|Compose|View|General"
+assert-palette first "Compose|Search|Go to Folder…|Go to Inbox|Go to Starred"
+key Escape

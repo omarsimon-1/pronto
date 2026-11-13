@@ -1,0 +1,196 @@
+# The Superhuman pass's command palette (docs/superhuman/keys.md), with real key presses through
+# Broadway on a fixture store. Ctrl+K opens it over the window from every focus (the list, the
+# search field, the reader, the quick reply) and closes it again, never a second one; F1 and
+# Ctrl+Shift+P still open it; it stays shut over a dialog; the composer's editor keeps Ctrl+K for
+# Insert Link. The empty query suggests the selection's commands, then what ran last, then the
+# rest by category; another word for a command finds it and says so ("Archive (done)") where it
+# matches better than the title, two swapped letters still find it, and the folders are places
+# once something is typed. The keyboard focus stays in its field (Tab goes nowhere) and goes
+# back where it was. Every name, address and message is fictional.
+# Run: tools/headless.sh 34 target/debug/pronto --self-test tests/selftest/palette-keys.sealwax-test
+
+desktop tiling
+fixtures --count 40 --seed 9 --folders spread
+resize 1440 900
+triage-mark-read-on-open false
+list-wait
+list-select 0
+mail-flag 0 +read
+wait-until assert-reader-page message
+focus list
+action-log
+
+# From the list: Ctrl+K opens it, the focus in its field, a dialog to a screen reader; the
+# selected message's commands first, then the categories.
+key <Control>k
+assert-action-log win.command-palette
+assert-palette open true
+assert-dialog "Command Palette"
+assert-accessible dialog
+assert-accessible-name palette-search "Command palette"
+assert-accessible-name palette-list Commands
+assert-focus palette-search
+assert-palette first "Archive|Reply|Star|Move to…|Mark as Unread"
+assert-palette headings "Suggested|Navigation|Messages|Compose|View|General"
+palette-shown-in 250
+# Tab stays in the field; Down moves the choice and a screen reader hears it.
+tab-chain window forward 5
+assert-tab-stops 1
+key Down
+assert-announced "Reply, r, Ctrl+R"
+assert-palette selected Reply
+assert-focus palette-search
+# Escape closes it and the focus is back in the list; nothing ran.
+key Escape
+assert-palette open false
+assert-dialog none
+assert-focus list
+assert-action-log none
+
+# Other words: done is Archive, trash Delete, spam Junk, settings Preferences; a swapped pair of
+# letters still finds Archive.
+key <Control>k
+type done
+assert-palette first "Archive (done)|Go to Archive (done)"
+key <Control>a
+type trash
+assert-palette first "Delete (trash)"
+key <Control>a
+type spam
+assert-palette first "Move to Junk (spam)"
+key <Control>a
+type settings
+assert-palette first "Preferences (config.toml) (settings)"
+key <Control>a
+type arhcive
+assert-palette first Archive
+# Another word shows only where it matches better than the title: "keys" starts Keyboard
+# Shortcuts' alias, and a word of Customize Shortcuts' title as of its alias "rebind keys".
+key <Control>a
+type keys
+assert-palette shown "Keyboard Shortcuts (keys)|Customize Shortcuts (keys.toml)"
+# With one account Go to Inbox, Sent, Drafts and Archive stand for their folders, once, with
+# their keys; Go to Account 1 is the account's name; every other folder is a place.
+key <Control>a
+type "go to"
+assert-palette shown "Go to Inbox|Go to Starred|Go to Sent|Go to Drafts|Go to Archive|Go to Folder…|Go to All Inboxes|Go to Fixtures|Go to Reminders|Go to Lister|Go to Junk|Go to Trash"
+# Page Down and Down keep the selected row clear of the fade at the list's foot while rows lie
+# below it (the next one shows too); the last row may sit at the foot.
+key Page_Down
+assert-palette selected "Go to Reminders"
+assert-palette clear true
+key Down
+assert-palette selected "Go to Lister"
+assert-palette clear true
+key Down
+assert-palette selected "Go to Junk"
+assert-palette clear true
+key Down
+assert-palette selected "Go to Trash"
+assert-palette clear true
+# A title before another word that matches as well: "mark" starts the read toggle's title and
+# Archive's "mark done", both suggested for the selection; the toggle comes first.
+key <Control>a
+type mark
+assert-palette first "Mark as Unread|Archive (mark done)"
+# Folders are places once something is typed; Enter goes there and the list has the focus.
+key <Control>a
+type lister
+assert-palette first "Go to Lister"
+key Return
+assert-palette open false
+assert-folder folder-4
+assert-focus list
+assert-action-log win.command-palette
+# Only the accounts there are: one, by its name.
+key <Control>k
+type "go to account"
+assert-palette shown none
+key Escape
+
+# What ran last comes after the suggestions; the folder gone to counts.
+list-select 0
+key <Control>k
+assert-palette headings "Suggested|Recent|Navigation|Messages|Compose|View|General"
+key Escape
+
+# From the reader, the quick reply and the search field: Ctrl+K opens it and closes it again,
+# and the focus goes back where it was.
+folder inbox
+list-wait
+list-select 0
+wait-until assert-reader-page message
+wait-until assert-quick-reply shown true
+focus reader
+assert-focus reader
+key <Control>k
+wait-until assert-palette open true
+key Escape
+assert-palette open false
+assert-focus reader
+action win.quick-reply
+assert-quick-reply focused true
+key <Control>k
+wait-until assert-palette open true
+key Escape
+assert-focus quick-reply-text
+focus search
+key <Control>k
+assert-palette open true
+key <Control>k
+assert-palette open false
+assert-focus search
+search-escape
+focus folder-list
+key <Control>k
+assert-palette open true
+key Escape
+assert-palette open false
+assert-focus folder-list
+action-log
+
+# F1 and Ctrl+Shift+P open it too, and either closes it: never two.
+focus list
+key F1
+assert-palette open true
+key <Control><Shift>p
+assert-palette open false
+assert-action-log win.command-palette,win.command-palette
+
+# Over a dialog it stays shut: Keyboard Shortcuts (Ctrl+H) is open, Ctrl+K does nothing.
+key <Control>h
+assert-dialog "Keyboard Shortcuts"
+key <Control>k
+assert-palette open false
+assert-dialog "Keyboard Shortcuts"
+key Escape
+assert-dialog none
+
+# The composer's editor keeps Ctrl+K: Insert Link. From the card, the palette suggests the
+# card's commands and runs them there.
+action win.compose
+composer-wait
+composer-focus body
+composer-key <Control>k
+wait-until assert-composer dialog link true
+assert-palette open false
+composer-link - cancel
+key <Control><Shift>p
+assert-palette open true
+assert-palette first "Send|Attach File…|Add Cc and Bcc|Discard Draft"
+key Escape
+assert-palette open false
+composer-close
+wait-until assert-composer count 0
+assert-focus list
+
+# Instant: built once, so opening it again only fills its rows. Printed: the time from the key
+# to the first painted frame (Broadway draws the whole window in software), the palette's own
+# share of it, and the last query's ranking and rows.
+focus list
+key <Control>k
+palette-shown-in 250
+type arch
+palette-shown-in 250
+key Escape
+assert-palette open false

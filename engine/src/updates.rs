@@ -1,4 +1,4 @@
-//! Check for Updates (ADR-021 amendment, 2026-10-20): one GET of GitHub's answer for Sealwax's
+//! Check for Updates (ADR-021 amendment, 2026-10-20): one GET of GitHub's answer for Pronto's
 //! latest release, made only when the user runs the command. It carries nothing about the user:
 //! a generic User-Agent, no cookies, no query, no Referer; rustls with the platform verifier and
 //! no proxy, as the sign-in's requests. Only the answer's `tag_name` is read.
@@ -8,7 +8,7 @@ use crate::net::Trust;
 use sealwax_domain::updates::{REPOSITORY, Version};
 use std::time::Duration;
 
-/// GitHub's latest release of Sealwax: drafts and pre-releases are never it.
+/// GitHub's latest release of Pronto: drafts and pre-releases are never it.
 pub fn latest_release_url() -> String {
     format!("https://api.github.com/repos/{REPOSITORY}/releases/latest")
 }
@@ -39,7 +39,7 @@ pub async fn latest(url: &str) -> Result<Version, UpdateError> {
         .client_config()
         .map_err(|_| UpdateError::Offline)?;
     let http = reqwest::Client::builder()
-        .user_agent("Sealwax")
+        .user_agent("Pronto")
         .https_only(https)
         .no_proxy()
         .referer(false)
@@ -147,11 +147,11 @@ mod tests {
     async fn reads_the_latest_tag_and_sends_nothing_about_the_user() {
         let body = serde_json::json!({
             "tag_name": "v0.6.0",
-            "name": "Sealwax 0.6.0",
+            "name": "Pronto 0.6.0",
             "draft": false,
             "prerelease": false,
             "body": "Notes",
-            "assets": [{"name": "sealwax-x86_64.pkg.tar.zst"}],
+            "assets": [{"name": "pronto-x86_64.pkg.tar.zst"}],
         })
         .to_string();
         let (url, seen) = server("200 OK", body).await;
@@ -165,10 +165,10 @@ mod tests {
         );
         let request = seen.lock().unwrap().to_ascii_lowercase();
         assert!(
-            request.starts_with("get /repos/pixdevsapps/sealwax/releases/latest http/1.1\r\n"),
+            request.starts_with("get /repos/omarsimon-1/pronto/releases/latest http/1.1\r\n"),
             "{request}"
         );
-        assert!(request.contains("\r\nuser-agent: sealwax\r\n"), "{request}");
+        assert!(request.contains("\r\nuser-agent: pronto\r\n"), "{request}");
         assert!(
             request.contains("\r\naccept: application/vnd.github+json\r\n"),
             "{request}"
@@ -226,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn only_https_or_this_computer() {
         for url in [
-            "http://api.github.com/repos/PixDevsApps/sealwax/releases/latest",
+            "http://api.github.com/repos/omarsimon-1/pronto/releases/latest",
             "ftp://127.0.0.1/",
             "not a url",
         ] {
@@ -234,7 +234,7 @@ mod tests {
         }
         assert_eq!(
             latest_release_url(),
-            "https://api.github.com/repos/PixDevsApps/sealwax/releases/latest"
+            "https://api.github.com/repos/omarsimon-1/pronto/releases/latest"
         );
     }
 }

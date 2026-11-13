@@ -32,7 +32,7 @@ const SPECIALS: &[char] = &[
     '(', ')', '<', '>', '[', ']', ':', ';', '@', '\\', ',', '.', '"',
 ];
 
-/// Whether `email` is an address Sealwax can send to: an ASCII local part of at most 64 bytes
+/// Whether `email` is an address Pronto can send to: an ASCII local part of at most 64 bytes
 /// without spaces or specials, and a domain that is a host name (international names allowed).
 pub fn is_valid(email: &str) -> bool {
     let Some((local, domain)) = email.rsplit_once('@') else {

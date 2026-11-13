@@ -1,4 +1,4 @@
-# New mail in background mode, end to end on the testbed (M7 phase B; ML-083, ML-084): Sealwax
+# New mail in background mode, end to end on the testbed (M7 phase B; ML-083, ML-084): Pronto
 # with the real engine on Stalwart's newmail user, the window closed into background mode, then
 # another IMAP client APPENDs a message to the INBOX. IDLE brings it in, the notification reaches
 # the stand-in server with its sender and subject, and a click builds a new window on it. Run by
@@ -33,7 +33,7 @@ assert-notify-count 0
 close-window
 assert-window false
 wait-until assert-notify-count 1
-assert-notify 1 summary "Sealwax keeps running"
+assert-notify 1 summary "Pronto keeps running"
 # marker: the driver appends now
 wait-until assert-notify-count 2
 assert-notify 2 summary "Ada Example"

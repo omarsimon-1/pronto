@@ -4,9 +4,10 @@
 # (the only expanded message stays); Expand All and Collapse All through their actions; the
 # expanded unread messages are marked read (in the Unread view once the selection leaves); the
 # column opens at the selected message; a reply arriving and a message moved away change the
-# conversation in place; a 150-message conversation folds its middle and reveals it in steps.
+# conversation in place; a 150-message conversation folds its run of read messages and reveals
+# it in steps, and Tab over the fold's row moves from the message before it to the one after.
 # Every message is fictional (app/src/reader/samples.rs). Run:
-#   tools/headless.sh 31 target/debug/sealwax --self-test tests/selftest/reader-conversation.sealwax-test
+#   tools/headless.sh 31 target/debug/pronto --self-test tests/selftest/reader-conversation.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -21,7 +22,7 @@ assert-conversation selected trip-6
 assert-conversation expanded trip-5,trip-6
 assert-conversation cards 2
 assert-conversation collapsed 4
-assert-label reader-subject "Re: Cabin trip in November?"
+assert-label reader-subject "Cabin trip in November?"
 assert-conversation labelled
 assert-labelled
 assert-action-enabled win.expand-all true
@@ -144,23 +145,38 @@ list-select 4
 wait-until assert-conversation read trip-5 true
 wait-until assert-conversation read trip-6 true
 
-# 150 messages: the first, the latest ten and the expanded ones show; the middle folds into
-# "N earlier messages", revealed 50 at a time by real clicks, the last step whole.
+# 150 messages: the first, the one before the latest and the expanded latest show; the rest
+# folds into "N more messages" (a run of read messages, the fork's Superhuman pass), revealed
+# 50 at a time by real clicks, the last step whole.
 folder inbox Personal
 conversation-add long
 conversation-show long-150
 assert-conversation messages 150
 assert-conversation folds 1
-assert-conversation folded 139
-assert-conversation collapsed 10
+assert-conversation folded 147
+assert-conversation collapsed 2
 screenshot $DIR/../../.local/selftest/reader-conversation-long.png
+# Tab from the first message, over the fold's row, to the one after the fold is a move there:
+# the reply box answers it (phase C's review: the fold's row lost the message the focus came
+# from). A click on the fold's row takes the focus; its last step hands it to the first row it
+# revealed (it fell out of the reader to the list), the reader's doing: no move.
+assert-quick-reply target long-150
+conversation-focus long-1
+assert-conversation focus long-1 row
+key Tab
+key Tab
+wait-until assert-conversation focus long-149 row
+wait-until assert-quick-reply target long-149
 conversation-click-fold
-assert-conversation folded 89
+assert-conversation folded 97
 conversation-click-fold
-assert-conversation folded 39
+assert-conversation folded 47
 conversation-click-fold
 assert-conversation folded 0
 assert-conversation folds 0
+wait-until assert-conversation focus long-2 row
+sleep 200
+assert-quick-reply target long-149
 assert-conversation collapsed 149
 assert-conversation labelled
 assert-conversation criticals 0

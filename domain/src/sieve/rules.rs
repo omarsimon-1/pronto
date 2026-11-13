@@ -25,9 +25,9 @@ use std::fmt;
 use std::fmt::Write as _;
 
 /// The marker comment above the "never junk" section.
-const NEVER_JUNK: &str = "Sealwax: never junk";
+const NEVER_JUNK: &str = "Pronto: never junk";
 /// The marker comment above the "always junk" rule.
-const ALWAYS_JUNK: &str = "Sealwax: always junk";
+const ALWAYS_JUNK: &str = "Pronto: always junk";
 
 /// An account's rules.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -153,7 +153,7 @@ pub enum Action {
     MoveToJunk,
     /// To the Inbox with `$NotJunk` (and without `$Junk`), as Not Junk does.
     NotJunk,
-    /// `discard`: Sealwax moves the message to Trash.
+    /// `discard`: Pronto moves the message to Trash.
     Delete,
     /// `stop`: no later rule runs.
     Stop,

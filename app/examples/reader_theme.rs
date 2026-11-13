@@ -8,7 +8,7 @@
 //! `.local/reader/`.
 //!
 //! ```sh
-//! SEALWAX_OMARCHY_STATE=$PWD/.local/reader-examples/theme-state SEALWAX_HEADLESS_TIMEOUT=180 \
+//! PRONTO_OMARCHY_STATE=$PWD/.local/reader-examples/theme-state PRONTO_HEADLESS_TIMEOUT=180 \
 //!     tools/headless.sh 37 target/debug/examples/reader_theme
 //! ```
 //!
@@ -122,7 +122,7 @@ fn main() -> glib::ExitCode {
     let filled = samples::fill_store(&scratch.store, &scratch.blobs, samples::messages(now))
         .expect("the samples go into the scratch store");
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.ReaderTheme")
+        .application_id("io.github.omarsimon1.Pronto.ReaderTheme")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let passed = Rc::new(Cell::new(false));
@@ -189,7 +189,7 @@ struct Readers {
     second: gtk::Window,
 }
 
-/// What a document computes and the view draws, read from Sealwax's isolated world.
+/// What a document computes and the view draws, read from Pronto's isolated world.
 #[derive(Debug, Clone, PartialEq)]
 struct Look {
     text: Rgb,

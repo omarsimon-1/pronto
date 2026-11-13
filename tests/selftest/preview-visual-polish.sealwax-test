@@ -1,0 +1,45 @@
+# Previews for the visual polish (2026-10-22): Adwaita Sans with heavier weights and brighter
+# secondary text, the denser message list with its accent edge on the selected row, the reader
+# and the docked composer, in the three palettes `config.toml` offers: Tokyo Night, and the
+# default Adwaita look in dark and light. At the M1 Pro's logical size (3024 × 1964 at scale 2)
+# with Hyprland's rounding 8, as on the owner's desktop. The same frames as
+# preview-visual-polish-before, drawn by 0.5.1. Every name, address and message is fictional.
+# Not run by CI: it writes into tools/progress/public/.
+# Run: tools/headless.sh 46 target/debug/pronto --self-test tests/selftest/preview-visual-polish.sealwax-test
+
+desktop tiling
+resize 1512 982
+palette tokyo-night
+corners 8
+triage-mark-read-on-open false
+composer-backend stand-in
+conversation-account Personal alex.berg@example.test
+conversation-add singles
+conversation-add trip
+focus list
+conversation-show trip-6
+wait-until assert-quick-reply shown true
+assert-motion reduced
+screenshot $DIR/../../tools/progress/public/visual-polish-tokyo-night-reader-2026-10-22.png
+
+action win.compose
+composer-wait
+composer-type "kari@example.test,"
+composer-focus subject
+composer-type "Friday's board games"
+composer-focus body
+composer-insert "Hi Kari, I'll bring Wingspan and the snacks. See you at seven!"
+screenshot $DIR/../../tools/progress/public/visual-polish-tokyo-night-composer-2026-10-22.png
+composer-click composer-minimize
+
+palette adwaita
+color-scheme dark
+conversation-show trip-6
+screenshot $DIR/../../tools/progress/public/visual-polish-adwaita-dark-reader-2026-10-22.png
+
+color-scheme light
+conversation-show trip-6
+screenshot $DIR/../../tools/progress/public/visual-polish-adwaita-light-reader-2026-10-22.png
+composer-pointer composer-title
+composer-wait
+screenshot $DIR/../../tools/progress/public/visual-polish-adwaita-light-composer-2026-10-22.png

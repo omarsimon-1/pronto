@@ -4,7 +4,7 @@
 # sidebar's heading follows; Cancel, or Save with nothing changed, sends nothing. With two
 # accounts it asks which, starting at the one the list shows, or at the one whose heading was
 # right-clicked. Every address and name is fictional.
-# Run: tools/headless.sh 33 target/debug/sealwax --self-test tests/selftest/setup-edit.sealwax-test
+# Run: tools/headless.sh 33 target/debug/pronto --self-test tests/selftest/setup-edit.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -28,6 +28,8 @@ engine-expect verify address=kari@example.test
 engine-reply verified ok
 engine-expect add-account label=none color=rose
 engine-reply added ok file
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 wait-until assert-setup open false
 setup-dismiss-toasts
 wait-until assert-action-enabled win.edit-account true
@@ -44,7 +46,7 @@ assert-accessible-state edit-account-color-rose checked true
 assert-accessible dialog
 assert-focus-stop edit-account-label
 tab-chain window forward 20
-assert-tab-chain edit-account-label,edit-account-color-rose,edit-account-label
+assert-tab-chain edit-account-label,edit-account-color-rose,edit-account-signature,edit-account-label
 screenshot $DIR/../../.local/selftest/edit-account.png
 
 # Cancel sends nothing; Save with nothing changed sends nothing either.
@@ -64,7 +66,7 @@ setup-respond edit-account save
 engine-expect edit-account key=kari label=Work color=teal
 engine-reply edited ok file
 assert-toast "Saved Work"
-assert-file-contains $TMP/config/sealwax/accounts.toml "name = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nlabel = \"Work\"\ncolor = \"teal\"\n"
+assert-file-contains $TMP/config/pronto/accounts.toml "name = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nlabel = \"Work\"\ncolor = \"teal\"\n"
 wait-until assert-label account-name:account-1 Work
 assert-color account-name:account-1 text account-teal
 assert-color status:account-1 background account-teal

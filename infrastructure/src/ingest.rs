@@ -128,6 +128,7 @@ fn prepare_chunk(
             body_state: BodyState::Full,
             blob: Some(key),
             search_text: parsed.body_text,
+            category: None,
         });
     }
     Ok((out, blob_time, parse_time))

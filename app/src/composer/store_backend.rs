@@ -9,8 +9,8 @@
 //! Every store call is a request answered on the GTK thread; parsing originals, copying parts
 //! and deleting blobs run on worker threads (`gio::spawn_blocking`). Nothing here logs mail.
 
-use super::ComposeRequest;
-use super::backend::{Backend, Local, Prepared, Refusal, Sender, Suggestion};
+use super::backend::{Backend, Local, Prepared, Refusal, ReplyPlan, Sender, Suggestion, Unsaved};
+use super::{ComposeRequest, Recipients};
 use crate::application::AppState;
 use crate::engine_link::EngineLink;
 use crate::mailbox;
@@ -22,7 +22,7 @@ use sealwax_domain::model::{Account, AccountId, Address, DraftId, MessageId};
 use sealwax_engine::api::{Command, Event};
 use sealwax_infrastructure::blobs::BlobStore;
 use sealwax_infrastructure::store::{
-    BodyState, DraftSaved, SaveDraft, SendQueued, Store, StoredDraft,
+    BodyState, DraftSaved, SaveDraft, SendQueued, SendState, Store, StoredDraft,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -30,8 +30,6 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The undo window before a queued message goes (triage's 7 s; accepted at the M6 gate).
-pub const UNDO_SEND_MS: i64 = 7_000;
 /// How long a reply waits for the engine to download the message it answers.
 pub const DOWNLOAD_WAIT: Duration = Duration::from_secs(30);
 /// How long the size check waits for the engine's answer about the submission limit.
@@ -58,7 +56,7 @@ pub fn random() -> [u8; 16] {
 /// A fresh Message-ID on `sender`'s domain.
 pub fn message_id(sender: &str) -> String {
     ids::message_id(sender, random())
-        .unwrap_or_else(|| format!("{}@sealwax.invalid", ids::token(random())))
+        .unwrap_or_else(|| format!("{}@pronto.invalid", ids::token(random())))
 }
 
 /// The account's senders: its own address first, then its identities (`accounts.toml`); a
@@ -99,6 +97,8 @@ pub struct StoreBackend {
     limit_override: Cell<Option<Option<u64>>>,
     /// The account of each draft this process opened, for `DraftsChanged`.
     accounts: Rc<RefCell<HashMap<DraftId, AccountId>>>,
+    /// Self-tests: every save fails, as when the store does.
+    failing: Cell<bool>,
 }
 
 impl StoreBackend {
@@ -108,12 +108,18 @@ impl StoreBackend {
             limits: Rc::default(),
             limit_override: Cell::new(None),
             accounts: Rc::default(),
+            failing: Cell::new(false),
         })
     }
 
     /// Self-tests: every account's limit is `limit` from now on.
     pub fn set_limit(&self, limit: Option<u64>) {
         self.limit_override.set(Some(limit));
+    }
+
+    /// Self-tests: from now on every save fails (`on`), as when the store does, or works again.
+    pub fn set_failing(&self, on: bool) {
+        self.failing.set(on);
     }
 
     fn engine(&self) -> Option<EngineLink> {
@@ -147,7 +153,7 @@ impl Context {
     fn state(&self) -> Result<Rc<AppState>, String> {
         self.state
             .upgrade()
-            .ok_or_else(|| "Sealwax is quitting".to_owned())
+            .ok_or_else(|| "Pronto is quitting".to_owned())
     }
 
     fn store(&self) -> Result<Arc<Store>, String> {
@@ -283,7 +289,7 @@ impl Context {
                 .await;
                 if fetched != Some(true) {
                     return Err(
-                        "The message couldn't be downloaded. Try again when Sealwax is online."
+                        "The message couldn't be downloaded. Try again when Pronto is online."
                             .to_owned(),
                     );
                 }
@@ -420,17 +426,22 @@ async fn prepare(context: Context, request: ComposeRequest) -> Result<Prepared, 
         }
         ComposeRequest::Reply { message, kind } => {
             let account = context.account_of(message).await?;
-            let draft = answer(&context, &account, message, kind, "").await?;
+            let draft = answer(&context, &account, message, kind, "", None).await?;
             (account, draft, title(kind).to_owned(), None)
         }
         ComposeRequest::QuickReply {
             message,
             text,
             kind,
+            recipients,
+            signature,
         } => {
             let account = context.account_of(message).await?;
             let typed = compose::text::to_html(&text);
-            let draft = answer(&context, &account, message, kind, &typed).await?;
+            let mut draft = answer(&context, &account, message, kind, &typed, signature).await?;
+            if let Some(recipients) = recipients {
+                recipients.apply(&mut draft);
+            }
             (account, draft, title(kind).to_owned(), None)
         }
         ComposeRequest::Draft(id) => {
@@ -484,7 +495,15 @@ async fn stored_draft(context: &Context, id: DraftId) -> Result<StoredDraft, Str
         .await
         .map_err(|_| "The draft couldn't be read.".to_owned())?
         .ok_or_else(|| "This draft is gone: it was sent or discarded.".to_owned())?;
-    if stored.send.is_some() {
+    // The store says whether it is in the outbox; the window's last read says when it goes.
+    if let Some(state) = stored.send {
+        if let (SendState::Queued, Some(at)) = (state, crate::outbox::scheduled_at(id)) {
+            return Err(format!(
+                "This message is scheduled to send {}. Scheduled Messages (in the command \
+                 palette) cancels it, back to a draft.",
+                crate::time_picker::describe(at)
+            ));
+        }
         return Err(
             "This message is being sent; Undo in the main window takes it back.".to_owned(),
         );
@@ -499,6 +518,7 @@ async fn answer(
     message: MessageId,
     kind: ReplyKind,
     typed: &str,
+    signature: Option<String>,
 ) -> Result<Draft, String> {
     let raw = context
         .original(message, kind != ReplyKind::Forward)
@@ -514,7 +534,10 @@ async fn answer(
     })
     .await
     .map_err(|_| "The message couldn't be read.".to_owned())?;
-    let (planned, mut parts) = planned;
+    let (mut planned, mut parts) = planned;
+    if let Some(signature) = signature {
+        planned.sender.signature = Some(signature);
+    }
     let missing: Vec<usize> = (0..parts.len()).filter(|&at| parts[at].is_none()).collect();
     if !missing.is_empty() {
         let indexes: Vec<u32> = missing.iter().map(|&at| planned.parts[at].part).collect();
@@ -541,6 +564,25 @@ async fn answer(
     Ok(planned.draft(account.id, message, id, typed, parts))
 }
 
+/// The compose rules' plan for a `kind` answer to `message`, without its quote's parts.
+async fn reply_plan(context: Context, message: MessageId, kind: ReplyKind) -> Option<ReplyPlan> {
+    let account = context.account_of(message).await.ok()?;
+    let raw = context.original(message, true).await.ok()?;
+    let senders = context.senders(&account);
+    let planned = gio::spawn_blocking(move || reply::plan(&Original::parse(&raw), kind, &senders))
+        .await
+        .ok()?;
+    Some(ReplyPlan {
+        from: identity::from_address(&planned.sender),
+        recipients: Recipients {
+            to: planned.to,
+            cc: planned.cc,
+            bcc: Vec::new(),
+        },
+        subject: planned.subject,
+    })
+}
+
 /// A Drafts-folder message written elsewhere, as a new local draft.
 async fn server_draft(
     context: &Context,
@@ -562,7 +604,7 @@ async fn server_draft(
     .await
     .map_err(|_| "The draft couldn't be read.".to_owned())?;
     let (stored, parts) =
-        parsed.ok_or_else(|| "This message isn't a draft Sealwax can open.".to_owned())?;
+        parsed.ok_or_else(|| "This message isn't a draft Pronto can open.".to_owned())?;
     let senders = context.senders(account);
     let from = stored
         .from
@@ -614,7 +656,24 @@ impl Backend for StoreBackend {
         })
     }
 
-    fn save(&self, id: DraftId, draft: Draft) -> Local<Result<(), String>> {
+    fn reply_plan(&self, message: MessageId, kind: ReplyKind) -> Local<Option<ReplyPlan>> {
+        let settings = self
+            .state
+            .upgrade()
+            .and_then(|state| state.preferences())
+            .map(|prefs| prefs.accounts())
+            .unwrap_or_default();
+        let context = Context {
+            state: self.state.clone(),
+            settings,
+        };
+        Box::pin(reply_plan(context, message, kind))
+    }
+
+    fn save(&self, id: DraftId, draft: Draft) -> Local<Result<(), Unsaved>> {
+        if self.failing.get() {
+            return Box::pin(async { Err(Unsaved::Failed("the store failed".to_owned())) });
+        }
         let left = self.moved_to(id, draft.account);
         let engine = self.engine();
         let store = self
@@ -622,7 +681,8 @@ impl Backend for StoreBackend {
             .upgrade()
             .and_then(|state| state.mailbox().shared_store());
         Box::pin(async move {
-            let store = store.ok_or("the mail store isn't open")?;
+            let store =
+                store.ok_or_else(|| Unsaved::Failed("the mail store isn't open".to_owned()))?;
             let saved = store
                 .save_draft(SaveDraft {
                     id: Some(id),
@@ -632,14 +692,16 @@ impl Backend for StoreBackend {
                 })
                 .recv()
                 .await
-                .map_err(|_| "the store failed".to_owned())?;
+                .map_err(|_| Unsaved::Failed("the store failed".to_owned()))?;
             match saved {
                 DraftSaved::Saved { .. } => {
                     tell_left(engine, left);
                     Ok(())
                 }
-                DraftSaved::NotEditable { .. } => Err("the draft is being sent".to_owned()),
-                DraftSaved::Gone => Err("the draft is gone".to_owned()),
+                DraftSaved::NotEditable { .. } => {
+                    Err(Unsaved::Gone("the draft is being sent".to_owned()))
+                }
+                DraftSaved::Gone => Err(Unsaved::Gone("the draft is gone".to_owned())),
             }
         })
     }
@@ -661,7 +723,7 @@ impl Backend for StoreBackend {
         });
     }
 
-    fn discard(&self, id: DraftId) -> Local<Result<(), String>> {
+    fn discard(&self, id: DraftId) -> Local<Result<(), Unsaved>> {
         let state = self.state.upgrade();
         let store = state
             .as_ref()
@@ -669,14 +731,15 @@ impl Backend for StoreBackend {
         let blobs = state.as_ref().and_then(|state| state.mailbox().blobs());
         let engine = state.as_ref().map(|state| state.engine());
         Box::pin(async move {
-            let store = store.ok_or("the mail store isn't open")?;
+            let store =
+                store.ok_or_else(|| Unsaved::Failed("the mail store isn't open".to_owned()))?;
             let discarded = store
                 .discard_draft(id)
                 .recv()
                 .await
-                .map_err(|_| "the store failed".to_owned())?;
+                .map_err(|_| Unsaved::Failed("the store failed".to_owned()))?;
             if discarded.refused.is_some() {
-                return Err("it is being sent".to_owned());
+                return Err(Unsaved::Gone("it is being sent".to_owned()));
             }
             if let Some(blobs) = blobs
                 && !discarded.orphaned_blobs.is_empty()
@@ -698,7 +761,7 @@ impl Backend for StoreBackend {
         })
     }
 
-    fn send(&self, id: DraftId, draft: Draft) -> Local<Result<(), Refusal>> {
+    fn send(&self, id: DraftId, draft: Draft, at: Option<i64>) -> Local<Result<(), Refusal>> {
         let state = self.state.clone();
         let limit = self.submission_limit(draft.account);
         let left = self.moved_to(id, draft.account);
@@ -715,7 +778,7 @@ impl Backend for StoreBackend {
             }
             let state = state
                 .upgrade()
-                .ok_or_else(|| refuse("Sealwax is quitting"))?;
+                .ok_or_else(|| refuse("Pronto is quitting"))?;
             let store = state
                 .mailbox()
                 .shared_store()
@@ -736,15 +799,28 @@ impl Backend for StoreBackend {
                 ));
             }
             tell_left(engine, left);
+            // The undo window (`[compose] undo_send_seconds`; the M6 gate's 7 s until the fork's
+            // phase B made it Superhuman's 10), or Send Later's time: the outbox's `not_before`,
+            // which the engine's timer waits for. A time that has passed meanwhile (a picker left
+            // open past it) or is less than a minute away goes as Send does, after the undo
+            // window, never at once without Undo.
+            let now = now_ms();
+            let window = crate::outbox::send_window(&state).as_millis() as i64;
+            let later =
+                at.filter(|at| *at > now + crate::outbox::SCHEDULED_AFTER.as_millis() as i64);
+            let not_before = later.unwrap_or(now + window);
             let queued = store
-                .queue_send(id, now_ms() + UNDO_SEND_MS)
+                .queue_send(id, not_before)
                 .recv()
                 .await
                 .map_err(|_| refuse("The message couldn't be queued."))?;
             let refusal = match queued {
                 SendQueued::Queued { account, .. } => {
                     let _ = state.engine().send(Command::OutboxQueued { account });
-                    crate::outbox::queued(&state, id, account);
+                    match later {
+                        Some(at) => crate::outbox::scheduled(&state, id, account, at),
+                        None => crate::outbox::queued(&state, id, account),
+                    }
                     return Ok(());
                 }
                 SendQueued::LocalAccount => {

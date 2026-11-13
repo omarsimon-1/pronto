@@ -3,7 +3,7 @@
 # attachments, remote images blocked and then shown, and a Latin-1 body. Links are recorded,
 # never opened, and the remote images and the clicked link point at a closed port on 127.0.0.1.
 # The screenshots follow the session's theme. Run:
-#   tools/headless.sh 37 target/debug/sealwax --self-test tests/selftest/reader.sealwax-test
+#   tools/headless.sh 37 target/debug/pronto --self-test tests/selftest/reader.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -18,11 +18,23 @@ assert-label reader-subject "Cabin weekend — final plan"
 assert-label reader-sender "Ingrid Solberg"
 assert-label reader-address "<ingrid@example.test>"
 # The others besides the user are named (issue #8).
-assert-label reader-recipients "to me, Tomas Berg"
+assert-label reader-recipients "to me, Tomas"
 assert-reader banner false
 assert-reader attachments 0
 assert-reader text-contains Hemsedal
+assert-reader text-whole true
 screenshot $DIR/../../.local/selftest/reader-plain.png
+
+# A narrower column (within one layout: a new layout maps the reader again, which measures
+# it anyway) wraps a plain body into more lines: it is measured again, its last line kept in
+# view (it stayed cut off for seconds, until something else resized it).
+resize 1270 900
+wait-until assert-reader text-whole true
+resize 1000 900
+sleep 1500
+assert-reader text-whole true
+resize 1440 900
+wait-until assert-reader text-whole true
 
 # Simple HTML takes the theme, at exactly its height.
 reader-show simple
@@ -32,9 +44,17 @@ assert-reader height-exact true
 # tools/ci.sh runs the self-tests with WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS set).
 assert-web-sandbox
 assert-reader banner false
-assert-label reader-recipients "to me, Leah Kim"
+assert-label reader-recipients "to me, Leah"
 assert-reader text-contains "Two small comments"
 screenshot $DIR/../../.local/selftest/reader-simple.png
+# Its height is kept for the next open with the quotes collapsed; opening them ("•••") grows
+# the view, and that height isn't kept (a fresh open would attach at it and jump); closed
+# again, the kept height is the shown one.
+wait-until assert-reader height-kept shown
+reader-click [data-sealwax-quote-toggle]
+wait-until assert-reader height-kept other
+reader-click [data-sealwax-quote-toggle]
+wait-until assert-reader height-kept shown
 
 # A styled newsletter keeps its design on paper; its logo comes through cid:, its remote
 # images stay hidden behind the banner. Its 600 px column sits on the theme's background.
@@ -80,7 +100,14 @@ reader-show-images
 assert-reader banner false
 assert-reader remote-allowed true
 assert-reader remote-requests 1
+# Shown again from the page the reader kept laid out (the selection came back): as it was,
+# its images shown, nothing loaded again. Read afresh, it is still allowed for the session.
 reader-show plain
+reader-show remote
+assert-reader remote-allowed true
+assert-reader banner false
+assert-reader remote-requests 0
+reader-clear
 reader-show remote
 assert-reader remote-allowed true
 assert-reader banner false
@@ -121,7 +148,8 @@ assert-reader margins true
 screenshot $DIR/../../.local/selftest/reader-newsletter-narrow.png
 resize 1440 900
 
-assert-reader live-views-at-most 4
+# The process's views stay within the cap (eight since the fork laid conversations out ahead).
+assert-reader live-views-at-most 8
 assert-labelled
 reader-clear
 assert-reader body none

@@ -32,7 +32,7 @@ impl Place {
 /// Why the rules can't be shown or changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unreadable {
-    /// The script doesn't parse, or uses Sieve Sealwax doesn't run.
+    /// The script doesn't parse, or uses Sieve Pronto doesn't run.
     Script(sieve::Error),
     /// Over 1 MiB, not UTF-8, or not readable.
     File,
@@ -375,7 +375,7 @@ mod tests {
         let written = rules::read(&place.dir, &place.key).unwrap().unwrap();
         assert!(written.contains("fileinto \"Klienter/Acme\""), "{written}");
         assert!(!written.contains("Kunder/Acme"));
-        // The Junk folder renamed (as no role folder is in Sealwax): the spam sections follow.
+        // The Junk folder renamed (as no role folder is in Pronto): the spam sections follow.
         let renamed = Place {
             folders: Folders {
                 inbox: "INBOX".to_owned(),

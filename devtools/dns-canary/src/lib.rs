@@ -2,7 +2,7 @@
 //! process (`LD_PRELOAD`), it is inherited by the WebKit processes that process starts, and
 //! it takes over `getaddrinfo`, which GLib's resolver uses, and so WebKit's network process
 //! for DNS prefetching, preconnects and every load by name. Each name looked up is appended
-//! to the file `SEALWAX_DNS_CANARY_LOG` names, one line per lookup (the process's name, a
+//! to the file `PRONTO_DNS_CANARY_LOG` names, one line per lookup (the process's name, a
 //! tab, the name), and the lookup fails with `EAI_NONAME`, so no query leaves the machine.
 //! IP literals, which need no DNS, go to the real `getaddrinfo`.
 
@@ -52,7 +52,7 @@ fn numeric(name: &str) -> bool {
 }
 
 fn record(name: &str) {
-    let Some(path) = std::env::var_os("SEALWAX_DNS_CANARY_LOG") else {
+    let Some(path) = std::env::var_os("PRONTO_DNS_CANARY_LOG") else {
         return;
     };
     let process = std::fs::read_to_string("/proc/self/comm").unwrap_or_default();

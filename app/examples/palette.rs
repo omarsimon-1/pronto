@@ -2,11 +2,11 @@
 //! shortcuts, the primary menu, the keyboard shortcuts dialog and the live settings files.
 //! Run it under the wrapper; it exits by itself and prints one line per check:
 //!
-//!     cargo build -p sealwax --example palette
+//!     cargo build -p pronto --example palette
 //!     tools/headless.sh 32 target/debug/examples/palette
 //!
 //! It keeps its settings in `.local/palette-check/`, never the user's.
-//! `SEALWAX_PALETTE_SHOT=<folder>` also saves screenshots of the palette and the dialog there.
+//! `PRONTO_PALETTE_SHOT=<folder>` also saves screenshots of the palette and the dialog there.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
-const APP_ID: &str = "io.github.pixdevsapps.Sealwax.Devel.PaletteCheck";
+const APP_ID: &str = "io.github.omarsimon1.Pronto.Devel.PaletteCheck";
 /// Long enough for a file monitor event, the 150 ms debounce and the read.
 const RELOAD_WAIT: Duration = Duration::from_secs(3);
 /// Broadway lays out about once a second without a browser attached.
@@ -92,10 +92,11 @@ struct Harness {
     reader: gtk::Box,
     list_keys: ScopedShortcuts,
     reader_keys: ScopedShortcuts,
+    window_keys: ScopedShortcuts,
     menu_button: gtk::MenuButton,
     ran: RefCell<Vec<ActionId>>,
     sidebar: Cell<Option<bool>>,
-    palette: RefCell<Option<palette::Palette>>,
+    palette: palette::Palette,
     updates: RefCell<Vec<Update>>,
     shots: Option<PathBuf>,
     report: Report,
@@ -123,7 +124,7 @@ fn start(app: &adw::Application, failures: Rc<Cell<Option<u32>>>) {
         eprintln!("palette check: could not clear {}: {error}", root.display());
     }
     let dirs = SealwaxDirs::under(&root);
-    // The config home exists, as `~/.config` does, so its monitor sees `sealwax/` appear at
+    // The config home exists, as `~/.config` does, so its monitor sees `pronto/` appear at
     // once; a missing path is only checked from time to time.
     if let Some(config_home) = dirs.config.parent()
         && let Err(error) = std::fs::create_dir_all(config_home)
@@ -138,7 +139,7 @@ fn start(app: &adw::Application, failures: Rc<Cell<Option<u32>>>) {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Sealwax palette check")
+        .title("Pronto palette check")
         .default_width(1000)
         .default_height(700)
         .build();
@@ -163,6 +164,9 @@ fn start(app: &adw::Application, failures: Rc<Cell<Option<u32>>>) {
     content.set_content(Some(&panes));
     window.set_content(Some(&content));
     actions::apply_accels(app, &keymap);
+    // Built once with the window, over its content, as the app does.
+    let palette = palette::install(&window);
+    let window_keys = actions::install_scoped(&window, Scope::Window, &keymap);
 
     let harness = Rc::new(Harness {
         app: app.clone(),
@@ -174,12 +178,13 @@ fn start(app: &adw::Application, failures: Rc<Cell<Option<u32>>>) {
         reader,
         list_keys,
         reader_keys,
+        window_keys,
         menu_button,
         ran: RefCell::new(Vec::new()),
         sidebar: Cell::new(None),
-        palette: RefCell::new(None),
+        palette,
         updates: RefCell::new(Vec::new()),
-        shots: std::env::var_os("SEALWAX_PALETTE_SHOT").map(PathBuf::from),
+        shots: std::env::var_os("PRONTO_PALETTE_SHOT").map(PathBuf::from),
         report: Report::default(),
     });
     connect_actions(&harness);
@@ -193,6 +198,7 @@ fn start(app: &adw::Application, failures: Rc<Cell<Option<u32>>>) {
             actions::apply_accels(&harness.app, &keymap);
             harness.list_keys.update(&keymap);
             harness.reader_keys.update(&keymap);
+            harness.window_keys.update(&keymap);
             harness
                 .menu_button
                 .set_menu_model(Some(&menu::primary_menu(&keymap)));
@@ -276,8 +282,16 @@ fn connect_actions(harness: &Rc<Harness>) {
         move || {
             record(&weak, ActionId::CommandPalette);
             if let Some(harness) = weak.upgrade() {
-                let palette = palette::present(&harness.window, &harness.prefs.keymap());
-                harness.palette.replace(Some(palette));
+                // Its key again closes it, as in the app.
+                if harness.palette.is_open() {
+                    harness.palette.close();
+                } else {
+                    harness.palette.open(palette::Context {
+                        keymap: harness.prefs.keymap(),
+                        selection: harness.win_actions.is_enabled(ActionId::Archive),
+                        ..palette::Context::default()
+                    });
+                }
             }
         }
     });
@@ -388,7 +402,7 @@ impl Harness {
     }
 
     fn palette(&self) -> Option<palette::Palette> {
-        self.palette.borrow().clone()
+        self.palette.is_open().then(|| self.palette.clone())
     }
 
     fn visible_dialog(&self) -> Option<adw::Dialog> {
@@ -396,7 +410,10 @@ impl Harness {
     }
 
     async fn dialog_closed(&self) -> bool {
-        wait_until(Duration::from_secs(2), || self.visible_dialog().is_none()).await
+        wait_until(Duration::from_secs(2), || {
+            self.visible_dialog().is_none() && !self.palette.is_open()
+        })
+        .await
     }
 
     async fn shoot(&self, name: &str) {
@@ -404,8 +421,11 @@ impl Harness {
             return;
         };
         wait_until(Duration::from_secs(5), || {
-            self.visible_dialog()
-                .is_some_and(|dialog| dialog.is_mapped() && dialog.width() > 0)
+            let card = self.palette.card();
+            (card.is_mapped() && card.width() > 0)
+                || self
+                    .visible_dialog()
+                    .is_some_and(|dialog| dialog.is_mapped() && dialog.width() > 0)
         })
         .await;
         let path = folder.join(name);
@@ -470,8 +490,11 @@ impl Harness {
             ),
         );
         r.check(
-            "Ctrl+? is the keyboard shortcuts' accelerator",
-            same_accels(&self.accels("app.shortcuts"), &["<Control>question"]),
+            "Ctrl+? and Ctrl+H are the keyboard shortcuts' accelerators",
+            same_accels(
+                &self.accels("app.shortcuts"),
+                &["<Control>question", "<Control>h"],
+            ),
         );
         r.check(
             "message commands have no application accelerators",
@@ -520,10 +543,7 @@ impl Harness {
         let opened = self.palette();
         r.check(
             "win.command-palette opens the palette over the window",
-            opened.is_some()
-                && self
-                    .visible_dialog()
-                    .is_some_and(|dialog| dialog.has_css_class("sw-palette")),
+            opened.is_some() && self.palette.card().is_mapped() && self.visible_dialog().is_none(),
         );
         let Some(palette) = opened else {
             return self.report.failed.get() + 1;
@@ -554,8 +574,11 @@ impl Harness {
         if let Some(entry) = &entry {
             entry.set_text("arch");
         }
+        // Archive leads the empty query too (the selection's commands come first): wait for
+        // the filtered list.
         wait_until(Duration::from_secs(1), || {
             palette.shown().first() == Some(&ActionId::Archive)
+                && palette.shown().len() < shown.len()
         })
         .await;
         let filtered = palette.shown();
@@ -582,11 +605,56 @@ impl Harness {
                 "Down moves the selection",
                 first.is_some() && second.is_some() && first != second,
             );
+            palette.set_query("done");
+            let titles = palette.shown_titles();
+            println!("     \"done\" lists: {}", titles.join(", "));
+            r.check(
+                "an alias finds its command and says so",
+                titles.first().map(String::as_str) == Some("Archive (done)"),
+            );
+            palette.set_query("arhcive");
+            r.check(
+                "two swapped letters still find the command",
+                palette.shown().first() == Some(&ActionId::Archive),
+            );
+            // "side" starts a word of the title and of "hide sidebar" alike: the title alone.
+            palette.set_query("side");
+            let titles = palette.shown_titles();
+            println!("     \"side\" lists: {}", titles.join(", "));
+            r.check(
+                "an alias that matches no better than the title isn't shown",
+                titles.first().map(String::as_str) == Some("Toggle Sidebar"),
+            );
             if let Some(entry) = palette.search_entry() {
                 entry.emit_stop_search();
             }
             r.check("Escape closes the palette", self.dialog_closed().await);
         }
+
+        // The palette's key again closes it: no second palette stacks on the first.
+        self.activate(ActionId::CommandPalette);
+        let open = self.palette.is_open();
+        self.activate(ActionId::CommandPalette);
+        r.check(
+            "the palette's key again closes it",
+            open && self.dialog_closed().await,
+        );
+        r.check(
+            "Ctrl+K is the window's key that yields, the others accelerators",
+            has_trigger(&self.window_keys, "<Control>k")
+                && !has_trigger(&self.list_keys, "<Control>k")
+                && !same_accels(&self.accels("win.command-palette"), &["<Control>k"]),
+        );
+        let before = self.count(ActionId::CommandPalette);
+        let pressed = press(&self.window_keys, &self.window, "<Control>k");
+        r.check(
+            "Ctrl+K opens the palette from the window",
+            pressed == Some(true)
+                && self.palette.is_open()
+                && self.count(ActionId::CommandPalette) == before + 1,
+        );
+        press(&self.window_keys, &self.window, "<Control>k");
+        r.check("Ctrl+K closes it again", self.dialog_closed().await);
 
         self.activate(ActionId::CommandPalette);
         if let Some(palette) = self.palette()
@@ -671,11 +739,12 @@ impl Harness {
         }
         self.dialog_closed().await;
 
+        // View, Settings, Updates (Check for Updates…, ADR-021 amendment) and Quit.
         r.check(
-            "the primary menu has its three sections",
+            "the primary menu has its four sections",
             self.menu_button
                 .menu_model()
-                .is_some_and(|menu| menu.n_items() == 3),
+                .is_some_and(|menu| menu.n_items() == 4),
         );
 
         let seen = self.updates.borrow().len();

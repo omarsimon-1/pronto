@@ -118,7 +118,13 @@ pub(crate) fn wait_for(
     }
 }
 
-fn new_message(run: u64, n: usize, kind: usize, date: i64, parent: Option<&str>) -> Vec<u8> {
+pub(crate) fn new_message(
+    run: u64,
+    n: usize,
+    kind: usize,
+    date: i64,
+    parent: Option<&str>,
+) -> Vec<u8> {
     let threading = match parent {
         Some(parent) => format!("In-Reply-To: <{parent}>\r\nReferences: <{parent}>\r\n"),
         None => String::new(),

@@ -350,8 +350,12 @@ pub(super) fn window(inner: &Inner) -> Option<gtk::Window> {
 
 /// A toast in the reader's window.
 pub(super) fn toast(inner: &Inner, text: &str) {
-    let overlay = inner
-        .stage
+    toast_over(&inner.stage, text);
+}
+
+/// A toast in the window `widget` is in.
+pub(super) fn toast_over(widget: &impl IsA<gtk::Widget>, text: &str) {
+    let overlay = widget
         .ancestor(adw::ToastOverlay::static_type())
         .and_downcast::<adw::ToastOverlay>();
     match overlay {
@@ -460,11 +464,26 @@ pub(super) fn launch(inner: &Inner, path: &Path) {
         return;
     }
     let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
-    launcher.launch(window(inner).as_ref(), gio::Cancellable::NONE, |result| {
-        if let Err(error) = result {
-            tracing::warn!(%error, "reader: an attachment didn't open");
-        }
-    });
+    let stage = inner.stage.clone();
+    launcher.launch(
+        window(inner).as_ref(),
+        gio::Cancellable::NONE,
+        move |result| {
+            if let Err(error) = result {
+                tracing::warn!(%error, "reader: an attachment didn't open");
+                if !gave_up(&error) {
+                    toast_over(&stage, "Couldn't open the attachment.");
+                }
+            }
+        },
+    );
+}
+
+/// Whether a launcher's or a chooser's error only says the user closed its dialog.
+pub(super) fn gave_up(error: &glib::Error) -> bool {
+    error.matches(gtk::DialogError::Dismissed)
+        || error.matches(gtk::DialogError::Cancelled)
+        || error.matches(gio::IOErrorEnum::Cancelled)
 }
 
 /// Saves `files` (names and bytes) into `folder` off the GTK thread, each under a name the

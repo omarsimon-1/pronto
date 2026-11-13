@@ -106,7 +106,7 @@ impl Running {
     fn engine(&mut self, sync: SyncConfig) {
         let dirs = SealwaxDirs::under(self.dir.path());
         let engine = Engine::start(EngineConfig {
-            application: "io.github.pixdevsapps.Sealwax.Test".into(),
+            application: "io.github.omarsimon1.Pronto.Test".into(),
             store: self.store.clone(),
             blobs: self.blobs.clone(),
             paths: AccountPaths::new(&dirs),
@@ -114,6 +114,7 @@ impl Running {
             secrets: SecretBackend::Memory,
             detect: DetectOptions::default(),
             microsoft_client_id: None,
+            google_client: None,
             sign_in: SignInOptions::default(),
             sync,
         })

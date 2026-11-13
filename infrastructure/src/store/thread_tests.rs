@@ -310,6 +310,52 @@ fn a_message_id_counts_once_across_folders_and_copies() {
     store.close().unwrap();
 }
 
+/// A conversation merged away and a new one in the same commit: the new one never takes the
+/// merged one's id (SQLite gives a new row the highest id plus one), so `merged_threads` names
+/// only conversations that are gone; a list mapping each `from` moved the new message into the
+/// other conversation (the replay's seeds 1051, 1093 and 1101).
+#[test]
+fn a_merged_conversations_id_stays_gone_in_its_commit() {
+    let dir = scratch();
+    let store = open(dir.path());
+    let account = account(&store, "Kari");
+    let inbox = folder(&store, account, "INBOX", FolderRole::Inbox);
+    let first = ingest(
+        &store,
+        vec![
+            message(inbox, 1, Some("a@example.test"), "Hytta"),
+            message(inbox, 2, Some("b@example.test"), "Budsjett"),
+        ],
+    );
+    let before = rows(&store, &[inbox]);
+    let (low, _) = thread(&before, first[0]);
+    let (high, _) = thread(&before, first[1]);
+    assert!(high > low, "the second conversation has the highest id");
+    let events = store.subscribe();
+    let mut bridge = message(inbox, 3, Some("c@example.test"), "Re: Hytta");
+    bridge.headers.references = vec!["a@example.test".into(), "b@example.test".into()];
+    let fresh = message(inbox, 4, Some("d@example.test"), "Lunsj");
+    let later = ingest(&store, vec![bridge, fresh]);
+    let after = rows(&store, &[inbox]);
+    let merges: Vec<ThreadMerge> = std::iter::from_fn(|| events.try_recv().ok())
+        .flat_map(|event| event.merged_threads.clone())
+        .collect();
+    assert_eq!(
+        merges,
+        [ThreadMerge {
+            from: high,
+            into: low
+        }]
+    );
+    assert_eq!(thread(&after, later[0]), (low, 3));
+    let (new, size) = thread(&after, later[1]);
+    assert_eq!(size, 1);
+    assert_ne!(new, high, "the new conversation took the merged one's id");
+    assert!(after.values().all(|row| row.thread != high));
+    clean(&store);
+    store.close().unwrap();
+}
+
 #[test]
 fn removals_keep_a_merged_conversation_whole_until_it_is_empty() {
     let dir = scratch();

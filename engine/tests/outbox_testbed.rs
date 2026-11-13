@@ -12,7 +12,7 @@
 //!   again" and never for "it was sent". Undo inside the window sends nothing on the wire.
 //! - **Interop:** drafts built from S7's cases sent through the engine to Stalwart (bob, carol,
 //!   dave) and to Mailpit; each received copy round-trips through mail-parser to the draft's
-//!   fields; Sealwax's transmitted bytes (its Sent copy as appended, without its one Bcc field,
+//!   fields; Pronto's transmitted bytes (its Sent copy as appended, without its one Bcc field,
 //!   checked to be exactly what each server received after its own lines) hold no Bcc field and
 //!   no host name; each message arrives once and its Sent copy is in Sent once.
 //! - **The Sent copy and drafts:** on Dovecot, IMAP4rev1 Dovecot and Stalwart, a reply's draft
@@ -22,7 +22,7 @@
 //!
 //! Test users and dummy addresses only; everything on 127.0.0.1.
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test outbox_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -337,9 +337,9 @@ struct Tally {
     failures: Vec<String>,
 }
 
-/// Seeds per step and fault: `SEALWAX_OUTBOX_SEEDS`, else 2.
+/// Seeds per step and fault: `PRONTO_OUTBOX_SEEDS`, else 2.
 fn seeds() -> u64 {
-    std::env::var("SEALWAX_OUTBOX_SEEDS")
+    std::env::var("PRONTO_OUTBOX_SEEDS")
         .ok()
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(2)
@@ -835,7 +835,7 @@ fn interop_through_the_engine() {
                         continue;
                     }
                 };
-                let mut scanned = vec![("Sealwax's bytes", transmitted.clone())];
+                let mut scanned = vec![("Pronto's bytes", transmitted.clone())];
                 let received: Vec<(String, Vec<u8>)> = if *side == "stalwart" {
                     let mut out = Vec::new();
                     for (user, list) in [
@@ -880,10 +880,10 @@ fn interop_through_the_engine() {
                 };
                 for (who, raw) in &received {
                     // Mailpit's own lines name the Bcc recipients and its reverse lookup of the
-                    // client, so only Stalwart's whole copy is scanned besides Sealwax's bytes.
+                    // client, so only Stalwart's whole copy is scanned besides Pronto's bytes.
                     if prepended(raw, &transmitted).is_none() {
                         failures.push(format!(
-                            "{side} {} to {who}: not Sealwax's bytes after the server's lines",
+                            "{side} {} to {who}: not Pronto's bytes after the server's lines",
                             case.name
                         ));
                     } else if *side == "stalwart" {

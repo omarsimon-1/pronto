@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """New mail in background mode, end to end (M7 phase B): runs
-tests/selftest/testbed-notify.sealwax-test headless and, once the script has closed Sealwax's
+tests/selftest/testbed-notify.sealwax-test headless and, once the script has closed Pronto's
 window into background mode, APPENDs one fictional message to Stalwart's newmail INBOX as another
 IMAP client. Prints the time from the APPEND's OK to the line where the script saw the
 notification (the self-test's output, read as it comes; resolution about 10 ms) and the script's
@@ -44,7 +44,7 @@ def main() -> int:
     display = sys.argv[1] if len(sys.argv) > 1 else "19"
     script = ROOT / "tests/selftest/testbed-notify.sealwax-test"
     run = subprocess.Popen(
-        [str(ROOT / "tools/headless.sh"), display, str(ROOT / "target/debug/sealwax"),
+        [str(ROOT / "tools/headless.sh"), display, str(ROOT / "target/debug/pronto"),
          "--self-test", str(script)],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )

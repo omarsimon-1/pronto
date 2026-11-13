@@ -2,9 +2,10 @@
 
 use super::views::ViewHandle;
 use sealwax_domain::model::{
-    AccountId, Attachment, BlobKey, BodyKind, Flags, FolderId, FolderRole, Headers, MessageId,
-    MessageSummary, ThreadId,
+    AccountId, Attachment, BlobKey, BodyKind, ConversationSummary, Flags, FolderId, FolderRole,
+    Headers, MessageId, MessageSummary, ThreadId,
 };
+use sealwax_domain::split::Split;
 use std::time::Duration;
 
 /// Bumped by every commit that changes what a list, the sidebar or the reader shows. Replies
@@ -28,13 +29,58 @@ pub enum ViewFilter {
     Unread,
     Starred,
     Attachments,
+    /// The Split Inbox's Important messages (the fork's Superhuman pass,
+    /// docs/superhuman/split.md); a conversation passes when any member in the view's folders
+    /// is Important.
+    Important,
+    /// The Split Inbox's Other messages; a conversation passes when no member in the view's
+    /// folders is Important. Important and Other share a view's rows out between them.
+    Other,
 }
 
-/// A message list: a scope and a filter, newest first (date, then id, descending).
+impl ViewFilter {
+    /// The Split Inbox side a filter keeps, if it is one of the split filters.
+    pub fn split(self) -> Option<Split> {
+        match self {
+            ViewFilter::Important => Some(Split::Important),
+            ViewFilter::Other => Some(Split::Other),
+            _ => None,
+        }
+    }
+
+    /// The filter that keeps one side of the Split Inbox.
+    pub fn of_split(split: Split) -> ViewFilter {
+        match split {
+            Split::Important => ViewFilter::Important,
+            Split::Other => ViewFilter::Other,
+        }
+    }
+}
+
+/// What one row of a view is (the fork's threading, docs/superhuman/store.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ViewGrouping {
+    /// One row per stored message (ADR-016): `MessageSummary` rows.
+    #[default]
+    Messages,
+    /// One row per conversation with a shown message in the view's folders:
+    /// `ConversationSummary` rows, newest conversation first. The filter keeps a conversation
+    /// when one of its members there passes it.
+    Conversations,
+}
+
+/// A message list: a scope and a filter, newest first (date, then id, descending), with one
+/// row per message or per conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ViewSpec {
     pub scope: ViewScope,
     pub filter: ViewFilter,
+    pub grouping: ViewGrouping,
+    /// The side of the Split Inbox the view keeps (the fork's phase C, docs/superhuman/split.md
+    /// "UI"), with the filter on top: the Important side's unread conversations. `None` keeps
+    /// both sides. A split filter (`ViewFilter::Important`, `Other`) is that side with no other
+    /// filter, and wins over this.
+    pub split: Option<Split>,
 }
 
 impl ViewSpec {
@@ -42,6 +88,8 @@ impl ViewSpec {
         Self {
             scope: ViewScope::Folder(folder),
             filter: ViewFilter::All,
+            grouping: ViewGrouping::Messages,
+            split: None,
         }
     }
 
@@ -49,11 +97,40 @@ impl ViewSpec {
         Self {
             scope: ViewScope::UnifiedInbox,
             filter: ViewFilter::All,
+            grouping: ViewGrouping::Messages,
+            split: None,
         }
     }
 
     pub fn with_filter(self, filter: ViewFilter) -> Self {
         Self { filter, ..self }
+    }
+
+    pub fn with_grouping(self, grouping: ViewGrouping) -> Self {
+        Self { grouping, ..self }
+    }
+
+    /// The same view on one side of the Split Inbox (`None`: both).
+    pub fn with_split(self, split: Option<Split>) -> Self {
+        Self { split, ..self }
+    }
+
+    /// The same view with one row per conversation.
+    pub fn conversations(self) -> Self {
+        self.with_grouping(ViewGrouping::Conversations)
+    }
+
+    /// The side of the Split Inbox the view keeps, by its split filter or its `split`.
+    pub fn side(&self) -> Option<Split> {
+        self.filter.split().or(self.split)
+    }
+
+    /// The view's filter besides its side: All for a split filter.
+    pub fn base_filter(&self) -> ViewFilter {
+        match self.filter.split() {
+            Some(_) => ViewFilter::All,
+            None => self.filter,
+        }
     }
 }
 
@@ -80,15 +157,93 @@ pub struct ViewOpened {
     pub total: u32,
     /// For each section start, the number of rows dated at or after it.
     pub section_counts: Vec<u32>,
+    /// The first page of a message view; empty for a conversation view.
     pub rows: Vec<MessageSummary>,
+    /// The first page of a conversation view; empty for a message view.
+    pub conversations: Vec<ConversationSummary>,
 }
 
-/// Rows `offset..offset + rows.len()` of a view.
+impl ViewOpened {
+    /// The first page, whichever the grouping.
+    pub fn take_rows(&mut self) -> Vec<ListRow> {
+        list_rows(
+            std::mem::take(&mut self.rows),
+            std::mem::take(&mut self.conversations),
+        )
+    }
+}
+
+/// Rows `offset..offset + rows.len()` of a view: `rows` for a message view, `conversations`
+/// for a conversation view (the other is empty).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
     pub version: StoreVersion,
     pub offset: u32,
     pub rows: Vec<MessageSummary>,
+    pub conversations: Vec<ConversationSummary>,
+}
+
+impl Page {
+    /// The rows, whichever the grouping.
+    pub fn into_rows(self) -> Vec<ListRow> {
+        list_rows(self.rows, self.conversations)
+    }
+
+    /// Rows of either grouping.
+    pub fn len(&self) -> usize {
+        self.rows.len() + self.conversations.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+fn list_rows(rows: Vec<MessageSummary>, conversations: Vec<ConversationSummary>) -> Vec<ListRow> {
+    rows.into_iter()
+        .map(ListRow::Message)
+        .chain(conversations.into_iter().map(ListRow::Conversation))
+        .collect()
+}
+
+/// One row of a list of either grouping, for an app that holds both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListRow {
+    Message(MessageSummary),
+    Conversation(ConversationSummary),
+}
+
+/// What identifies a row across change events: a message view's rows by message, a
+/// conversation view's by conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RowKey {
+    Message(MessageId),
+    Conversation(ThreadId),
+}
+
+impl ListRow {
+    pub fn key(&self) -> RowKey {
+        match self {
+            ListRow::Message(row) => RowKey::Message(row.id),
+            ListRow::Conversation(row) => RowKey::Conversation(row.thread),
+        }
+    }
+
+    /// What orders the row and places it in a date section.
+    pub fn date(&self) -> i64 {
+        match self {
+            ListRow::Message(row) => row.date,
+            ListRow::Conversation(row) => row.date,
+        }
+    }
+
+    /// The message the reader shows for the row: the message, or the conversation's anchor.
+    pub fn message(&self) -> MessageId {
+        match self {
+            ListRow::Message(row) => row.id,
+            ListRow::Conversation(row) => row.anchor,
+        }
+    }
 }
 
 /// A reply value with the version of the snapshot or commit it came from.
@@ -101,7 +256,7 @@ pub struct Versioned<T> {
 /// A new account row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewAccount {
-    /// What Sealwax calls the account (`AccountSettings::title`).
+    /// What Pronto calls the account (`AccountSettings::title`).
     pub name: String,
     pub address: String,
 }
@@ -271,6 +426,10 @@ pub struct NewMessage {
     pub blob: Option<BlobKey>,
     /// The body as plain text, for the search index.
     pub search_text: String,
+    /// The server's own Split Inbox category, where it gave one (Gmail's Primary tab is
+    /// Important, its other tabs Other): it wins over the header rules
+    /// (docs/superhuman/split.md).
+    pub category: Option<Split>,
 }
 
 /// The writer's reply to an ingest.
@@ -313,9 +472,9 @@ pub struct ThreadMerge {
 
 /// A row and its position in a view.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Positioned {
+pub struct Positioned<R = MessageSummary> {
     pub position: u32,
-    pub row: MessageSummary,
+    pub row: R,
 }
 
 /// How one open view changed in one commit.
@@ -330,8 +489,65 @@ pub enum ViewDiff {
         changed: Vec<Positioned>,
         total: u32,
     },
+    /// A conversation view's splice, applied the same way. A conversation that moves (a reply
+    /// made it newer) is removed at its old position and inserted at its new one, unless it
+    /// keeps its place among the rows that stay: then it is only `changed`.
+    ConversationSplice {
+        removed: Vec<u32>,
+        inserted: Vec<Positioned<ConversationSummary>>,
+        changed: Vec<Positioned<ConversationSummary>>,
+        total: u32,
+    },
     /// Too much changed to describe row by row: open the view again.
     Reload { total: u32 },
+}
+
+/// A splice of either grouping, for an app that holds both (`ViewDiff::into_splice`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Splice {
+    pub removed: Vec<u32>,
+    pub inserted: Vec<Positioned<ListRow>>,
+    pub changed: Vec<Positioned<ListRow>>,
+    pub total: u32,
+}
+
+impl ViewDiff {
+    /// The splice, whichever the grouping; `Err(total)` asks for a reload.
+    pub fn into_splice(self) -> Result<Splice, u32> {
+        fn rows<R>(list: Vec<Positioned<R>>, wrap: fn(R) -> ListRow) -> Vec<Positioned<ListRow>> {
+            list.into_iter()
+                .map(|item| Positioned {
+                    position: item.position,
+                    row: wrap(item.row),
+                })
+                .collect()
+        }
+        match self {
+            ViewDiff::Splice {
+                removed,
+                inserted,
+                changed,
+                total,
+            } => Ok(Splice {
+                removed,
+                inserted: rows(inserted, ListRow::Message),
+                changed: rows(changed, ListRow::Message),
+                total,
+            }),
+            ViewDiff::ConversationSplice {
+                removed,
+                inserted,
+                changed,
+                total,
+            } => Ok(Splice {
+                removed,
+                inserted: rows(inserted, ListRow::Conversation),
+                changed: rows(changed, ListRow::Conversation),
+                total,
+            }),
+            ViewDiff::Reload { total } => Err(total),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,6 +575,9 @@ pub struct ChangeEvent {
     /// Sends that entered, moved within or left the outbox (M6): the window's outbox count,
     /// a send failed for good (`state` `None` with a `failure`) or uncertain.
     pub outbox: Vec<super::OutboxChange>,
+    /// A reminder that counts was set, changed (its time, a wake) or let go of (the fork's
+    /// Remind Me, phase C): read `Store::reminders` again.
+    pub reminders: bool,
 }
 
 /// A body downloaded for a message the store holds as headers (ML-044). Its raw message, or for
@@ -451,4 +670,55 @@ pub struct Evicted {
     pub bytes: u64,
     /// Still over the cap after a full batch: evict again.
     pub more: bool,
+}
+
+/// The writer's reply to [`Store::discard_blobs`](super::Store::discard_blobs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlobsDiscarded {
+    /// Files deleted.
+    pub removed: u32,
+    /// Keys left alone: a message, a draft or the outbox refers to them (again).
+    pub referenced: u32,
+    /// Files that couldn't be deleted; they stay for the sweep.
+    pub failed: u32,
+}
+
+/// One member of a conversation in a view's folders, for triage on a conversation row: the
+/// app builds one target per member and queues them as one batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConversationMember {
+    pub thread: ThreadId,
+    pub id: MessageId,
+    pub folder: FolderId,
+    /// What is shown, pending ops applied.
+    pub flags: Flags,
+    pub date: i64,
+    pub has_attachments: bool,
+}
+
+/// A conversation that a search found: its row as a conversation view of the searched folders
+/// shows it, and its newest message the query matched. The row is dated by its latest message
+/// also where it waits in Reminders, whose own view dates it by its wait key
+/// (`remind::wait_key`, phase C).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationHit {
+    pub matched: MessageId,
+    pub matched_date: i64,
+    pub conversation: ConversationSummary,
+}
+
+/// How many rows of a view each side of the Split Inbox holds: the totals of the view with
+/// [`ViewFilter::Important`] and with [`ViewFilter::Other`], in its grouping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SplitCounts {
+    pub important: u32,
+    pub other: u32,
+}
+
+/// A message of a folder whose server category the store doesn't know yet, for the engine to
+/// ask the server (Gmail's INBOX).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Uncategorized {
+    pub message: MessageId,
+    pub uid: u32,
 }

@@ -6,11 +6,11 @@
 //! a black hole lifted with `Reconnect`. They need the Docker testbed running and seeded and are
 //! skipped otherwise. They reset and change the users rand, fault and idle:
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test actor_testbed -- --ignored --test-threads=1 --nocapture
 //!
 //! The randomized runs pause between changes, 20 ms on average, so passes, IDLE wakes and an IDLE
-//! issued again interleave with them; `SEALWAX_RANDOM_PACE_MS=0` gives S1's bursts instead (the
+//! issued again interleave with them; `PRONTO_RANDOM_PACE_MS=0` gives S1's bursts instead (the
 //! same changes in about 3 s).
 
 mod common;
@@ -87,7 +87,7 @@ fn layout(qresync: bool) -> SyncConfig {
 
 /// The mean pause between two changes of a randomized run, in milliseconds.
 fn pace() -> usize {
-    std::env::var("SEALWAX_RANDOM_PACE_MS")
+    std::env::var("PRONTO_RANDOM_PACE_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(20)

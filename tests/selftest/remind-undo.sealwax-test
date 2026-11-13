@@ -1,0 +1,65 @@
+# Remind Me and the last action (ADR-015; the fork's phase C, docs/superhuman/remind.md "UI"):
+# a new time for a waiting conversation has nothing to undo, and it is the last action all the
+# same, as its toast takes the last one's place. So z after it doesn't take back a send still in
+# its undo window (the final review: z after a new time took back an older action; remind-ui has
+# a Done before it). The send is from a server account (Work), as a send needs one; the reminder
+# is a local account's (Personal), whose moves show in its Reminders folder at once, where a
+# server account's show once the server moved them. Every name, address and text is fictional.
+# Run: tools/headless.sh 64 target/debug/pronto --self-test tests/selftest/remind-undo.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+engine-attach
+mail-account Personal
+triage-account Work work
+folder inbox Personal
+triage-mark-read-on-open false
+list-clock 2026-10-29T14:20:00
+mail-add Personal:inbox 2h "Invoice 2026-114 for October" read "from=Henrik Aas"
+mail-add Personal:inbox 4d "Board games on Friday" read "from=Tomas Berg"
+wait-until assert-list-count 2
+remind "Board games on Friday" 2026-11-01T08:00:00
+wait-until assert-list-count 1
+
+# A send in its undo window: the last action, with Undo.
+outbox-draft first Work
+outbox-queue first
+assert-toast "Sending…"
+assert-outbox first queued
+assert-action-enabled win.undo true
+
+# A new time in the Reminders view takes its place, with nothing to undo: z changes nothing.
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+wait-until assert-list-count 1
+list-select 0
+assert-list-row 0 subject "Board games on Friday"
+focus list
+key h
+wait-until assert-picker shown true
+assert-picker has "Remove Reminder"
+picker-choose "Someday"
+wait-until assert-toast "Reminder moved to someday"
+assert-action-enabled win.undo false
+assert-undoable false
+focus list
+key z
+sleep 800
+assert-outbox first queued
+assert-reminder-at "Board games on Friday" someday
+assert-conversations Personal:inbox "Invoice 2026-114 for October"
+
+# Remove Reminder is the last action again, and z takes it back.
+key <Shift>e
+wait-until assert-list-count 0
+wait-until assert-toast "Reminder removed"
+assert-undoable true
+assert-reminder "Board games on Friday" none
+focus list
+key z
+wait-until assert-reminder "Board games on Friday" waiting
+wait-until assert-list-count 1
+assert-conversations Personal:inbox "Invoice 2026-114 for October"

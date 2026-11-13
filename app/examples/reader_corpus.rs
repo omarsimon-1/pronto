@@ -14,7 +14,7 @@
 //!
 //! ```sh
 //! python3 tools/corpus/fetch.py
-//! SEALWAX_OMARCHY_STATE=$PWD/.local/reader-examples/corpus-theme SEALWAX_HEADLESS_TIMEOUT=900 \
+//! PRONTO_OMARCHY_STATE=$PWD/.local/reader-examples/corpus-theme PRONTO_HEADLESS_TIMEOUT=900 \
 //!     tools/headless.sh 33 target/release/examples/reader_corpus [--previews] [--only=ID,…]
 //! ```
 //!
@@ -453,7 +453,7 @@ fn main() -> glib::ExitCode {
     let filled = samples::fill_store(&scratch.store, &scratch.blobs, raws)
         .expect("the corpus goes into the scratch store");
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.ReaderCorpus")
+        .application_id("io.github.omarsimon1.Pronto.ReaderCorpus")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let passed = Rc::new(Cell::new(false));

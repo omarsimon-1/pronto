@@ -1,46 +1,76 @@
 //! The outbox in the main window (M6 phase B, ML-076): the toast with Undo that follows a draft
-//! queued to send, from a composer window or the quick reply, and what the window says about a
+//! queued to send, from a composer window or the inline reply, and what the window says about a
 //! send that failed or may have gone out.
 //!
-//! - **Queued** ([`queued`]): a toast for the undo window (triage's 7 s) with Undo; the send
-//!   becomes the last action, so `z` and Ctrl+Z take it back too while it can be (ADR-015: only
-//!   the last action). Undo asks the store (`undo_send`): back to a draft, it reopens in a
-//!   composer window, or its text goes back to the quick reply it came from; too late, it says
-//!   it is being sent.
-//! - **Sent**: a short toast. **Failed for good**: a toast for 10 s, like refused changes, with
-//!   Open (the store kept the draft and why). **May have gone out**: the window's banner, whose
-//!   Choose… asks the user to send it again, file it as sent, or take it back to a draft.
-//! - The offline banner's "N waiting" counts the sends waiting in the outbox too.
+//! - **Queued** ([`queued`]): one toast, "Sending…" with Undo for the undo window
+//!   (`[compose] undo_send_seconds`, 10 s by default; 0 sends at once without Undo, the fork's
+//!   phase B); the send becomes the last action, so `z` and Ctrl+Z take it back too while it can
+//!   be (ADR-015: only the last action). Undo asks the store (`undo_send`): back to a draft, it
+//!   reopens where it was written, in a composer card or the inline reply under its
+//!   conversation; too late, it says it is being sent. When the window ends the toast loses its
+//!   Undo and stays until the server takes the message: then it says "Message sent".
+//! - **Send and Archive** ([`hold`]): the send is queued without a toast of its own; the
+//!   archive's toast says it, shows while either can be taken back, and its Undo takes the send
+//!   back too ([`undo_send`]); without an undo window, the archive alone.
+//! - **Send Later** ([`scheduled`], the fork's phase B): the toast says when ("Sending tomorrow
+//!   08:00") with Undo while it shows; the send waits in the outbox until then (its
+//!   `not_before`), and Scheduled Messages (`crate::scheduled`) lists it with Edit, which takes it
+//!   back to a draft, and Send Now. Its draft's copy in the Drafts folder says when it goes on
+//!   its list row ([`scheduled_copies`], the fork's phase C).
+//! - **Sent**: the sending toast says so, or a short toast when it is gone. **Failed for good**:
+//!   a toast for 10 s, like refused changes, with Open (the store kept the draft and why). **May
+//!   have gone out**: the window's banner, whose Choose… asks the user to send it again, file it
+//!   as sent, or take it back to a draft.
+//! - The offline banner's "N waiting" counts the sends waiting in the outbox too: a scheduled one
+//!   from when its time is near.
 //!
 //! The outbox is read off the GTK thread when the store says it changed. Nothing here logs a
 //! recipient, a subject or a text: drafts are named by id.
 
-use crate::application::{AppState, SealwaxApplication};
+use crate::application::{AppState, ProntoApplication};
 use crate::composer::{self, ComposeRequest};
 use crate::engine_link::Subscription;
-use crate::triage;
+use crate::reader::QuickDraft;
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use sealwax_domain::model::{AccountId, BlobKey, DraftId, MessageId};
 use sealwax_engine::api::{Command, Event, SendError, UncertainReason};
-use sealwax_infrastructure::store::{OutboxEntry, Resolution, SendRecorded, SendState, SendUndone};
+use sealwax_infrastructure::store::{
+    OutboxEntry, Resolution, SendQueued, SendRecorded, SendState, SendUndone,
+};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 /// How long a failed send's toast shows (as refused changes').
 pub const FAILED_SHOWN: Duration = Duration::from_secs(10);
-/// How long "Message sent" shows.
+/// How long "Message sent" shows on a toast of its own.
 pub const SENT_SHOWN: Duration = Duration::from_secs(4);
+/// How long the sending toast says "Message sent" once the server took it.
+pub const SENT_SAID: Duration = Duration::from_secs(2);
+/// How long the sending toast waits for the server after the undo window: then it goes (the
+/// offline banner counts the send as waiting all along).
+pub const SENDING_GRACE: Duration = Duration::from_secs(8);
 
-/// The queued toast's text (accepted at the M6 gate).
-pub const QUEUED_TEXT: &str = "Message queued";
+/// The sending toast's text (Superhuman's; "Message queued" until the fork's phase B).
+pub const SENDING_TEXT: &str = "Sending…";
+/// How long a scheduled send's toast shows, with its Undo.
+pub const SCHEDULED_SHOWN: Duration = Duration::from_secs(10);
+/// A send that goes later than this after it was queued is a scheduled one (Send Later), not one
+/// in the undo window (30 s at most): Scheduled Messages lists it until its time is this near,
+/// and from then on the offline banner counts it as waiting.
+pub const SCHEDULED_AFTER: Duration = Duration::from_secs(60);
+/// The longest the outbox's wake-up for a scheduled send's time sleeps at once (a suspend stops
+/// GLib's clock, not the wall clock's): it looks again after that.
+const DUE_NAP: Duration = Duration::from_secs(15 * 60);
 pub const SENT_TEXT: &str = "Message sent";
-pub const UNDONE_TEXT: &str = "Sending undone";
-pub const UNDONE_QUICK_TEXT: &str = "Sending undone: the reply is back under its conversation";
+/// The toast of an undone send, wherever its draft went back (under its conversation or in a
+/// card, where the user sees it): short (phase C's visual QA: "Sending undone: the reply is back
+/// under its conversation" ran across the reply's footer).
+pub const UNDONE_TEXT: &str = "Send undone";
 
 /// What the uncertain-send dialog's answers do, by response id.
 pub const ANSWERS: [(&str, &str); 3] = [
@@ -55,16 +85,31 @@ struct Outbox {
     /// The send Undo takes back while it is the last action.
     last: Cell<Option<DraftId>>,
     expiry: RefCell<Option<glib::SourceId>>,
-    /// Sends that came from the quick reply: the message they answer and the text, for Undo.
-    from_quick: RefCell<HashMap<DraftId, (MessageId, String)>>,
+    /// The sending toast on screen and its send.
+    sending: RefCell<Option<(DraftId, adw::Toast)>>,
+    /// Sends queued for Send and Archive: no toast of their own ([`hold`]); once queued, their
+    /// account.
+    held: RefCell<HashSet<DraftId>>,
+    held_queued: RefCell<HashMap<DraftId, AccountId>>,
+    /// The self-tests' undo window, in place of `[compose] undo_send_seconds`.
+    window: Cell<Option<Duration>>,
+    /// Sends that came from the inline reply: what it held, for Undo.
+    from_quick: RefCell<HashMap<DraftId, QuickDraft>>,
     /// Why each send that may have gone out is uncertain, as the engine said this session;
     /// one from an earlier session has none.
     reasons: RefCell<HashMap<DraftId, UncertainReason>>,
     /// The outbox as last read.
     entries: RefCell<Vec<OutboxEntry>>,
+    /// Wakes when the soonest scheduled send's time is near ([`SCHEDULED_AFTER`]).
+    due: RefCell<Option<glib::SourceId>>,
     reading: Cell<bool>,
     read_again: Cell<bool>,
     events: RefCell<Option<Subscription>>,
+    /// When each scheduled send goes (Unix ms), by its draft's copies in a Drafts folder, as
+    /// last read ([`mark_copies`]): the list says so on their rows.
+    copies: RefCell<HashMap<MessageId, i64>>,
+    reading_copies: Cell<bool>,
+    read_copies_again: Cell<bool>,
 }
 
 thread_local! {
@@ -79,8 +124,8 @@ fn now_ms() -> i64 {
     glib::real_time() / 1000
 }
 
-fn app() -> Option<SealwaxApplication> {
-    gio::Application::default().and_downcast::<SealwaxApplication>()
+fn app() -> Option<ProntoApplication> {
+    gio::Application::default().and_downcast::<ProntoApplication>()
 }
 
 /// Follows the engine's sends and the store's outbox, once at startup.
@@ -101,6 +146,9 @@ pub fn install(state: &Rc<AppState>) {
             } => failed(&state, *account, *draft, error),
             Event::SendUncertain { draft, reason, .. } => {
                 tracing::info!(draft = draft.0, ?reason, "a send may have gone out");
+                if let Some(toast) = sending_toast(*draft) {
+                    toast.dismiss();
+                }
                 shared().reasons.borrow_mut().insert(*draft, *reason);
                 settle(&state, *draft);
                 read(&state);
@@ -111,11 +159,16 @@ pub fn install(state: &Rc<AppState>) {
     outbox.events.replace(Some(subscription));
     let weak = Rc::downgrade(state);
     state.mailbox().connect_event(move |event| {
-        if event.outbox.is_empty() {
+        let Some(state) = weak.upgrade() else {
             return;
-        }
-        if let Some(state) = weak.upgrade() {
+        };
+        if !event.outbox.is_empty() {
             read(&state);
+        } else if !(event.inserted.is_empty() && event.removed.is_empty())
+            && !scheduled_sends().is_empty()
+        {
+            // A scheduled draft's copy may have come into its Drafts folder (or gone).
+            mark_copies(&state);
         }
     });
     let ready = state.mailbox().wait_ready();
@@ -157,17 +210,160 @@ fn read(state: &Rc<AppState>) {
             read(&state);
         }
         state.update_banner();
+        wake_when_due(&state);
+        mark_copies(&state);
     });
 }
 
-/// Sends waiting for a server (queued or being sent), for the offline banner's count.
+/// Reads which copies in a Drafts folder the scheduled sends' drafts have, and has the list say
+/// when each goes on its row ("Sending Tue 08:00"); one read at a time. A draft never uploaded
+/// has none; a send no longer scheduled (sent, taken back, due within the minute) loses its mark.
+fn mark_copies(state: &Rc<AppState>) {
+    let outbox = shared();
+    if outbox.reading_copies.replace(true) {
+        outbox.read_copies_again.set(true);
+        return;
+    }
+    let goes: HashMap<DraftId, i64> = scheduled_sends()
+        .into_iter()
+        .map(|entry| (entry.draft, entry.not_before))
+        .collect();
+    let reply = if goes.is_empty() {
+        None
+    } else {
+        let mailbox = state.mailbox();
+        let store = mailbox.store();
+        store.map(|store| store.draft_copies(goes.keys().copied().collect()))
+    };
+    let weak = Rc::downgrade(state);
+    glib::spawn_future_local(async move {
+        let copies = match reply {
+            Some(reply) => match reply.recv().await {
+                Ok(copies) => Some(
+                    copies
+                        .into_iter()
+                        .filter_map(|(draft, copy)| Some((copy, *goes.get(&draft)?)))
+                        .collect::<HashMap<_, _>>(),
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "the scheduled drafts' copies couldn't be read");
+                    None
+                }
+            },
+            None => Some(HashMap::new()),
+        };
+        let outbox = shared();
+        outbox.reading_copies.set(false);
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        if let Some(copies) = copies
+            && *outbox.copies.borrow() != copies
+        {
+            outbox.copies.replace(copies.clone());
+            if let Some(list) = state.list() {
+                list.set_scheduled(copies);
+            }
+        }
+        if outbox.read_copies_again.replace(false) {
+            mark_copies(&state);
+        }
+    });
+}
+
+/// The scheduled sends' copies in a Drafts folder and when each goes (Unix ms), as last read:
+/// a list made after the read starts from them.
+pub fn scheduled_copies() -> HashMap<MessageId, i64> {
+    shared().copies.borrow().clone()
+}
+
+/// Whether `entry` is a send scheduled for later (Send Later) at `now` (Unix ms): queued, never
+/// tried, and due in more than [`SCHEDULED_AFTER`]. A send in its undo window, or waiting to be
+/// tried again, isn't.
+pub fn is_scheduled(entry: &OutboxEntry, now: i64) -> bool {
+    entry.state == SendState::Queued
+        && entry.attempts == 0
+        && entry.not_before > now + SCHEDULED_AFTER.as_millis() as i64
+}
+
+/// Sends waiting for a server, for the offline banner's count: every one being sent or queued
+/// (in its undo window too, as before the fork's phase B), except one scheduled for later until
+/// its time is near ([`wake_when_due`] counts it then).
 pub fn waiting_sends() -> u32 {
+    let now = now_ms();
     shared()
         .entries
         .borrow()
         .iter()
-        .filter(|entry| matches!(entry.state, SendState::Queued | SendState::Sending))
+        .filter(|entry| {
+            matches!(entry.state, SendState::Queued | SendState::Sending)
+                && !is_scheduled(entry, now)
+        })
         .count() as u32
+}
+
+/// Wakes when the soonest scheduled send's time is near, as the outbox was last read: from then
+/// on it is waiting like any send, so the banner counts it (offline, it can't go) and Scheduled
+/// Messages no longer lists it. Nothing else would say so: the outbox is read again only when the
+/// store changes it, and the engine sends only while it is connected.
+fn wake_when_due(state: &Rc<AppState>) {
+    let outbox = shared();
+    if let Some(waiting) = outbox.due.take() {
+        waiting.remove();
+    }
+    let now = now_ms();
+    let soonest = outbox
+        .entries
+        .borrow()
+        .iter()
+        .filter(|entry| is_scheduled(entry, now))
+        .map(|entry| entry.not_before - SCHEDULED_AFTER.as_millis() as i64)
+        .min();
+    let Some(soonest) = soonest else {
+        return;
+    };
+    // A millisecond past it, so the entry is no longer scheduled when it wakes.
+    let wait = Duration::from_millis(u64::try_from(soonest - now).unwrap_or(0) + 1).min(DUE_NAP);
+    let weak = Rc::downgrade(state);
+    let source = glib::timeout_add_local_once(wait, move || {
+        // Its source is done: forgotten, not removed.
+        shared().due.replace(None);
+        if let Some(state) = weak.upgrade() {
+            state.update_banner();
+            crate::scheduled::refresh(&state);
+            wake_when_due(&state);
+            mark_copies(&state);
+        }
+    });
+    outbox.due.replace(Some(source));
+}
+
+/// The sends scheduled for later ([`is_scheduled`]), soonest first, as the outbox was last read.
+pub fn scheduled_sends() -> Vec<OutboxEntry> {
+    let now = now_ms();
+    let mut entries: Vec<OutboxEntry> = shared()
+        .entries
+        .borrow()
+        .iter()
+        .filter(|entry| is_scheduled(entry, now))
+        .cloned()
+        .collect();
+    entries.sort_by_key(|entry| entry.not_before);
+    entries
+}
+
+/// When `draft` is scheduled to go, when it is a scheduled send ([`scheduled_sends`]).
+pub fn scheduled_at(draft: DraftId) -> Option<i64> {
+    scheduled_sends()
+        .into_iter()
+        .find(|entry| entry.draft == draft)
+        .map(|entry| entry.not_before)
+}
+
+/// "Sending tomorrow 08:00": the scheduled send's toast, `when` said by
+/// `time_picker::describe`.
+pub fn scheduled_text(when: &str) -> String {
+    format!("Sending {when}")
 }
 
 /// A send that may have gone out (issue #2): its draft and account, why when the engine said
@@ -206,12 +402,42 @@ pub fn entries() -> Vec<OutboxEntry> {
     shared().entries.borrow().clone()
 }
 
-/// A send from the quick reply that answers `message` with `text`: Undo puts the text back.
-pub fn from_quick_reply(draft: DraftId, message: MessageId, text: String) {
-    shared()
-        .from_quick
-        .borrow_mut()
-        .insert(draft, (message, text));
+/// A send from the inline reply: Undo puts what it held back under its conversation.
+pub fn from_quick_reply(draft: DraftId, quick: QuickDraft) {
+    shared().from_quick.borrow_mut().insert(draft, quick);
+}
+
+/// How long a send waits while Undo can take it back: `[compose] undo_send_seconds`, or the
+/// self-tests' window.
+pub fn send_window(state: &AppState) -> Duration {
+    if let Some(window) = shared().window.get() {
+        return window;
+    }
+    let seconds = state
+        .preferences()
+        .map_or(sealwax_domain::config::DEFAULT_UNDO_SEND_SECONDS, |prefs| {
+            prefs.config().compose.undo_send_seconds
+        });
+    Duration::from_secs(u64::from(seconds))
+}
+
+/// Self-tests: sends wait `window` (the triage window the script set), or the setting again.
+pub fn set_send_window(window: Option<Duration>) {
+    shared().window.set(window);
+}
+
+/// Send and Archive: `draft`'s send is queued without a toast of its own; [`take_held`] says
+/// whether it was.
+pub fn hold(draft: DraftId) {
+    shared().held.borrow_mut().insert(draft);
+}
+
+/// The account `draft` was queued from while held; `None` when it wasn't queued (the backend
+/// refused it, or queues nothing, as phase A's stand-in). It is no longer held.
+pub fn take_held(draft: DraftId) -> Option<AccountId> {
+    let outbox = shared();
+    outbox.held.borrow_mut().remove(&draft);
+    outbox.held_queued.borrow_mut().remove(&draft)
 }
 
 /// The send left the outbox's hands: it no longer goes back to the quick reply, nor is it the
@@ -231,19 +457,33 @@ pub fn forget_quick(draft: DraftId) {
 }
 
 /// `draft` was queued to send with the undo window (the backend's `send` calls it after the
-/// store's `queue_send` and `Command::OutboxQueued`): a toast with Undo for the window, and the
-/// send becomes the last action.
+/// store's `queue_send` and `Command::OutboxQueued`): the sending toast and the last action, or
+/// nothing yet for a held send (Send and Archive).
 pub fn queued(state: &AppState, draft: DraftId, account: AccountId) {
     tracing::info!(draft = draft.0, account = account.0, "send queued");
     let outbox = shared();
-    if let Some(triage) = state.triage() {
-        triage.forget_last();
+    if outbox.held.borrow().contains(&draft) {
+        outbox.held_queued.borrow_mut().insert(draft, account);
+        return;
     }
-    crate::rules::forget_last();
-    outbox.last.set(Some(draft));
-    let window = state
-        .triage()
-        .map_or(triage::UNDO_WINDOW, |triage| triage.window());
+    announce(state, draft);
+}
+
+/// The sending toast for `draft`: "Sending…" with Undo for the undo window, while the send is
+/// the last action; then it waits for the server without Undo ([`SENDING_GRACE`] at most).
+/// Without a window, no Undo.
+pub fn announce(state: &AppState, draft: DraftId) {
+    let outbox = shared();
+    let window = send_window(state);
+    let undoable = !window.is_zero();
+    if undoable {
+        if let Some(triage) = state.triage() {
+            triage.forget_last();
+        }
+        crate::rules::forget_last();
+        crate::split_inbox::forget_last();
+        outbox.last.set(Some(draft));
+    }
     let expiry = glib::timeout_add_local_once(window, move || {
         let outbox = shared();
         outbox.expiry.replace(None);
@@ -253,19 +493,158 @@ pub fn queued(state: &AppState, draft: DraftId, account: AccountId) {
                 state.refresh_commands();
             }
         }
+        // The window is over: no more Undo, and the toast waits a while for the server.
+        let shown = outbox
+            .sending
+            .borrow()
+            .as_ref()
+            .filter(|(shown, _)| *shown == draft)
+            .map(|(_, toast)| toast.clone());
+        if let Some(toast) = shown {
+            toast.set_button_label(None);
+            glib::timeout_add_local_once(SENDING_GRACE, move || {
+                if toast.title().as_deref() == Some(SENDING_TEXT) {
+                    toast.dismiss();
+                }
+            });
+        }
     });
     if let Some(old) = outbox.expiry.replace(Some(expiry)) {
         old.remove();
     }
-    let toast = toast(QUEUED_TEXT, window);
+    let toast = adw::Toast::builder()
+        .title(SENDING_TEXT)
+        .use_markup(false)
+        .timeout(0)
+        .priority(adw::ToastPriority::High)
+        .build();
+    if undoable {
+        toast.set_button_label(Some("Undo"));
+        toast.connect_button_clicked(move |_| {
+            if let Some(state) = shared().state.borrow().upgrade() {
+                undo(&state, draft);
+            }
+        });
+    }
+    toast.connect_dismissed(move |toast| {
+        let outbox = shared();
+        let mut sending = outbox.sending.borrow_mut();
+        if sending.as_ref().is_some_and(|(_, shown)| shown == toast) {
+            sending.take();
+        }
+    });
+    if let Some((_, old)) = outbox.sending.replace(Some((draft, toast.clone()))) {
+        old.dismiss();
+    }
+    state.show_toast(&toast, true);
+    state.refresh_commands();
+}
+
+/// Send Later: `draft` waits in the outbox until `at` (Unix ms; the backend queued it with that
+/// `not_before`). One toast says when, with Undo while it shows ([`SCHEDULED_SHOWN`]), and the
+/// send is the last action meanwhile, so `z` takes it back too; after that, Scheduled Messages
+/// does. Nothing waits for the server here: "Message sent" says it when it goes.
+pub fn scheduled(state: &AppState, draft: DraftId, account: AccountId, at: i64) {
+    tracing::info!(draft = draft.0, account = account.0, "send scheduled");
+    let outbox = shared();
+    if let Some(triage) = state.triage() {
+        triage.forget_last();
+    }
+    crate::rules::forget_last();
+    crate::split_inbox::forget_last();
+    outbox.last.set(Some(draft));
+    let toast = toast(
+        &scheduled_text(&crate::time_picker::describe(at)),
+        SCHEDULED_SHOWN,
+    );
     toast.set_button_label(Some("Undo"));
+    // Its Undo works while the send waits, whatever came after it.
     toast.connect_button_clicked(move |_| {
         if let Some(state) = shared().state.borrow().upgrade() {
-            undo(&state, draft);
+            unschedule(&state, draft);
+        }
+    });
+    toast.connect_dismissed(move |_| {
+        let outbox = shared();
+        if outbox.last.get() == Some(draft) {
+            outbox.last.set(None);
+            if let Some(state) = outbox.state.borrow().upgrade() {
+                state.refresh_commands();
+            }
         }
     });
     state.show_toast(&toast, true);
     state.refresh_commands();
+}
+
+/// Scheduled Messages' Edit: takes the scheduled `draft` back to a draft, which opens where it
+/// was written (a composer card, or the inline reply this session).
+pub fn unschedule(state: &AppState, draft: DraftId) {
+    let outbox = shared();
+    if outbox.last.get() == Some(draft) {
+        outbox.last.set(None);
+        state.refresh_commands();
+    }
+    take_back(state, draft, true);
+}
+
+/// Scheduled Messages' Send Now: the scheduled `draft` goes back to a draft and is queued again
+/// to go at once (after the undo window, with the sending toast).
+pub fn send_now(state: &AppState, draft: DraftId) {
+    let Some(undone) = state.mailbox().store().map(|store| store.undo_send(draft)) else {
+        return;
+    };
+    let weak = shared().state.borrow().clone();
+    glib::spawn_future_local(async move {
+        let Ok(SendUndone::Undone { orphaned_blobs, .. }) = undone.recv().await else {
+            if let Some(state) = weak.upgrade() {
+                state.show_toast(
+                    &toast(
+                        "Too late to change: it is being sent",
+                        Duration::from_secs(4),
+                    ),
+                    true,
+                );
+                read(&state);
+            }
+            return;
+        };
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        remove_blobs(&state, orphaned_blobs);
+        shared().from_quick.borrow_mut().remove(&draft);
+        let window = send_window(&state).as_millis() as i64;
+        let Some(queueing) = state
+            .mailbox()
+            .store()
+            .map(|store| store.queue_send(draft, now_ms() + window))
+        else {
+            return;
+        };
+        match queueing.recv().await {
+            Ok(SendQueued::Queued { account, .. }) => {
+                wake(&state, Command::OutboxQueued { account });
+                queued(&state, draft, account);
+            }
+            _ => {
+                if let Some(app) = app() {
+                    composer::open(&app, ComposeRequest::Draft(draft));
+                }
+            }
+        }
+        read(&state);
+    });
+}
+
+/// The sending toast of `draft`, while it shows.
+fn sending_toast(draft: DraftId) -> Option<adw::Toast> {
+    shared()
+        .sending
+        .borrow()
+        .as_ref()
+        .filter(|(shown, _)| *shown == draft)
+        .map(|(_, toast)| toast.clone())
 }
 
 fn toast(text: &str, shown: Duration) -> adw::Toast {
@@ -307,6 +686,27 @@ fn undo(state: &AppState, draft: DraftId) {
     }
     outbox.last.set(None);
     state.refresh_commands();
+    take_back(state, draft, true);
+}
+
+/// Send and Archive's Undo: the archive is the last action, and its Undo takes `draft`'s send
+/// back with it; the archive's own toast says it ("Undone"), so this one says nothing unless it
+/// came too late.
+pub fn undo_send(state: &AppState, draft: DraftId) {
+    if shared().last.get() == Some(draft) {
+        shared().last.set(None);
+        state.refresh_commands();
+    }
+    take_back(state, draft, false);
+}
+
+/// Asks the store for `draft` back; it reopens where it was written. With `say`, a toast says
+/// so.
+fn take_back(state: &AppState, draft: DraftId, say: bool) {
+    let outbox = shared();
+    if let Some(toast) = sending_toast(draft) {
+        toast.dismiss();
+    }
     let Some(reply) = state.mailbox().store().map(|store| store.undo_send(draft)) else {
         return;
     };
@@ -325,7 +725,11 @@ fn undo(state: &AppState, draft: DraftId) {
                 tracing::info!(draft = draft.0, "send undone");
                 remove_blobs(&state, orphaned_blobs);
                 wake(&state, Command::OutboxQueued { account });
-                reopen(&state, draft)
+                let text = reopen(&state, draft);
+                if !say {
+                    return;
+                }
+                text
             }
             Ok(SendUndone::TooLate(SendState::Sent)) => {
                 "Too late to undo: the message was sent".to_owned()
@@ -344,13 +748,14 @@ fn undo(state: &AppState, draft: DraftId) {
     });
 }
 
-/// An undone send goes back where it was written: its text to the quick reply it came from
-/// (its draft, with the quote, is discarded: the quick reply keeps its own), or its draft to a
-/// composer window. Returns the toast's text.
+/// An undone send goes back where it was written: what the inline reply held back under its
+/// conversation (its draft, with the quote, is discarded: the inline reply keeps its own; when
+/// that box holds another draft, or no window shows, it opens in a composer card), or its
+/// draft to a composer card. Returns the toast's text.
 fn reopen(state: &Rc<AppState>, draft: DraftId) -> String {
     let quick = shared().from_quick.borrow_mut().remove(&draft);
     match quick {
-        Some((message, text)) => {
+        Some(quick) => {
             if let Some(reply) = state
                 .mailbox()
                 .store()
@@ -366,10 +771,26 @@ fn reopen(state: &Rc<AppState>, draft: DraftId) -> String {
                     }
                 });
             }
-            if let Some(reader) = state.reader() {
-                reader.restore_quick_reply(message, text);
+            match state.reader() {
+                Some(reader) => {
+                    reader.restore_quick_reply(quick);
+                }
+                None => {
+                    if let Some(app) = app() {
+                        composer::open(
+                            &app,
+                            ComposeRequest::QuickReply {
+                                message: quick.message,
+                                text: quick.text,
+                                kind: quick.kind,
+                                recipients: quick.recipients,
+                                signature: quick.signature,
+                            },
+                        );
+                    }
+                }
             }
-            UNDONE_QUICK_TEXT.to_owned()
+            UNDONE_TEXT.to_owned()
         }
         None => {
             if let Some(app) = app() {
@@ -403,11 +824,18 @@ fn remove_blobs(state: &AppState, keys: Vec<BlobKey>) {
     });
 }
 
-/// The server took `draft`.
+/// The server took `draft`: its sending toast says so, or a toast of its own when that went.
 fn sent(state: &Rc<AppState>, draft: DraftId) {
     tracing::info!(draft = draft.0, "sent");
     settle(state, draft);
-    state.show_toast(&toast(SENT_TEXT, SENT_SHOWN), false);
+    match sending_toast(draft) {
+        Some(toast) => {
+            toast.set_title(SENT_TEXT);
+            toast.set_button_label(None);
+            glib::timeout_add_local_once(SENT_SAID, move || toast.dismiss());
+        }
+        None => state.show_toast(&toast(SENT_TEXT, SENT_SHOWN), false),
+    }
     read(state);
 }
 
@@ -428,7 +856,7 @@ pub fn failure_text(error: &SendError) -> String {
         SendError::Refused => "the server refused it".to_owned(),
         SendError::NeedsSignIn => "the account needs you to sign in again".to_owned(),
         SendError::Offline => "the mail server can't be reached".to_owned(),
-        SendError::Interrupted => "Sealwax stopped while preparing it".to_owned(),
+        SendError::Interrupted => "Pronto stopped while preparing it".to_owned(),
         SendError::Store | SendError::Other => String::new(),
     };
     if why.is_empty() {
@@ -442,6 +870,9 @@ pub fn failure_text(error: &SendError) -> String {
 fn failed(state: &Rc<AppState>, account: AccountId, draft: DraftId, error: &SendError) {
     tracing::info!(draft = draft.0, account = account.0, ?error, "send failed");
     settle(state, draft);
+    if let Some(toast) = sending_toast(draft) {
+        toast.dismiss();
+    }
     let toast = toast(&failure_text(error), FAILED_SHOWN);
     toast.set_button_label(Some("Open"));
     toast.connect_button_clicked(move |_| {
@@ -565,16 +996,16 @@ pub fn now() -> glib::DateTime {
 pub fn uncertain_cause(what: &str, reason: Option<UncertainReason>) -> String {
     match reason {
         Some(UncertainReason::Stopped) => {
-            format!("Sealwax stopped while it was sending {what}, so the server may have it.")
+            format!("Pronto stopped while it was sending {what}, so the server may have it.")
         }
         Some(UncertainReason::NoReply) => {
-            format!("The server didn't answer when Sealwax sent {what}, so it may have it.")
+            format!("The server didn't answer when Pronto sent {what}, so it may have it.")
         }
         Some(UncertainReason::UnreadableReply) => format!(
-            "Sealwax couldn't read the server's answer to {what}, so it can't tell whether the \
+            "Pronto couldn't read the server's answer to {what}, so it can't tell whether the \
              server took it."
         ),
-        None => format!("Sealwax couldn't confirm that {what} was sent."),
+        None => format!("Pronto couldn't confirm that {what} was sent."),
     }
 }
 
@@ -615,10 +1046,7 @@ fn resolve(state: &Rc<AppState>, draft: DraftId, account: AccountId, resolution:
             Err(error) => {
                 tracing::warn!(%error, "an uncertain send couldn't be resolved");
                 state.show_toast(
-                    &toast(
-                        "Sealwax couldn't record your answer",
-                        Duration::from_secs(4),
-                    ),
+                    &toast("Pronto couldn't record your answer", Duration::from_secs(4)),
                     false,
                 );
                 return;
@@ -704,7 +1132,7 @@ mod tests {
         );
         assert_eq!(
             failure_text(&SendError::Interrupted),
-            "Your message wasn't sent: Sealwax stopped while preparing it. It's back in your drafts."
+            "Your message wasn't sent: Pronto stopped while preparing it. It's back in your drafts."
         );
     }
 
@@ -714,7 +1142,7 @@ mod tests {
         let text = decide_text(what, Some(UncertainReason::Stopped));
         assert!(
             text.starts_with(
-                "Sealwax stopped while it was sending \u{201c}Plans\u{201d} from Work,"
+                "Pronto stopped while it was sending \u{201c}Plans\u{201d} from Work,"
             )
         );
         for (_, label) in ANSWERS {
@@ -727,16 +1155,16 @@ mod tests {
         let what = "\u{201c}Plans\u{201d} from Work";
         assert_eq!(
             uncertain_cause(what, Some(UncertainReason::NoReply)),
-            "The server didn't answer when Sealwax sent \u{201c}Plans\u{201d} from Work, so it may have it."
+            "The server didn't answer when Pronto sent \u{201c}Plans\u{201d} from Work, so it may have it."
         );
         assert_eq!(
             uncertain_cause(what, Some(UncertainReason::UnreadableReply)),
-            "Sealwax couldn't read the server's answer to \u{201c}Plans\u{201d} from Work, so it can't \
+            "Pronto couldn't read the server's answer to \u{201c}Plans\u{201d} from Work, so it can't \
              tell whether the server took it."
         );
         assert_eq!(
             uncertain_cause(what, None),
-            "Sealwax couldn't confirm that \u{201c}Plans\u{201d} from Work was sent."
+            "Pronto couldn't confirm that \u{201c}Plans\u{201d} from Work was sent."
         );
         for reason in [None, Some(UncertainReason::UnreadableReply)] {
             assert!(!uncertain_cause(what, reason).contains("stopped"));

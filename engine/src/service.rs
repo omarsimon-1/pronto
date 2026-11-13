@@ -25,7 +25,7 @@ use crate::verify::verify;
 use rustls::ClientConfig;
 use sealwax_domain::account::{
     AccountColor, AccountKey, AccountSettings, AuthMethod, Endpoint, LoginError, LoginFailure,
-    OAuthProvider, Protocol, Receive,
+    OAuthProvider, Protocol, Receive, Security,
 };
 use sealwax_domain::autoconfig::{address_domain, presets};
 use sealwax_domain::model::{AccountId, FolderId};
@@ -41,12 +41,16 @@ use zeroize::Zeroizing;
 
 mod actor;
 mod bodies;
+mod reminders;
 mod rules;
+mod sent_sample;
 
 pub use actor::{SyncConfig, backoff_delay};
 
 /// How long stopping waits for tasks still writing files.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
+/// How long after the start the sweep of unreferenced blob files runs (`bodies::sweep_blobs`).
+const BLOB_SWEEP_DELAY: Duration = Duration::from_secs(120);
 /// How long reading a server's certificate may take (`Command::ReadCertificate`).
 const CERTIFICATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a sign-in waits for the browser.
@@ -76,6 +80,9 @@ pub struct EngineConfig {
     /// The Microsoft client ID (ADR-008: the build's, or `config.toml`'s). Without one, a
     /// sign-in answers that it's unavailable and Microsoft accounts can't sync.
     pub microsoft_client_id: Option<String>,
+    /// The Google client (ADR-023: `config.toml`'s, the environment's or the build's). Without
+    /// one, Sign in with Google is unavailable and Google accounts can't sync.
+    pub google_client: Option<oauth::Registration>,
     pub sign_in: SignInOptions,
     /// The sync actors' schedule and patience.
     pub sync: SyncConfig,
@@ -86,8 +93,10 @@ pub struct EngineConfig {
 pub struct SignInOptions {
     /// Microsoft's authorize and token endpoints.
     pub microsoft: oauth::Provider,
+    /// Google's authorize and token endpoints.
+    pub google: oauth::Provider,
     /// The IMAP and SMTP servers a new account's sign-in is checked on; `None` takes Outlook.com's
-    /// or Microsoft 365's from the presets.
+    /// or Microsoft 365's from the presets, or Gmail's.
     pub servers: Option<(Endpoint, Endpoint)>,
     /// How long to wait for the browser.
     pub wait: Duration,
@@ -97,6 +106,7 @@ impl Default for SignInOptions {
     fn default() -> Self {
         Self {
             microsoft: oauth::Provider::microsoft(),
+            google: oauth::Provider::google(),
             servers: None,
             wait: SIGN_IN_WAIT,
         }
@@ -184,9 +194,75 @@ impl Kept {
     }
 }
 
-struct MicrosoftClient {
-    id: Option<String>,
+/// A provider's client registration in use, and its client once built.
+#[derive(Default)]
+struct ClientSlot {
+    registration: Option<oauth::Registration>,
     client: Option<Arc<oauth::Client>>,
+}
+
+type PasswordSlot = Arc<tokio::sync::Mutex<Option<Secret>>>;
+
+/// Each password account's password for the session (the fork's Superhuman pass): the keyring
+/// is read at an account's first login, not at every login of each of its connections (the
+/// command, IDLE and body connections, SMTP, and again at every reconnect: a D-Bus round trip
+/// each, and after a resume the keyring often answers late or not at all). One read at a time
+/// per account, so connections logging in together share it. Forgotten when the password is
+/// replaced, the account goes, or a server refuses it; zeroized when dropped (ADR-008: secrets
+/// live in the keyring, or in memory). OAuth accounts keep only their access token in memory
+/// (`AccessTokens`), as before.
+#[derive(Default)]
+struct Passwords {
+    slots: Mutex<HashMap<AccountKey, PasswordSlot>>,
+}
+
+impl Passwords {
+    fn slot(&self, key: &AccountKey) -> PasswordSlot {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key.clone())
+            .or_default()
+            .clone()
+    }
+
+    /// Drops the account's password; its next login reads the keyring again.
+    fn forget(&self, key: &AccountKey) {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+    }
+
+    /// The account's password: the one held, or `read` (the keyring) once, held when found.
+    async fn get<F>(&self, key: &AccountKey, read: F) -> Result<Secret, LoginFailure>
+    where
+        F: Future<Output = Result<Option<Secret>, crate::secrets::SecretError>>,
+    {
+        let slot = self.slot(key);
+        let mut held = slot.lock().await;
+        if let Some(password) = held.as_ref() {
+            return Ok(password.clone());
+        }
+        let password = read
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "the account's password couldn't be read");
+                LoginFailure::Other
+            })?
+            .ok_or(LoginFailure::WrongPassword)?;
+        tracing::debug!("the account's password was read from the keyring");
+        *held = Some(password.clone());
+        Ok(password)
+    }
+}
+
+/// A login the server refused for its credentials: the held password is forgotten.
+fn refused(failure: LoginFailure) -> bool {
+    matches!(
+        crate::api::SyncStatus::from_failure(failure),
+        crate::api::SyncStatus::NeedsSignIn(_)
+    )
 }
 
 struct Shared {
@@ -199,11 +275,14 @@ struct Shared {
     secrets: OnceCell<Secrets>,
     detect: DetectOptions,
     sign_in: SignInOptions,
-    /// The client ID in use and its client, built on first use (so the engine's start makes no
-    /// TLS setup it may not need) and again when `config.toml` changes the ID.
-    oauth: Mutex<MicrosoftClient>,
+    /// Each provider's registration in use and its client, built on first use (so the engine's
+    /// start makes no TLS setup it may not need) and again when `config.toml` changes it. Each
+    /// account refreshes with its own provider's client.
+    oauth: Mutex<HashMap<OAuthProvider, ClientSlot>>,
     sign_ins: Mutex<HashMap<RequestId, SignIn>>,
     access: AccessTokens,
+    /// Password accounts' passwords, read from the keyring once a session.
+    passwords: Passwords,
     events: async_channel::Sender<Event>,
     /// Each account's sync actor.
     actors: Mutex<HashMap<AccountKey, actor::Handle>>,
@@ -214,6 +293,9 @@ struct Shared {
     limits: Mutex<HashMap<AccountId, Option<u64>>>,
     /// Each account's rules as last read (ADR-020).
     rules: rules::Cache,
+    /// Remind Me's timer's nudges (`reminders::run`): a reminder set or removed, a reconnect,
+    /// and (phase C) new mail, which may answer a waiting conversation.
+    reminders: (async_channel::Sender<()>, async_channel::Receiver<()>),
 }
 
 impl Shared {
@@ -228,19 +310,41 @@ impl Shared {
             secrets: OnceCell::new(),
             detect: config.detect,
             sign_in: config.sign_in,
-            oauth: Mutex::new(MicrosoftClient {
-                id: config.microsoft_client_id,
-                client: None,
-            }),
+            oauth: Mutex::new(HashMap::from([
+                (
+                    OAuthProvider::Microsoft,
+                    ClientSlot {
+                        registration: oauth::Registration::new(
+                            config.microsoft_client_id.as_deref(),
+                            None,
+                        ),
+                        client: None,
+                    },
+                ),
+                (
+                    OAuthProvider::Google,
+                    ClientSlot {
+                        registration: config.google_client,
+                        client: None,
+                    },
+                ),
+            ])),
             sign_ins: Mutex::default(),
             access: AccessTokens::default(),
+            passwords: Passwords::default(),
             events,
             actors: Mutex::default(),
             sync: config.sync,
             bodies: bodies::Bodies::default(),
             limits: Mutex::default(),
             rules: rules::Cache::default(),
+            reminders: async_channel::unbounded(),
         }
+    }
+
+    /// Wakes Remind Me's timer: it brings back what is due and ends what was answered.
+    fn nudge_reminders(&self) {
+        let _ = self.reminders.0.try_send(());
     }
 
     /// The keyring, opened on first use so it never delays a lookup or the first frame. When
@@ -262,28 +366,44 @@ impl Shared {
             .await
     }
 
-    /// The Microsoft client, when a client ID is configured.
-    fn oauth(&self) -> Option<Arc<oauth::Client>> {
-        let mut current = self.oauth.lock().unwrap_or_else(PoisonError::into_inner);
+    /// `provider`'s client, when a client ID is configured for it.
+    fn oauth(&self, provider: OAuthProvider) -> Option<Arc<oauth::Client>> {
+        let mut clients = self.oauth.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = clients.entry(provider).or_default();
         if current.client.is_none() {
-            let id = current
-                .id
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())?;
-            current.client = oauth::Client::new(id.to_owned(), self.sign_in.microsoft.clone())
-                .inspect_err(|error| tracing::warn!(%error, "Microsoft sign-in is unavailable"))
+            let registration = current.registration.as_ref()?;
+            let endpoints = match provider {
+                OAuthProvider::Microsoft => self.sign_in.microsoft.clone(),
+                OAuthProvider::Google => self.sign_in.google.clone(),
+            };
+            current.client = oauth::Client::registered(registration, endpoints)
+                .inspect_err(|error| {
+                    tracing::warn!(%error, provider = provider.name(), "sign-in is unavailable")
+                })
                 .ok()
                 .map(Arc::new);
         }
         current.client.clone()
     }
 
-    /// A new client ID from `config.toml`; the next sign-in or refresh builds its client.
-    fn set_microsoft_client_id(&self, id: Option<String>) {
-        let mut current = self.oauth.lock().unwrap_or_else(PoisonError::into_inner);
-        if current.id != id {
-            *current = MicrosoftClient { id, client: None };
+    /// The client of the provider an OAuth account signs in with; none for a password account.
+    fn oauth_for(&self, settings: &AccountSettings) -> Option<Arc<oauth::Client>> {
+        match settings.auth {
+            AuthMethod::OAuth(provider) => self.oauth(provider),
+            AuthMethod::Password => None,
+        }
+    }
+
+    /// A new registration for `provider` from `config.toml`; the next sign-in or refresh with
+    /// it builds its client. The other provider's client stays.
+    fn set_client(&self, provider: OAuthProvider, registration: Option<oauth::Registration>) {
+        let mut clients = self.oauth.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = clients.entry(provider).or_default();
+        if current.registration != registration {
+            *current = ClientSlot {
+                registration,
+                client: None,
+            };
         }
     }
 
@@ -360,6 +480,7 @@ enum Job {
         key: AccountKey,
         label: Option<String>,
         color: Option<AccountColor>,
+        signature: Option<String>,
     },
     /// A re-sign-in's tokens for the account in `settings`.
     SignedInAgain {
@@ -377,7 +498,7 @@ enum Job {
 
 /// Sends a stop left mid-way become uncertain (their data may have reached the server), and
 /// those whose message was being built go back to their drafts as failed (the build may be what
-/// stopped Sealwax), before any actor starts and asks for due sends; the app hears each.
+/// stopped Pronto), before any actor starts and asks for due sends; the app hears each.
 async fn recover_sends(shared: &Shared) {
     match shared.store.recover_sends().recv().await {
         Ok(changes) => {
@@ -405,6 +526,14 @@ async fn run(shared: Arc<Shared>, commands: async_channel::Receiver<Command>) {
     recover_sends(&shared).await;
     let (jobs, lane_jobs) = async_channel::unbounded();
     let lane_task = tokio::spawn(lane(shared.clone(), lane_jobs));
+    // Remind Me's timer: overdue reminders come back now, the others at their time.
+    let reminders_task = tokio::spawn(reminders::run(shared.clone(), shared.reminders.1.clone()));
+    // Blob files a crash left with no row: once a run, after the start's own work.
+    let swept = shared.clone();
+    let sweep_task = tokio::spawn(async move {
+        tokio::time::sleep(BLOB_SWEEP_DELAY).await;
+        crate::bodies::sweep_blobs(&swept.store, &swept.blobs).await;
+    });
     while let Ok(command) = commands.recv().await {
         let job = match command {
             Command::Shutdown => break,
@@ -471,7 +600,12 @@ async fn run(shared: Arc<Shared>, commands: async_channel::Receiver<Command>) {
                 continue;
             }
             Command::MicrosoftClient { client_id } => {
-                shared.set_microsoft_client_id(client_id);
+                let registration = oauth::Registration::new(client_id.as_deref(), None);
+                shared.set_client(OAuthProvider::Microsoft, registration);
+                continue;
+            }
+            Command::GoogleClient { client } => {
+                shared.set_client(OAuthProvider::Google, client);
                 continue;
             }
             Command::CheckForUpdates { request } => {
@@ -493,11 +627,13 @@ async fn run(shared: Arc<Shared>, commands: async_channel::Receiver<Command>) {
                 key,
                 label,
                 color,
+                signature,
             } => Job::Edit {
                 request,
                 key,
                 label,
                 color,
+                signature,
             },
             Command::UpdatePassword {
                 request,
@@ -515,6 +651,21 @@ async fn run(shared: Arc<Shared>, commands: async_channel::Receiver<Command>) {
             }
             Command::FetchBodies { messages } => {
                 bodies::request(&shared, messages, true);
+                continue;
+            }
+            Command::SampleSent {
+                request,
+                account,
+                options,
+                cancel,
+            } => {
+                tokio::spawn(sent_sample::run(
+                    shared.clone(),
+                    request,
+                    account,
+                    options,
+                    cancel,
+                ));
                 continue;
             }
             Command::ApplyRules {
@@ -582,6 +733,12 @@ async fn run(shared: Arc<Shared>, commands: async_channel::Receiver<Command>) {
                 for actor in shared.actors().values() {
                     actor.reconnect();
                 }
+                // A resume: the reminders due while the machine slept come back now.
+                shared.nudge_reminders();
+                continue;
+            }
+            Command::RemindersChanged => {
+                shared.nudge_reminders();
                 continue;
             }
             Command::CheckMail => {
@@ -596,6 +753,9 @@ async fn run(shared: Arc<Shared>, commands: async_channel::Receiver<Command>) {
     }
     jobs.close();
     lane_task.abort();
+    shared.reminders.0.close();
+    reminders_task.abort();
+    sweep_task.abort();
     for (_, sign_in) in shared.sign_ins().drain() {
         if let SignIn::Running(task) = sign_in {
             task.abort();
@@ -824,6 +984,7 @@ async fn lane(shared: Arc<Shared>, jobs: async_channel::Receiver<Job>) {
                 {
                     stop_sync(&shared, key).await;
                     shared.access.forget(key);
+                    shared.passwords.forget(key);
                 }
                 listed = list.iter().map(|account| account.key.clone()).collect();
                 for settings in list {
@@ -866,6 +1027,7 @@ async fn lane(shared: Arc<Shared>, jobs: async_channel::Receiver<Job>) {
             Job::Remove { request, key } => {
                 stop_sync(&shared, &key).await;
                 shared.access.forget(&key);
+                shared.passwords.forget(&key);
                 let result = accounts.remove(&key).await;
                 shared.send(Event::AccountRemoved { request, result });
             }
@@ -874,8 +1036,9 @@ async fn lane(shared: Arc<Shared>, jobs: async_channel::Receiver<Job>) {
                 key,
                 label,
                 color,
+                signature,
             } => {
-                let result = accounts.edit(&key, label, color).await;
+                let result = accounts.edit(&key, label, color, signature).await;
                 shared.send(Event::AccountEdited { request, result });
             }
             Job::SignedInAgain {
@@ -944,18 +1107,27 @@ fn tls(shared: &Shared) -> Result<Arc<ClientConfig>, LoginFailure> {
         .map_err(|_| LoginFailure::Certificate)
 }
 
-/// The account's password from the keyring; a missing one counts as a wrong one.
+/// The account's password: held for the session, else from the keyring ([`Passwords`]); a
+/// missing one counts as a wrong one.
 async fn password(shared: &Shared, settings: &AccountSettings) -> Result<Secret, LoginFailure> {
     shared
-        .secrets()
+        .passwords
+        .get(&settings.key, async {
+            shared
+                .secrets()
+                .await
+                .read(&settings.key.0, SecretKind::Password)
+                .await
+        })
         .await
-        .read(&settings.key.0, SecretKind::Password)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "the account's password couldn't be read");
-            LoginFailure::Other
-        })?
-        .ok_or(LoginFailure::WrongPassword)
+}
+
+/// A login with the account's password ended in `failure`: a refused password is forgotten, so
+/// the next login reads the keyring (the user may have changed it there).
+fn password_failed(shared: &Shared, settings: &AccountSettings, failure: LoginFailure) {
+    if refused(failure) {
+        shared.passwords.forget(&settings.key);
+    }
 }
 
 async fn log_in_with_password(
@@ -975,7 +1147,11 @@ async fn log_in_with_password(
         shared.sync.connect,
     )
     .await
-    .map_err(|error| error.failure())
+    .map_err(|error| {
+        let failure = error.failure();
+        password_failed(shared, settings, failure);
+        failure
+    })
 }
 
 /// XOAUTH2 with the account's access token, refreshed when it is about to expire and once more
@@ -996,7 +1172,7 @@ async fn log_in_with_token(
                 &settings.key,
                 &label,
                 secrets,
-                shared.oauth().as_deref(),
+                shared.oauth_for(settings).as_deref(),
                 renew,
             )
             .await?;
@@ -1041,7 +1217,7 @@ fn start_sign_in(
     address: String,
     account: Option<AccountKey>,
 ) {
-    if shared.oauth().is_none() {
+    if shared.oauth(provider).is_none() {
         shared.send(Event::SignedIn {
             request,
             result: Err(imap_error(LoginFailure::OAuthRequired)),
@@ -1140,14 +1316,22 @@ async fn signed_in(
     address: &str,
     account: Option<&AccountKey>,
 ) -> Result<(Box<Kept>, Option<AccountSettings>), LoginError> {
-    let OAuthProvider::Microsoft = provider;
     let client = shared
-        .oauth()
+        .oauth(provider)
         .ok_or(imap_error(LoginFailure::OAuthRequired))?;
     let target = match account {
         Some(key) => Some(listed_account(shared, key).await?),
         None => None,
     };
+    if let Some(settings) = &target
+        && settings.auth != AuthMethod::OAuth(provider)
+    {
+        tracing::info!(
+            request,
+            "a re-sign-in names another provider than the account's"
+        );
+        return Err(imap_error(LoginFailure::Other));
+    }
     let failed = |error: oauth::OAuthError| {
         tracing::info!(request, %error, "the sign-in failed");
         imap_error(error.failure())
@@ -1163,18 +1347,26 @@ async fn signed_in(
         .finish(authorization, shared.sign_in.wait)
         .await
         .map_err(failed)?;
-    tracing::info!(
-        request,
-        seconds = started.elapsed().as_secs_f64(),
-        consumer = granted.identity.consumer(),
-        imap_scope = granted
-            .tokens
-            .granted("https://outlook.office.com/IMAP.AccessAsUser.All"),
-        smtp_scope = granted
-            .tokens
-            .granted("https://outlook.office.com/SMTP.Send"),
-        "signed in in the browser"
-    );
+    match provider {
+        OAuthProvider::Microsoft => tracing::info!(
+            request,
+            seconds = started.elapsed().as_secs_f64(),
+            consumer = granted.identity.consumer(),
+            imap_scope = granted
+                .tokens
+                .granted("https://outlook.office.com/IMAP.AccessAsUser.All"),
+            smtp_scope = granted
+                .tokens
+                .granted("https://outlook.office.com/SMTP.Send"),
+            "signed in in the browser"
+        ),
+        OAuthProvider::Google => tracing::info!(
+            request,
+            seconds = started.elapsed().as_secs_f64(),
+            mail_scope = granted.tokens.granted(oauth::GOOGLE_MAIL_SCOPE),
+            "signed in to Google in the browser"
+        ),
+    }
     let username = granted.identity.username.clone();
     let (imap, smtp) = match &target {
         Some(settings) => {
@@ -1187,10 +1379,11 @@ async fn signed_in(
             }
             (settings.incoming.clone(), settings.smtp.clone())
         }
-        None => match &shared.sign_in.servers {
-            Some(servers) => servers.clone(),
-            None => microsoft_servers(&granted.identity, address)
+        None => match (&shared.sign_in.servers, provider) {
+            (Some(servers), _) => servers.clone(),
+            (None, OAuthProvider::Microsoft) => microsoft_servers(&granted.identity, address)
                 .ok_or(imap_error(LoginFailure::Other))?,
+            (None, OAuthProvider::Google) => gmail_servers(),
         },
     };
     check_servers(shared, &imap, &smtp, &username, &granted.tokens.access).await?;
@@ -1220,14 +1413,14 @@ async fn listed(shared: &Shared) -> Vec<AccountSettings> {
         .unwrap_or_default()
 }
 
-/// The Microsoft account `key` from `accounts.toml`, for a re-sign-in.
+/// The OAuth account `key` from `accounts.toml`, for a re-sign-in.
 async fn listed_account(shared: &Shared, key: &AccountKey) -> Result<AccountSettings, LoginError> {
     listed(shared)
         .await
         .into_iter()
         .find(|account| &account.key == key && matches!(account.auth, AuthMethod::OAuth(_)))
         .ok_or_else(|| {
-            tracing::info!("no such Microsoft account to sign in again");
+            tracing::info!("no such OAuth account to sign in again");
             imap_error(LoginFailure::Other)
         })
 }
@@ -1251,6 +1444,21 @@ fn microsoft_servers(identity: &Identity, address: &str) -> Option<(Endpoint, En
         certificate: None,
     };
     Some((endpoint(imap.first()?), endpoint(smtp.first()?)))
+}
+
+/// Gmail's servers, for Gmail and Google Workspace alike (Google's "Read Gmail messages on other
+/// email clients using IMAP", read on 2026-10-22): IMAP on 993 and SMTP on 465, both TLS.
+fn gmail_servers() -> (Endpoint, Endpoint) {
+    let endpoint = |host: &str, port| Endpoint {
+        host: host.to_owned(),
+        port,
+        security: Security::Tls,
+        certificate: None,
+    };
+    (
+        endpoint("imap.gmail.com", 993),
+        endpoint("smtp.gmail.com", 465),
+    )
 }
 
 /// IMAP, then SMTP, with XOAUTH2 as `username`; nothing is read or sent.
@@ -1379,6 +1587,8 @@ async fn store_password(
             tracing::warn!(%error, "the keyring refused the new password");
             imap_error(LoginFailure::Other)
         })?;
+    // The sync restarts with it: the next login reads the keyring again.
+    shared.passwords.forget(&settings.key);
     tracing::info!("the new password replaced the old one");
     Ok(())
 }
@@ -1387,7 +1597,6 @@ async fn store_password(
 mod tests {
     use super::*;
     use crate::oauth::CONSUMER_TENANT;
-    use sealwax_domain::account::Security;
 
     fn identity(tenant: &str) -> Identity {
         Identity {
@@ -1409,6 +1618,116 @@ mod tests {
         assert!(kept.fits("ann@example.test"));
         assert!(kept.fits(" Anna.Berg@Example.test "));
         assert!(!kept.fits("someone@example.test"));
+    }
+
+    #[tokio::test]
+    async fn a_password_is_read_once_until_it_is_forgotten() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let passwords = Passwords::default();
+        let key = AccountKey("acct".into());
+        let reads = AtomicUsize::new(0);
+        let reads = &reads;
+        let keyring = |held: Option<&'static str>| async move {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok(held.map(|password| Zeroizing::new(password.as_bytes().to_vec())))
+        };
+        let read = || reads.load(Ordering::SeqCst);
+        let first = passwords.get(&key, keyring(Some("fictional"))).await;
+        assert_eq!((first.unwrap().as_slice(), read()), (&b"fictional"[..], 1));
+        let again = passwords.get(&key, keyring(None)).await;
+        assert_eq!(
+            (again.unwrap().as_slice(), read()),
+            (&b"fictional"[..], 1),
+            "held: the keyring wasn't asked"
+        );
+        passwords.forget(&key);
+        assert_eq!(
+            passwords.get(&key, keyring(None)).await.unwrap_err(),
+            LoginFailure::WrongPassword,
+            "forgotten: read again, and a missing one counts as wrong"
+        );
+        assert_eq!(read(), 2);
+        assert_eq!(
+            passwords
+                .get(&key, keyring(Some("replaced")))
+                .await
+                .unwrap()
+                .as_slice(),
+            b"replaced",
+            "nothing missing is held"
+        );
+        assert_eq!(read(), 3);
+        let failing = async { Err(crate::secrets::SecretError::Locked) };
+        let other = AccountKey("other".into());
+        assert_eq!(
+            passwords.get(&other, failing).await.unwrap_err(),
+            LoginFailure::Other
+        );
+        assert_eq!(
+            passwords
+                .get(&other, keyring(Some("later")))
+                .await
+                .unwrap()
+                .as_slice(),
+            b"later"
+        );
+    }
+
+    #[tokio::test]
+    async fn logins_at_once_share_one_keyring_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let passwords = Arc::new(Passwords::default());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let tasks: Vec<_> = (0..3)
+            .map(|_| {
+                let (passwords, reads) = (passwords.clone(), reads.clone());
+                tokio::spawn(async move {
+                    passwords
+                        .get(&AccountKey("acct".into()), async move {
+                            reads.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                            Ok(Some(Zeroizing::new(b"fictional".to_vec())))
+                        })
+                        .await
+                })
+            })
+            .collect();
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap().as_slice(), b"fictional");
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "one read for three logins");
+    }
+
+    #[test]
+    fn only_a_refused_login_forgets_the_password() {
+        for failure in [
+            LoginFailure::WrongPassword,
+            LoginFailure::AppPasswordRequired,
+            LoginFailure::OAuthRequired,
+        ] {
+            assert!(refused(failure), "{failure:?}");
+        }
+        for failure in [
+            LoginFailure::Other,
+            LoginFailure::Unreachable,
+            LoginFailure::Timeout,
+            LoginFailure::Certificate,
+        ] {
+            assert!(!refused(failure), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn a_google_sign_in_is_checked_on_gmails_servers() {
+        let (imap, smtp) = gmail_servers();
+        assert_eq!(
+            (imap.host.as_str(), imap.port, imap.security),
+            ("imap.gmail.com", 993, Security::Tls)
+        );
+        assert_eq!(
+            (smtp.host.as_str(), smtp.port, smtp.security),
+            ("smtp.gmail.com", 465, Security::Tls)
+        );
     }
 
     #[test]

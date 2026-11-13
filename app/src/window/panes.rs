@@ -48,7 +48,8 @@ pub fn menu_button() -> gtk::MenuButton {
 /// bar at all (DESIGN.md "Layout").
 pub struct PaneBar {
     pub root: gtk::Widget,
-    /// The pane's own widgets, between the back button and the end controls.
+    /// The pane's own widgets, between the back button and the end controls (the reader's
+    /// bar moves its back button in here, beside its toolbar: `Window`'s reader strip).
     pub content: gtk::Box,
     /// Hidden until the window shows one pane at a time.
     pub back: Option<gtk::Button>,
@@ -114,29 +115,22 @@ impl PaneBar {
             controls.set_visible(end);
         }
     }
-
-    /// What the bar shows while one pane fills the window: its back button, and the window
-    /// controls on both sides.
-    pub fn narrow_setters(&self, breakpoint: &adw::Breakpoint) {
-        let shown = true.to_value();
-        for controls in self.start_controls.iter().chain(&self.end_controls) {
-            breakpoint.add_setter(controls, "visible", Some(&shown));
-        }
-        if let Some(back) = &self.back {
-            breakpoint.add_setter(back, "visible", Some(&shown));
-        }
-    }
 }
 
 /// The reader's column: one scrolled column, centred and at most [`READER_COLUMN`] px wide (a
-/// plain maximum, as the mock's `max-width`: the clamp doesn't ease toward it), while the
-/// reader's toolbar above it stretches. Its margins are `style.css`'s.
+/// plain maximum, as the mock's `max-width`: the clamp doesn't ease toward it); the reader's
+/// toolbar above it keeps to the conversation's narrower column (`Window::follow_reader_column`).
+/// Its margins are `style.css`'s. Since phase C the scroller may end short of the page, a pane
+/// in the column's right margin beside it, its content moved right to keep the column where it
+/// was (`margin::ColumnMargin`).
 pub struct ReaderColumn {
-    /// What goes in the reader's stack: the scroller, which Tab goes through.
+    /// The scroller, which Tab goes through: what the page holds beside the margin's pane.
     pub root: gtk::Widget,
     pub scroller: gtk::ScrolledWindow,
     /// Holds the reader's content (`Window::set_reader`).
     pub slot: adw::Bin,
+    /// Around the scroller's content: how far it is moved right.
+    pub inset: super::margin::Inset,
 }
 
 impl ReaderColumn {
@@ -151,17 +145,19 @@ impl ReaderColumn {
                 .build(),
             &["sw-reader-clamp"],
         );
+        let inset = super::margin::Inset::new(&clamp);
         // No Tab stop of its own while a conversation is still being built: the focus would
         // land on an unnamed pane.
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&clamp)
+            .child(&inset)
             .build();
         Self {
             root: crate::accessibility::tab_through(&scroller),
             scroller,
             slot,
+            inset,
         }
     }
 }
@@ -173,11 +169,11 @@ impl Default for ReaderColumn {
 }
 
 /// A pane bar's title with a quieter subtitle after it on the same baseline, as the mock's
-/// list header ("Inbox  12 unread · Personal").
+/// list header ("Inbox  12 unread · Personal"); the block takes the bar's spare room, so what
+/// is appended to it follows the subtitle.
 pub fn title_block(title: &gtk::Label, subtitle: &gtk::Label) -> gtk::Box {
     title.add_css_class("sw-pane-title");
     subtitle.add_css_class("sw-pane-subtitle");
-    subtitle.set_hexpand(true);
     for label in [title, subtitle] {
         label.set_xalign(0.0);
         label.set_valign(gtk::Align::BaselineCenter);

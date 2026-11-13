@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Runs a command against a private GTK Broadway display and a private D-Bus session,
 # so nothing opens on the live Wayland display. Usage: headless.sh <display-number> <cmd...>
-# SEALWAX_HEADLESS_TIMEOUT (seconds, default 300) bounds the command's run time.
-# From GTK 4.24 the daemon is GTK's with Sealwax's patch (tools/broadwayd/build.sh, built on
-# first use); SEALWAX_BROADWAYD names another one.
+# PRONTO_HEADLESS_TIMEOUT (seconds, default 300) bounds the command's run time;
+# PRONTO_BROADWAYD_WAIT (seconds, default 30) how long the display may take to start.
+# From GTK 4.24 the daemon is GTK's with Pronto's patch (tools/broadwayd/build.sh, built on
+# first use); PRONTO_BROADWAYD names another one.
 set -euo pipefail
 
 if (($# < 2)) || [[ ! $1 =~ ^[0-9]+$ ]]; then
@@ -12,7 +13,7 @@ if (($# < 2)) || [[ ! $1 =~ ^[0-9]+$ ]]; then
 fi
 display=$1
 shift
-timeout_s=${SEALWAX_HEADLESS_TIMEOUT:-300}
+timeout_s=${PRONTO_HEADLESS_TIMEOUT:-300}
 
 # A second broadwayd on a busy display would unlink the first one's socket, so refuse early.
 if (exec 3<>"/dev/tcp/127.0.0.1/$((8080 + display))") 2>/dev/null; then
@@ -23,7 +24,7 @@ fi
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 mkdir -p "$root/.local"
 log="$root/.local/broadway-$display.log"
-daemon=${SEALWAX_BROADWAYD:-$("$root/tools/broadwayd/build.sh")}
+daemon=${PRONTO_BROADWAYD:-$("$root/tools/broadwayd/build.sh")}
 "${daemon:-gtk4-broadwayd}" --address 127.0.0.1 ":$display" >"$log" 2>&1 &
 broadwayd=$!
 
@@ -39,19 +40,29 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for _ in $(seq 100); do
-    grep -q '^Listening on' "$log" && break
+# Ready once the daemon says where it listens and that socket is there to connect to. On a busy
+# machine it can take seconds to get there (a self-test failed after the 5 s this waited before,
+# under a load of 30): it gets PRONTO_BROADWAYD_WAIT, and fails at once if it exits.
+wait_s=${PRONTO_BROADWAYD_WAIT:-30}
+ready() {
+    local where
+    where=$(sed -n 's/^Listening on //p' "$log" | head -n 1)
+    [[ -n $where ]] && { [[ $where != /* ]] || [[ -S $where ]]; }
+}
+started=$SECONDS
+until ready; do
     if ! kill -0 "$broadwayd" 2>/dev/null; then
         echo "gtk4-broadwayd :$display failed to start (display in use?):" >&2
         cat "$log" >&2
         exit 1
     fi
+    if ((SECONDS - started >= wait_s)); then
+        echo "gtk4-broadwayd :$display did not become ready in ${wait_s} s" >&2
+        cat "$log" >&2
+        exit 1
+    fi
     sleep 0.05
 done
-if ! grep -q '^Listening on' "$log"; then
-    echo "gtk4-broadwayd :$display did not become ready" >&2
-    exit 1
-fi
 
 # Scratch XDG folders inside the repository, so nothing a headless run writes (WebKit's
 # network session included) lands in the user's home. A command can still set its own.

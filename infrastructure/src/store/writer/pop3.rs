@@ -7,7 +7,7 @@ use super::compose::drafts_folders;
 use super::ops::queue_in;
 use super::overlay::row;
 use super::{
-    RowChange, Writer, folder_counts, free_uid, fts_doc, insert_message, overlay_new,
+    RowChange, Writer, folder_counts, free_uid, fts_doc, fts_owed, insert_message, overlay_new,
     resolve_thread, thread_counts, upsert_rows, view_changes,
 };
 use crate::store::api::{ChangeEvent, FolderSpec, StoreVersion, ThreadMerge, ViewScope};
@@ -15,7 +15,7 @@ use crate::store::overlay::{BATCH_COMPOSE, Change};
 use crate::store::pop3_api::{
     DraftFiled, POP3_FOLDERS, Pop3Account, Pop3Download, Pop3PassDone, Pop3Stored,
 };
-use crate::store::{StoreError, compose, views};
+use crate::store::{StoreError, compose};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sealwax_domain::model::{AccountId, BlobKey, DraftId, FolderId, FolderRole, MessageId};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -241,18 +241,9 @@ impl Writer {
         }
         let shared = Arc::clone(&self.state.shared);
         let open = shared.registry.lock();
-        let mut changes = Vec::new();
-        for (view, spec) in &open.open {
-            if spec.scope == ViewScope::UnifiedInbox {
-                let folders = views::folders(&tx, spec.scope)?;
-                changes.push(crate::store::api::ViewChange {
-                    view: *view,
-                    diff: crate::store::api::ViewDiff::Reload {
-                        total: views::count(&tx, &folders, spec.filter)?,
-                    },
-                });
-            }
-        }
+        let changes = super::reload_after_settle(&tx, &open.open, |spec| {
+            spec.scope == ViewScope::UnifiedInbox
+        })?;
         self.state.commit(
             tx,
             ChangeEvent {
@@ -369,6 +360,8 @@ impl Writer {
         for merge in &merged_threads {
             threads.remove(&merge.from);
         }
+        super::retire_merged(&tx, &merged_threads)?;
+        super::final_merges(&mut merged_threads);
         let shared = Arc::clone(&self.state.shared);
         let open = shared.registry.lock();
         let views = view_changes(&tx, &open.open, &rows, &BTreeMap::new())?;
@@ -380,8 +373,10 @@ impl Writer {
             views,
             ..ChangeEvent::default()
         };
+        let owed = fts_owed(&tx, &docs)?;
         let version = self.state.commit(tx, event)?;
         drop(open);
+        self.state.unindexed.extend(owed);
         if let Err(error) = self.index_docs(&docs) {
             tracing::warn!(%error, "full-text batch of a POP3 download failed");
         }

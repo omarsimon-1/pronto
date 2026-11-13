@@ -1,5 +1,5 @@
 //! M7's exit check "a notification click opens the right message" (ML-083), for the lead's
-//! authorized live run: the real Sealwax over a scratch, fictional mailbox sends new-mail
+//! authorized live run: the real Pronto over a scratch, fictional mailbox sends new-mail
 //! notifications, and a click on each opens its message. Two steps: with the main window open but
 //! not focused (the user clicks another window first), and from background mode with no window.
 //! Each step records which message opened, whether the window had to be built, and the time from
@@ -13,7 +13,7 @@
 //! test app-id, and ends by itself.
 //!
 //! ```sh
-//! cargo build -p sealwax --example notify_live
+//! cargo build -p pronto --example notify_live
 //! tools/headless.sh 56 target/debug/examples/notify_live          # dry run
 //! target/debug/examples/notify_live --live                        # authorized live run only
 //! ```
@@ -26,7 +26,7 @@ mod support;
 
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
-use sealwax_app::application::{AppConfig, SealwaxApplication};
+use sealwax_app::application::{AppConfig, ProntoApplication};
 use sealwax_app::mailbox::folder_key;
 use sealwax_app::notify;
 use sealwax_app::window;
@@ -43,7 +43,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-const APP_ID: &str = "io.github.pixdevsapps.Sealwax.NotifyLive";
+const APP_ID: &str = "io.github.omarsimon1.Pronto.NotifyLive";
 /// The whole run ends by itself after this long.
 const DRY_DEADLINE: Duration = Duration::from_secs(60);
 const LIVE_DEADLINE: Duration = Duration::from_secs(300);
@@ -94,7 +94,7 @@ fn scratch_environment() -> Result<PathBuf, String> {
 
 fn raw(subject: &str, from: &str, serial: u32) -> Vec<u8> {
     format!(
-        "From: {from} <test@example.test>\r\nTo: Sealwax <sealwax@example.test>\r\n\
+        "From: {from} <test@example.test>\r\nTo: Pronto <sealwax@example.test>\r\n\
          Subject: {subject}\r\nMessage-ID: <notify-live-{serial}@example.test>\r\n\
          MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\
          A fictional message for the notification check. Nothing to do here.\r\n"
@@ -102,7 +102,7 @@ fn raw(subject: &str, from: &str, serial: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Fills the scratch store before Sealwax opens it.
+/// Fills the scratch store before Pronto opens it.
 fn fill(dirs: &SealwaxDirs) -> Result<Mailbox, String> {
     let blobs = BlobStore::open(&dirs.blobs_dir()).map_err(|error| error.to_string())?;
     let store = Store::open(
@@ -136,17 +136,17 @@ fn fill(dirs: &SealwaxDirs) -> Result<Mailbox, String> {
     let (inbox, archive) = (folders[0], folders[1]);
     let now = glib::real_time() / 1_000_000;
     let messages = [
-        ("Older, already here", "Sealwax test", 3_600, Flags::SEEN),
-        ("Also already here", "Sealwax test", 7_200, Flags::SEEN),
+        ("Older, already here", "Pronto test", 3_600, Flags::SEEN),
+        ("Also already here", "Pronto test", 7_200, Flags::SEEN),
         (
             "Step 1 of 2: click this notification",
-            "Sealwax test",
+            "Pronto test",
             60,
             Flags::NONE,
         ),
         (
             "Step 2 of 2: click this notification",
-            "Sealwax test",
+            "Pronto test",
             30,
             Flags::NONE,
         ),
@@ -187,7 +187,7 @@ fn fill(dirs: &SealwaxDirs) -> Result<Mailbox, String> {
 /// `ActionInvoked` signals as they reach the app's own connection (GDBus's worker thread).
 type Invoked = Arc<Mutex<Vec<Instant>>>;
 
-fn watch_invoked(app: &SealwaxApplication) -> Invoked {
+fn watch_invoked(app: &ProntoApplication) -> Invoked {
     let invoked: Invoked = Arc::default();
     if let Some(connection) = app.dbus_connection() {
         let record = invoked.clone();
@@ -239,7 +239,7 @@ fn active_class() -> String {
 }
 
 struct Run {
-    app: SealwaxApplication,
+    app: ProntoApplication,
     mailbox: Mailbox,
     events: async_channel::Sender<Event>,
     invoked: Invoked,
@@ -295,7 +295,7 @@ impl Run {
             .await
             .map_err(|_| "the app's end of the engine is gone")?;
         if self.live {
-            println!("  A notification \"Sealwax test\" is on its way: click it.");
+            println!("  A notification \"Pronto test\" is on its way: click it.");
         } else {
             self.stand_in_clicks(number).await?;
         }
@@ -406,7 +406,7 @@ impl Run {
 
         if self.live {
             println!(
-                "Step 1 of 2: click any other window, so the Sealwax window loses the focus \
+                "Step 1 of 2: click any other window, so the Pronto window loses the focus \
                  (waiting up to {} s).",
                 LIVE_WAIT.as_secs()
             );
@@ -451,8 +451,8 @@ fn main() -> glib::ExitCode {
         );
         return glib::ExitCode::from(2);
     }
-    glib::set_prgname(Some("sealwax"));
-    glib::set_application_name("Sealwax");
+    glib::set_prgname(Some("pronto"));
+    glib::set_application_name("Pronto");
     let root = match scratch_environment() {
         Ok(root) => root,
         Err(error) => {
@@ -506,8 +506,9 @@ fn main() -> glib::ExitCode {
         tiling: window::tiling_desktop(),
         engine: None,
         microsoft_client_id: None,
+        google_client: None,
     };
-    let app = SealwaxApplication::new(config, Instant::now());
+    let app = ProntoApplication::new(config, Instant::now());
     let deadline = if live { LIVE_DEADLINE } else { DRY_DEADLINE };
     let outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::default();
     let stand_in = Rc::new(RefCell::new(stand_in));
@@ -565,7 +566,7 @@ fn main() -> glib::ExitCode {
             });
         });
     }
-    app.run_with_args(&["sealwax"]);
+    app.run_with_args(&["pronto"]);
     match outcome.take() {
         Some(Ok(())) => glib::ExitCode::SUCCESS,
         _ => glib::ExitCode::FAILURE,

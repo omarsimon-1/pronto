@@ -676,7 +676,7 @@ fn a_send_left_sending_is_uncertain_after_a_restart_and_waits_for_the_user() {
     assert!(store.check().recv_blocking().unwrap().is_empty());
 }
 
-/// A message whose build stopped Sealwax (M9, docs/m9/depth.md) isn't built again by itself at
+/// A message whose build stopped Pronto (M9, docs/m9/depth.md) isn't built again by itself at
 /// the next start: the send comes back as a draft that failed, never due, nothing sent; one
 /// whose build returned goes on as usual.
 #[test]
@@ -694,7 +694,7 @@ fn a_send_left_being_built_fails_at_the_next_start_and_keeps_its_draft() {
     }
     // The second's build returned (a refusal or a transient failure would follow).
     cx.store.send_built(ids[1]).recv_blocking().unwrap();
-    // Sealwax died while the first's was being built.
+    // Pronto died while the first's was being built.
     drop(cx.store);
     let store = Store::open(&path, StoreOptions::default()).unwrap();
     let recovered = store.recover_sends().recv_blocking().unwrap();
@@ -922,6 +922,15 @@ fn drafts_upload_when_quiet_or_closed_and_replace_their_copy() {
     assert_eq!(
         store.draft_for_message(inbox[0]).recv_blocking().unwrap(),
         None
+    );
+    // And back: the draft's copies in the Drafts folder (a scheduled send's rows say when it
+    // goes, the fork's phase C); none for a draft never uploaded.
+    assert_eq!(
+        store
+            .draft_copies(vec![id, DraftId(id.0 + 100)])
+            .recv_blocking()
+            .unwrap(),
+        [(id, rows[0]), (id, rows[1])]
     );
 
     // A third upload replaces the synced copy through the op queue: hidden at once.
@@ -1265,4 +1274,59 @@ fn a_quick_reply_finds_its_closed_reply_draft_again() {
     store.undo_send(newer).recv_blocking().unwrap();
     store.set_draft_open(newer, false).recv_blocking().unwrap();
     assert_eq!(found(store), Some(newer));
+    // The inline reply answers with Reply All too (the fork's phase B): its draft is found.
+    let all = save(store, None, reply(ReplyKind::ReplyAll), false);
+    assert_eq!(found(store), Some(all));
+}
+
+#[test]
+fn auto_reply_never_overwrites_a_draft_or_saves_against_changed_mail() {
+    let cx = server();
+    let source = arrive(
+        &cx.store,
+        cx.inbox,
+        vec![message(cx.inbox, 1, Flags::default())],
+    )[0];
+    let version = cx.store.message(source).recv_blocking().unwrap().version;
+    let mut reply = draft(cx.account, 1);
+    reply.source = Some(DraftSource {
+        message: source,
+        kind: ReplyKind::Reply,
+    });
+    let request = || SaveDraft {
+        id: None,
+        draft: reply.clone(),
+        open: false,
+        now: NOW,
+    };
+    let saved = cx
+        .store
+        .save_auto_reply(request(), version)
+        .recv_blocking()
+        .unwrap();
+    assert!(matches!(saved, DraftSaved::Saved { .. }));
+    assert_eq!(
+        cx.store
+            .save_auto_reply(request(), version)
+            .recv_blocking()
+            .unwrap(),
+        DraftSaved::Gone
+    );
+    assert!(cx.store.outbox(None).recv_blocking().unwrap().is_empty());
+    let DraftSaved::Saved { id, .. } = saved else {
+        unreachable!()
+    };
+    cx.store.discard_draft(id).recv_blocking().unwrap();
+    arrive(
+        &cx.store,
+        cx.inbox,
+        vec![message(cx.inbox, 2, Flags::default())],
+    );
+    assert_eq!(
+        cx.store
+            .save_auto_reply(request(), version)
+            .recv_blocking()
+            .unwrap(),
+        DraftSaved::Gone
+    );
 }

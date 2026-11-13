@@ -1,18 +1,22 @@
-//! `sealwax-fixtures`: deterministic synthetic mail for Sealwax's development and benchmarks.
+//! `sealwax-fixtures`: deterministic synthetic mail for Pronto's development and benchmarks.
 //! Every name and address is fictional, at example.test. Write stores only to scratch paths;
 //! the app's own store is at `SealwaxDirs::from_env().store_file()`.
 
 mod bench;
 mod compose;
+mod contact;
 mod conversation;
 mod corpus;
 mod import;
 mod mime;
 mod ops;
+mod remind;
 mod remove;
 mod rng;
 mod search;
+mod split;
 mod stats;
+mod threads;
 mod unified;
 mod words;
 
@@ -32,6 +36,10 @@ const USAGE: &str = "usage:
   sealwax-fixtures bench-unified --store PATH [--blobs DIR] [--cold N] [--warm N] [--inserts N] [--now UNIX]
   sealwax-fixtures bench-ops --store PATH [--cold N] [--warm N] [--samples N] [--overlays N] [--now UNIX]
   sealwax-fixtures bench-conversation --store PATH [--blobs DIR] [--cold N] [--warm N] [--now UNIX]
+  sealwax-fixtures bench-threads --store PATH [--blobs DIR] [--cold N] [--warm N] [--inserts N] [--now UNIX]
+  sealwax-fixtures bench-split --store PATH [--blobs DIR] [--cold N] [--warm N] [--inserts N] [--now UNIX]
+  sealwax-fixtures bench-remind --store PATH [--blobs DIR] [--warm N] [--inserts N] [--now UNIX]
+  sealwax-fixtures bench-contact --store PATH [--blobs DIR] [--cold N] [--warm N] [--inserts N] [--now UNIX]
   sealwax-fixtures bench-compose --store PATH [--samples N] [--contacts N] [--now UNIX]
   sealwax-fixtures bench-search --store PATH [--blobs DIR] [--cold N] [--warm N] [--rebuild yes] [--date-keyed yes]
   sealwax-fixtures check --store PATH
@@ -42,7 +50,16 @@ the order of a first sync. `bench-unified` measures All Inboxes over several acc
 imported with its own --account. `bench-ops` measures the op queue with the fixture account made a
 server account (it gets a key), so run it on a copy of a store. `bench-conversation` measures the
 reader's read of a conversation and files a 150-message one into the INBOX the first time, so run
-it on a copy too. `bench-search` times search and Rebuild Search Index (`--rebuild yes`), and
+it on a copy too. `bench-threads` measures the fork's conversation views (docs/superhuman/store.md):
+the conversation table's recount at open, conversation views and pages, and the one-insert diff;
+run it on a copy (it drops and recounts the table). `bench-split` measures the Split Inbox
+(docs/superhuman/split.md): its fork step at open, the Important and Other views and pages, the
+one-insert diff and a choice for a sender; run it on a copy too. `bench-remind` measures Remind Me
+(docs/superhuman/remind.md): a remind and a wake to their change events, and one insert with
+conversations back from Reminders; run it on a copy too. `bench-contact` measures the contact
+pane's read (docs/superhuman/contact.md): its fork step at open, the read for the busiest senders,
+a middling one and the least busy one, and what its index costs a new message; run it on a copy too.
+`bench-search` times search and Rebuild Search Index (`--rebuild yes`), and
 indexes an earlier build's store again once (schema v10); `--date-keyed yes` adds S3's date-keyed
 table to compare, so run it on a copy.";
 
@@ -249,6 +266,10 @@ fn main() -> Result<()> {
             date_keyed: args.get("date-keyed") == Some("yes"),
         }),
         "bench-conversation" => conversation::run(&args.bench()?),
+        "bench-threads" => threads::run(&args.bench()?),
+        "bench-split" => split::run(&args.bench()?),
+        "bench-remind" => remind::run(&args.bench()?),
+        "bench-contact" => contact::run(&args.bench()?),
         "bench-ops" => ops::run(&ops::Options {
             store: args.path("store")?,
             cold: args.number("cold", 5)?,

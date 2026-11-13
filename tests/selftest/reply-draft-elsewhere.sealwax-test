@@ -1,0 +1,144 @@
+# The inline reply's draft and other writers (the fork's phase B; the review's repro of round 3):
+# a composer card that opens the draft (Edit Draft on its Drafts-folder copy, Enter on its row)
+# takes it, and the box that holds just its text empties, as after Pop Out, so one draft never
+# has two writers; a box holding more keeps it, for a new draft. A draft discarded, or queued
+# for sending, behind the keeper's back (a card in another window) is let go: more typing goes
+# into a new draft at once, never in a loop, and emptying the box never discards the send. A
+# store that fails is asked again after 2 s, 4 s, 8 s…, and a window closed meanwhile waits for
+# one more try, then closes (before, it waited for good, and the retries ran in a tight loop).
+# The store backend and the fake engine. Every name, address and text is fictional.
+# Run: tools/headless.sh 65 target/debug/pronto --self-test tests/selftest/reply-draft-elsewhere.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+engine-attach
+triage-account Work work
+conversation-add trip Work
+composer-backend store
+composer-limit none
+triage-mark-read-on-open false
+folder inbox Work
+list-wait
+focus list
+
+# Saved as a draft, then opened in a card: the card takes it, and the box empties.
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+type "Vi ses."
+wait-until assert-reply-draft trip-6 reply tomas@example.test none
+reply-draft-name first trip-6
+open-draft first
+composer-wait
+wait-until assert-quick-reply text ""
+assert-composer html-has "Vi ses."
+assert-composer db current open true
+# Discarded in the card: the keeper had let it go, so nothing tries it again.
+quick-tries-mark
+composer-action discard-draft
+sleep 300
+composer-discard-answer discard
+wait-until assert-composer count 0
+wait-until assert-outbox first gone
+assert-reply-draft trip-6 none
+sleep 2500
+assert-quick-tries 0 0
+
+# Typing in the box again: a draft of its own. Opened as Enter opens it, it answers everyone
+# (the default since phase C; this account isn't alex.berg@, who is one of them).
+action win.quick-reply
+type "Ha det."
+wait-until assert-reply-draft trip-6 reply-all tomas@example.test,alex.berg@example.test none
+assert-quick-tries 1 1
+
+# Discarded behind the keeper's back: the next change goes into a new draft at once (one try),
+# and nothing loops.
+reply-draft-name second trip-6
+outbox-discard second
+assert-outbox second gone
+quick-tries-mark
+type " Vi ses."
+wait-until assert-reply-draft trip-6 reply-all tomas@example.test,alex.berg@example.test none
+sleep 3000
+assert-quick-tries 1 1
+assert-quick-reply text "Ha det. Vi ses."
+
+# After a restart the box holds it: the new draft has the text.
+close-window
+wait-within 1500 assert-window false
+bus-activate
+wait-until assert-window true
+folder inbox Work
+list-wait
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Ha det. Vi ses."
+
+# Queued for sending behind the keeper's back (Send Later in an hour): more typing goes into a new
+# draft; emptying the box discards that one, and the send stays queued.
+reply-draft-name third trip-6
+outbox-queue third 3600000
+assert-outbox third queued
+quick-tries-mark
+action win.quick-reply
+key <Control>End
+type " Bra."
+wait-until assert-reply-draft trip-6 reply-all tomas@example.test,alex.berg@example.test none
+key <Control>a
+key BackSpace
+assert-quick-reply text ""
+wait-until assert-reply-draft trip-6 none
+assert-outbox third queued
+assert-quick-tries 2 2
+
+# A card that opens it while the box holds more (typing not saved yet): the box keeps its text,
+# which goes into a new draft; the card's stays the card's.
+type "Kanskje."
+wait-until assert-reply-draft trip-6 reply-all tomas@example.test,alex.berg@example.test none
+reply-draft-name fourth trip-6
+type " Ja."
+open-draft fourth
+composer-wait
+assert-composer html-has "Kanskje."
+assert-composer html-lacks "Ja."
+assert-quick-reply text "Kanskje. Ja."
+wait-until assert-reply-draft trip-6 reply-all tomas@example.test,alex.berg@example.test none
+reply-draft-name fifth trip-6
+assert-outbox fourth draft
+assert-outbox fifth draft
+composer-action discard-draft
+sleep 300
+composer-discard-answer discard
+wait-until assert-composer count 0
+wait-until assert-outbox fourth gone
+assert-outbox fifth draft
+
+# A store that fails: the keeper asks again after 2 s, then 4 s (never in a loop), and a window
+# closed meanwhile waits for one more try, then closes. What the store never took is lost with it.
+composer-fail-saves true
+quick-tries-mark
+action win.quick-reply
+key <Control>End
+type " Til slutt."
+sleep 9000
+assert-quick-tries 2 4
+close-window
+wait-within 3500 assert-window false
+composer-fail-saves false
+bus-activate
+wait-until assert-window true
+folder inbox Work
+list-wait
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply text "Kanskje. Ja."
+assert-conversation criticals 0

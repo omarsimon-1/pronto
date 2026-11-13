@@ -1,5 +1,6 @@
 //! The composer's and the window's reads (M6): a draft, the drafts to reopen, the local draft a
-//! Drafts-folder message is a copy of, the outbox, and recipient suggestions.
+//! Drafts-folder message is a copy of (and the copies of drafts), the outbox, and recipient
+//! suggestions.
 
 use super::{Reader, Sender};
 use crate::store::compose::{self, state_from};
@@ -19,6 +20,10 @@ pub(crate) enum ComposeRead {
     DraftForMessage {
         message: MessageId,
         reply: Sender<Option<DraftId>>,
+    },
+    DraftCopies {
+        drafts: Vec<DraftId>,
+        reply: Sender<Vec<(DraftId, MessageId)>>,
     },
     ReplyDraft {
         message: MessageId,
@@ -42,6 +47,7 @@ impl ComposeRead {
             ComposeRead::Draft { reply, .. } => reply.is_closed(),
             ComposeRead::OpenDrafts { reply } => reply.is_closed(),
             ComposeRead::DraftForMessage { reply, .. } => reply.is_closed(),
+            ComposeRead::DraftCopies { reply, .. } => reply.is_closed(),
             ComposeRead::ReplyDraft { reply, .. } => reply.is_closed(),
             ComposeRead::Outbox { reply, .. } => reply.is_closed(),
             ComposeRead::Recipients { reply, .. } => reply.is_closed(),
@@ -60,6 +66,9 @@ impl Reader {
             }
             ComposeRead::DraftForMessage { message, reply } => {
                 let _ = reply.try_send(self.draft_for_message(message));
+            }
+            ComposeRead::DraftCopies { drafts, reply } => {
+                let _ = reply.try_send(self.draft_copies(&drafts));
             }
             ComposeRead::ReplyDraft { message, reply } => {
                 let _ = reply.try_send(self.reply_draft(message));
@@ -102,13 +111,34 @@ impl Reader {
             .optional()?)
     }
 
+    /// The Drafts-folder copies of `drafts`, by Message-ID as [`Reader::draft_for_message`]
+    /// matches them, one index lookup a draft.
+    fn draft_copies(&self, drafts: &[DraftId]) -> Result<Vec<(DraftId, MessageId)>, StoreError> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT d.id, m.id FROM drafts d \
+             JOIN messages m ON m.message_id = d.message_id \
+             JOIN folders f ON f.id = m.folder_id AND f.account_id = d.account_id \
+             WHERE d.id = ?1 AND f.role = 'drafts' ORDER BY m.id",
+        )?;
+        let mut copies = Vec::new();
+        for draft in drafts {
+            let rows = statement.query_map([draft.0], |row| {
+                Ok((DraftId(row.get(0)?), MessageId(row.get(1)?)))
+            })?;
+            for row in rows {
+                copies.push(row?);
+            }
+        }
+        Ok(copies)
+    }
+
     /// The newest closed, editable draft that replies to `message` (the quick reply's).
     fn reply_draft(&self, message: MessageId) -> Result<Option<StoredDraft>, StoreError> {
         let id: Option<i64> = self
             .conn
             .prepare_cached(
                 "SELECT d.id FROM drafts d INDEXED BY drafts_source \
-                 WHERE d.source_message = ?1 AND d.source_kind = 0 AND d.open = 0 \
+                 WHERE d.source_message = ?1 AND d.source_kind IN (0, 1) AND d.open = 0 \
                    AND NOT EXISTS (SELECT 1 FROM outbox WHERE draft = d.id) \
                  ORDER BY d.saved DESC, d.id DESC LIMIT 1",
             )?

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # The kill -9 exit criterion (PRD C5: a crash while composing loses at most 5 s of typing).
 # Usage: tools/kill9-compose.sh <display> [runs] (default 10). Build first: cargo build.
-# Each run starts Sealwax headless on a scratch store (.local/kill9/run-N), opens a composer
+# Each run starts Pronto headless on a scratch store (.local/kill9/run-N), opens a composer
 # on the real store backend with a local, server-less account (drafts save; nothing can be
 # sent), types a character every 200 ms through the editor's helper, kills the process with
-# SIGKILL 4-20 s after the typing started, starts Sealwax again on the same folders, and reads
+# SIGKILL 4-20 s after the typing started, starts Pronto again on the same folders, and reads
 # the draft that reopened. Loss: the time from the kill back to when the last character the
 # reopened draft holds was typed. Not in tools/ci.sh: it takes about 40 s a run.
 set -euo pipefail
@@ -20,8 +20,8 @@ for run in $(seq 1 "$runs"); do
     dir=$base/run-$run
     root=$PWD/$dir/root
     mkdir -p "$root"
-    SEALWAX_SELFTEST_ROOT=$root SEALWAX_HEADLESS_TIMEOUT=240 \
-        tools/headless.sh "$display" target/debug/sealwax --self-test tests/kill9/type.sealwax-test \
+    PRONTO_SELFTEST_ROOT=$root PRONTO_HEADLESS_TIMEOUT=240 \
+        tools/headless.sh "$display" target/debug/pronto --self-test tests/kill9/type.sealwax-test \
         >"$dir/type.log" 2>&1 &
     wrapper=$!
     log=$root/typed.log
@@ -44,8 +44,8 @@ for run in $(seq 1 "$runs"); do
     killed=$(date +%s%3N)
     kill -9 "$pid"
     wait "$wrapper" 2>/dev/null || true
-    if ! SEALWAX_SELFTEST_ROOT=$root SEALWAX_HEADLESS_TIMEOUT=120 \
-        tools/headless.sh "$display" target/debug/sealwax --self-test tests/kill9/check.sealwax-test \
+    if ! PRONTO_SELFTEST_ROOT=$root PRONTO_HEADLESS_TIMEOUT=120 \
+        tools/headless.sh "$display" target/debug/pronto --self-test tests/kill9/check.sealwax-test \
         >"$dir/check.log" 2>&1; then
         echo "run $run: the draft didn't reopen; see $dir/check.log" >&2
         exit 1

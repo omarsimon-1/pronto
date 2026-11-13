@@ -27,7 +27,7 @@ pub const CAPPED: [&str; 15] = [
     "mail_builder",
 ];
 
-/// Sealwax's own sources, as cargo names them to rustc: relative to the workspace. A panic
+/// Pronto's own sources, as cargo names them to rustc: relative to the workspace. A panic
 /// anywhere else (a dependency, the standard library) happened in code that may have been
 /// parsing a server's reply or a message.
 const OWN_SOURCES: [&str; 6] = [
@@ -55,9 +55,9 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-/// A panic outside Sealwax's own sources is reported on stderr by thread and place only: its
+/// A panic outside Pronto's own sources is reported on stderr by thread and place only: its
 /// message may quote what the code was parsing, such as imap-proto's slicing panic, which names
-/// a character of the server's reply (M9, F15). Sealwax's own panics keep Rust's default report.
+/// a character of the server's reply (M9, F15). Pronto's own panics keep Rust's default report.
 pub fn redact_dependency_panics() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| match info.location() {

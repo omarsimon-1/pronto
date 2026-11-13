@@ -1,10 +1,11 @@
-//! Do keys pressed while a message has the focus reach the Reader scope, do wheel steps over
-//! a message scroll the reader, and does the focus stay in the reader from one message to the
-//! next (ML-027)? Real key, click, motion and wheel events go in through Broadway, as a
-//! browser client would send them; nothing is synthesized inside GTK.
+//! Do keys pressed while a message has the focus reach the Reader scope, and Ctrl+K the window
+//! (the palette's key that yields, Superhuman pass), do wheel steps over a message scroll the
+//! reader, and does the focus stay in the reader from one message to the next (ML-027)? Real
+//! key, click, motion and wheel events go in through Broadway, as a browser client would send
+//! them; nothing is synthesized inside GTK.
 //!
 //! ```sh
-//! SEALWAX_HEADLESS_TIMEOUT=120 tools/headless.sh 37 target/debug/examples/reader_keys
+//! PRONTO_HEADLESS_TIMEOUT=120 tools/headless.sh 37 target/debug/examples/reader_keys
 //! ```
 //!
 //! Prints one `KEYS` line per case and exits 0 when every expectation holds.
@@ -36,6 +37,9 @@ const KEY_ESCAPE: u32 = 0xff1b;
 const KEY_DELETE: u32 = 0xffff;
 const KEY_G: u32 = 0x67;
 const KEY_I: u32 = 0x69;
+const KEY_K: u32 = 0x6b;
+/// GDK's Control mask, as Broadway sends it.
+const CONTROL: u32 = 1 << 2;
 
 type Counts = Rc<RefCell<HashMap<ActionId, u32>>>;
 
@@ -78,7 +82,7 @@ fn main() -> glib::ExitCode {
     let filled = samples::fill_store(&scratch.store, &scratch.blobs, messages)
         .expect("the samples go into the scratch store");
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.ReaderKeys")
+        .application_id("io.github.omarsimon1.Pronto.ReaderKeys")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let passed = Rc::new(Cell::new(false));
@@ -96,9 +100,11 @@ fn main() -> glib::ExitCode {
                 ActionId::NextMessage,
                 ActionId::PreviousMessage,
                 ActionId::BackToList,
+                ActionId::ToggleRead,
                 ActionId::Archive,
                 ActionId::Delete,
                 ActionId::GoToInbox,
+                ActionId::CommandPalette,
             ] {
                 let counts = counts.clone();
                 win_actions.connect(id, move || {
@@ -106,13 +112,19 @@ fn main() -> glib::ExitCode {
                 });
             }
             win_actions.set_has_selection(true);
+            // The window's keys that yield, as the app attaches them.
+            let window_keys = actions::install_scoped(
+                window.window(),
+                sealwax_domain::actions::Scope::Window,
+                &sealwax_domain::keymap::Keymap::default(),
+            );
             window.present();
             let app = app.clone();
             let passed = passed.clone();
             let input = input.clone();
             let filled = filled.clone();
             glib::spawn_future_local(async move {
-                let _keep = (&theme, &win_actions);
+                let _keep = (&theme, &win_actions, &window_keys);
                 let ok = match scenario(&reader, &window, &input, &counts, &filled).await {
                     Ok(ok) => ok,
                     Err(error) => {
@@ -202,7 +214,7 @@ async fn scenario(
     let view = reader.web_view().ok_or("no web view")?;
 
     // 1. The WebView has the focus (as after Tab or a click), the page has nothing editable
-    // focused: j, e and u.
+    // focused: j, e and u (Mark as Read or Unread since the Superhuman pass).
     let column = scroller(reader).ok_or("the reader isn't in a scrolled window")?;
     let before_focus = column.vadjustment().value();
     view.grab_focus();
@@ -221,7 +233,7 @@ async fn scenario(
     let before = (
         count(counts, ActionId::NextMessage),
         count(counts, ActionId::Archive),
-        count(counts, ActionId::BackToList),
+        count(counts, ActionId::ToggleRead),
     );
     press(input, KEY_J).await?;
     press(input, KEY_E).await?;
@@ -229,13 +241,13 @@ async fn scenario(
     let after = (
         count(counts, ActionId::NextMessage),
         count(counts, ActionId::Archive),
-        count(counts, ActionId::BackToList),
+        count(counts, ActionId::ToggleRead),
     );
     expect(
         "j, e and u with the focus in the WebView reach the Reader scope",
         after == (before.0 + 1, before.1 + 1, before.2 + 1),
         format!(
-            "focus in web view: {}; next {}→{}, archive {}→{}, back {}→{}",
+            "focus in web view: {}; next {}→{}, archive {}→{}, read {}→{}",
             view.has_focus(),
             before.0,
             after.0,
@@ -273,6 +285,25 @@ async fn scenario(
             after.1,
             before.2,
             after.2
+        ),
+    );
+
+    // Ctrl+K: WebKit doesn't use it outside an editable field, the reader has no key of that
+    // name, so it reaches the window, where the palette's key yields.
+    view.grab_focus();
+    support::frames(window.window(), 1).await?;
+    let palette_before = count(counts, ActionId::CommandPalette);
+    input
+        .key(KEY_K, CONTROL)
+        .map_err(|error| error.to_string())?;
+    support::sleep(300).await;
+    expect(
+        "Ctrl+K with the focus in the WebView reaches the window's palette key",
+        count(counts, ActionId::CommandPalette) == palette_before + 1,
+        format!(
+            "focus in web view: {}; palette {palette_before}→{}",
+            view.has_focus(),
+            count(counts, ActionId::CommandPalette)
         ),
     );
 

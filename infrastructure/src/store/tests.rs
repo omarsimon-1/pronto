@@ -64,7 +64,7 @@ fn fixture() -> Fixture {
     }
 }
 
-fn message(folder: FolderId, key: &str, date: i64) -> NewMessage {
+pub(crate) fn message(folder: FolderId, key: &str, date: i64) -> NewMessage {
     NewMessage {
         folder,
         date,
@@ -180,7 +180,7 @@ fn migrates_once_and_refuses_a_newer_schema() {
 #[test]
 fn store_files_are_private() {
     let dir = scratch();
-    let path = dir.path().join("data/sealwax/store.sqlite");
+    let path = dir.path().join("data/pronto/store.sqlite");
     let store = Store::open_in_background(path.clone(), StoreOptions::default())
         .recv_blocking()
         .unwrap();
@@ -191,6 +191,60 @@ fn store_files_are_private() {
         assert_eq!(mode(Path::new(&file)), 0o600, "{suffix}");
     }
     assert_eq!(mode(path.parent().unwrap()), 0o700);
+    store.close().unwrap();
+}
+
+#[test]
+fn a_store_opens_once_at_a_time() {
+    let dir = scratch();
+    let path = dir.path().join("store.sqlite");
+    let store = Store::open(&path, StoreOptions::default()).unwrap();
+    let account = add_account(&store, "Test");
+    let Err(error) = Store::open(&path, StoreOptions::default()) else {
+        panic!("a second open took the lock");
+    };
+    assert!(matches!(&error, StoreError::Locked(locked) if locked == &path));
+    assert!(error.to_string().contains("open in another Pronto"));
+    // The refused open changed nothing, and the first store works on.
+    add_folder(&store, account, "INBOX", FolderRole::Inbox);
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lock");
+    assert_eq!(mode(Path::new(&lock)), 0o600);
+    // Closing and dropping both release it; the lock file itself stays.
+    store.close().unwrap();
+    let store = Store::open(&path, StoreOptions::default()).unwrap();
+    drop(store);
+    let store = Store::open(&path, StoreOptions::default()).unwrap();
+    assert_eq!(store.folders().recv_blocking().unwrap().value.len(), 1);
+    store.close().unwrap();
+}
+
+#[test]
+fn a_flush_commits_and_leaves_the_writer_as_it_was() {
+    let Fixture {
+        _dir, store, inbox, ..
+    } = fixture();
+    ingest(&store, vec![message(inbox, "a", 1)]);
+    store.flush().recv_blocking().unwrap();
+    store.flush().recv_blocking().unwrap();
+    ingest(&store, vec![message(inbox, "b", 2)]);
+    let conn = Connection::open(store.path()).unwrap();
+    let flushes: i64 = conn
+        .query_row("SELECT value FROM meta WHERE key = 'flushes'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(flushes, 2);
+    assert_eq!(whole(&store, ViewSpec::folder(inbox)).rows.len(), 2);
+    // A flush that fails says so, and the writer goes on.
+    conn.execute_batch(
+        "CREATE TRIGGER fault BEFORE UPDATE ON meta WHEN NEW.key = 'flushes' \
+         BEGIN SELECT RAISE(ABORT, 'planted'); END;",
+    )
+    .unwrap();
+    assert!(store.flush().recv_blocking().is_err());
+    ingest(&store, vec![message(inbox, "c", 3)]);
+    assert_eq!(whole(&store, ViewSpec::folder(inbox)).rows.len(), 3);
     store.close().unwrap();
 }
 
@@ -507,6 +561,7 @@ impl Model {
                     assert_eq!(page.rows.len(), *total as usize);
                     self.rows = page.rows;
                 }
+                ViewDiff::ConversationSplice { .. } => panic!("a message view's splice"),
             }
         }
         let merged: BTreeMap<ThreadId, ThreadId> = event
@@ -642,7 +697,7 @@ fn change_events_keep_list_models_exact() {
             let event = events.recv_blocking().unwrap();
             for change in &event.views {
                 match change.diff {
-                    ViewDiff::Splice { .. } => splices += 1,
+                    ViewDiff::Splice { .. } | ViewDiff::ConversationSplice { .. } => splices += 1,
                     ViewDiff::Reload { .. } => reloads += 1,
                 }
             }
@@ -948,8 +1003,8 @@ fn checkpoints_run_on_the_maintenance_thread() {
     store.close().unwrap();
 }
 
-const CRASH_DIR: &str = "SEALWAX_STORE_CRASH_DIR";
-const CRASH_START: &str = "SEALWAX_STORE_CRASH_START";
+const CRASH_DIR: &str = "PRONTO_STORE_CRASH_DIR";
+const CRASH_START: &str = "PRONTO_STORE_CRASH_START";
 
 fn crash_message(n: u64) -> Vec<u8> {
     let parent = if n.is_multiple_of(3) { n - 1 } else { n };

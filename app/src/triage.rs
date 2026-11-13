@@ -8,17 +8,22 @@
 //! one writer transaction with one change event, so the list, the sidebar and the reader follow
 //! it as they follow sync. The accounts each answer names get `Command::OpsQueued`.
 
+use crate::actions::ScopedShortcuts;
+use crate::application::AppState;
 use crate::engine_link::EngineLink;
 use crate::mailbox::Mailbox;
 use gtk4::glib;
 use sealwax_domain::actions::ActionId;
-use sealwax_domain::model::{Account, AccountId, Flags, Folder, FolderId, FolderRole, MessageId};
+use sealwax_domain::model::{
+    Account, AccountId, ConversationSummary, Flags, Folder, FolderId, FolderRole, MessageId,
+    ThreadId,
+};
 use sealwax_domain::triage::{self, FolderInfo, Plan, Triage, Unavailable};
 use sealwax_engine::api::{Command, Refused};
 pub use sealwax_infrastructure::store::{BatchId, Lost, NotApplied, Queued, Undone};
-use sealwax_infrastructure::store::{QueueTriage, Reply};
+use sealwax_infrastructure::store::{ConversationMember, ListRow, QueueTriage, Reply};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -40,6 +45,106 @@ pub struct Target {
     pub id: MessageId,
     pub folder: FolderId,
     pub flags: Flags,
+}
+
+impl Target {
+    /// A list row as the commands' availability sees it: a message row's message, or a
+    /// conversation row as one target, its anchor in the anchor's folder with the state of its
+    /// members in the view (unread when one is, starred when one is), so a command applies to
+    /// the conversations it would act on and its title (Star or Unstar, Mark as Read or
+    /// Unread) follows them. What the command then acts on is the conversations' members
+    /// ([`conversation_targets`]).
+    pub fn of_row(row: &ListRow) -> Self {
+        match row {
+            ListRow::Message(row) => Self {
+                id: row.id,
+                folder: row.folder,
+                flags: row.flags,
+            },
+            ListRow::Conversation(row) => Self::of_conversation(row),
+        }
+    }
+
+    pub fn of_conversation(row: &ConversationSummary) -> Self {
+        let mut flags = Flags::NONE;
+        if row.unread == 0 {
+            flags = flags | Flags::SEEN;
+        }
+        if row.flagged > 0 {
+            flags = flags | Flags::FLAGGED;
+        }
+        Self {
+            id: row.anchor,
+            folder: row.folder,
+            flags,
+        }
+    }
+}
+
+/// What an action on conversation rows acts on (the Superhuman pass,
+/// docs/superhuman/conversations.md): the conversations' `members` in the view's folders,
+/// each conversation's oldest first, as `Store::conversation_members` reads them.
+///
+/// - Archive, Delete, Junk and Move to: every member.
+/// - Mark as Read: every unread member.
+/// - Mark as Unread: the newest member of each conversation with no unread member (one with
+///   some is unread already).
+/// - Star: the newest member of each conversation with no starred member; Unstar: every
+///   starred member.
+pub fn conversation_targets(action: Triage, members: &[ConversationMember]) -> Vec<Target> {
+    let target = |member: &ConversationMember| Target {
+        id: member.id,
+        folder: member.folder,
+        flags: member.flags,
+    };
+    // Each conversation's members, in the order the read gave them: only the actions on one
+    // member a conversation need them, found by thread in one pass (phase B's review: a
+    // search per member took 405 ms for Select All on a 41k-row folder).
+    let conversations = || {
+        let mut at: HashMap<ThreadId, usize> = HashMap::new();
+        let mut conversations: Vec<Vec<&ConversationMember>> = Vec::new();
+        for member in members {
+            match at.get(&member.thread) {
+                Some(index) => conversations[*index].push(member),
+                None => {
+                    at.insert(member.thread, conversations.len());
+                    conversations.push(vec![member]);
+                }
+            }
+        }
+        conversations
+    };
+    let newest = |members: &[&ConversationMember]| {
+        members
+            .iter()
+            .max_by_key(|member| (member.date, member.id))
+            .map(|member| target(member))
+    };
+    match action {
+        Triage::Archive | Triage::Delete | Triage::Junk | Triage::MoveTo(_) => {
+            members.iter().map(target).collect()
+        }
+        Triage::Read(true) => members
+            .iter()
+            .filter(|member| !member.flags.is_seen())
+            .map(target)
+            .collect(),
+        Triage::Read(false) => conversations()
+            .iter()
+            .filter(|members| members.iter().all(|member| member.flags.is_seen()))
+            .filter_map(|members| newest(members))
+            .collect(),
+        Triage::Star(true) => conversations()
+            .iter()
+            .filter(|members| members.iter().all(|member| !member.flags.is_flagged()))
+            .filter_map(|members| newest(members))
+            .collect(),
+        Triage::Star(false) => members
+            .iter()
+            .filter(|member| member.flags.is_flagged())
+            .map(target)
+            .collect(),
+    }
 }
 
 /// The store couldn't take the change. It carries no store text, which could quote a path.
@@ -163,12 +268,13 @@ impl Availability {
 }
 
 /// The triage commands, by their registry ids.
-pub const COMMANDS: [ActionId; 7] = [
+pub const COMMANDS: [ActionId; 8] = [
     ActionId::Archive,
     ActionId::Delete,
     ActionId::Junk,
     ActionId::MoveTo,
     ActionId::Star,
+    ActionId::ToggleRead,
     ActionId::MarkRead,
     ActionId::MarkUnread,
 ];
@@ -189,6 +295,10 @@ pub fn availability(id: ActionId, targets: &[Target], folders: &[Folder]) -> Ava
         ActionId::Junk if all_in_junk(targets, folders) => "Not Junk",
         ActionId::Star if star_action(targets) == Triage::Star(false) => "Unstar",
         ActionId::Star => "Star",
+        ActionId::ToggleRead if read_action(targets) == Triage::Read(false) => {
+            ActionId::MarkUnread.title()
+        }
+        ActionId::ToggleRead => ActionId::MarkRead.title(),
         other => other.title(),
     };
     let none = |reason| Availability {
@@ -230,6 +340,18 @@ pub fn availability(id: ActionId, targets: &[Target], folders: &[Folder]) -> Ava
                 },
             };
         }
+        // One of the two always applies: read unless every message is, then unread.
+        ActionId::ToggleRead => {
+            let read = read_action(targets) == Triage::Read(true);
+            return Availability {
+                applies: targets
+                    .iter()
+                    .filter(|target| target.flags.is_seen() != read)
+                    .count(),
+                reason: None,
+                title,
+            };
+        }
         ActionId::MoveTo => {
             return match move_choices(targets, folders) {
                 Ok(choices) if choices.is_empty() => none("the account has no other folder"),
@@ -243,11 +365,22 @@ pub fn availability(id: ActionId, targets: &[Target], folders: &[Folder]) -> Ava
         }
         _ => return none("not a mail action"),
     };
+    // Planned once per folder: a batch's messages mostly share one, and each plan looks
+    // through the account's folders.
     let mut applies = 0;
     let mut first = None;
+    let mut planned: Vec<(FolderId, Result<(), Unavailable>)> = Vec::new();
     for target in targets {
-        match plan_for(action, target.folder, folders) {
-            Ok(_) => applies += 1,
+        let outcome = match planned.iter().find(|(folder, _)| *folder == target.folder) {
+            Some((_, outcome)) => *outcome,
+            None => {
+                let outcome = plan_for(action, target.folder, folders).map(|_| ());
+                planned.push((target.folder, outcome));
+                outcome
+            }
+        };
+        match outcome {
+            Ok(()) => applies += 1,
             Err(why) => {
                 first.get_or_insert((why, target.folder));
             }
@@ -289,6 +422,27 @@ pub fn star_action(targets: &[Target]) -> Triage {
     Triage::Star(!all)
 }
 
+/// Marks every target read unless all are read, then marks them unread (`u`, Superhuman's
+/// toggle, as Star's).
+pub fn read_action(targets: &[Target]) -> Triage {
+    let all = !targets.is_empty() && targets.iter().all(|target| target.flags.is_seen());
+    Triage::Read(!all)
+}
+
+/// Where a role folder goes in a list of folders: the sidebar's order, the others last.
+pub fn role_order(role: FolderRole) -> u8 {
+    match role {
+        FolderRole::Inbox => 0,
+        FolderRole::Archive => 1,
+        FolderRole::Drafts => 2,
+        FolderRole::Sent => 3,
+        FolderRole::Junk => 4,
+        FolderRole::Trash => 5,
+        FolderRole::All => 6,
+        FolderRole::Other => 7,
+    }
+}
+
 /// The folders Move to… offers for `targets`: their account's folders that take messages,
 /// except the one they are all in; role folders first in the sidebar's order, then the others
 /// by name. 1.0 doesn't move between accounts.
@@ -305,16 +459,7 @@ pub fn move_choices(targets: &[Target], folders: &[Folder]) -> Result<Vec<Folder
     };
     let sources: BTreeSet<FolderId> = targets.iter().map(|target| target.folder).collect();
     let current = (sources.len() == 1).then(|| *sources.first().expect("one folder"));
-    let order = |role: FolderRole| match role {
-        FolderRole::Inbox => 0,
-        FolderRole::Archive => 1,
-        FolderRole::Drafts => 2,
-        FolderRole::Sent => 3,
-        FolderRole::Junk => 4,
-        FolderRole::Trash => 5,
-        FolderRole::All => 6,
-        FolderRole::Other => 7,
-    };
+    let order = role_order;
     let mut choices: Vec<Folder> = folders
         .iter()
         .filter(|folder| folder.account == account && folder.selectable)
@@ -336,13 +481,51 @@ fn messages(count: u32) -> String {
     }
 }
 
+/// What a toast counts: the messages an action changed, or the conversations an action on
+/// conversation rows took (their members are the messages).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Counted {
+    #[default]
+    Messages,
+    Conversations(u32),
+}
+
+impl Counted {
+    fn text(self, applied: u32) -> String {
+        match self {
+            Counted::Messages => messages(applied),
+            Counted::Conversations(1) => "1 conversation".to_owned(),
+            Counted::Conversations(count) => format!("{count} conversations"),
+        }
+    }
+
+    /// Several rows: a change of read or star state shows a toast then.
+    fn several(self, targets: usize) -> bool {
+        match self {
+            Counted::Messages => targets > 1,
+            Counted::Conversations(count) => count > 1,
+        }
+    }
+}
+
 fn were(count: u32) -> &'static str {
     if count == 1 { "was" } else { "were" }
 }
 
 /// What a queued action did, in the toast's words.
 pub fn done_text(action: Triage, queued: &Queued, plans: &[Plan], folders: &[Folder]) -> String {
-    let n = messages(queued.applied);
+    done_text_of(action, queued, plans, folders, Counted::Messages)
+}
+
+/// [`done_text`], counting what `counted` says: "Archived 2 conversations".
+pub fn done_text_of(
+    action: Triage,
+    queued: &Queued,
+    plans: &[Plan],
+    folders: &[Folder],
+    counted: Counted,
+) -> String {
+    let n = counted.text(queued.applied);
     let to = |id: FolderId| folder_name(id, folders);
     let all_expunge = !plans.is_empty() && plans.iter().all(|plan| *plan == Plan::Expunge);
     let text = match action {
@@ -492,6 +675,58 @@ pub fn refused_text(change: Refused, count: u32, account: Option<&str>) -> Strin
     }
 }
 
+/// What a key says when its command is off (`ScopedShortcuts::connect_refused`): that nothing
+/// is selected, for a command on the selected messages, else why one of [`COMMANDS`] applies
+/// to none of them (`reason`, its tooltip's: "Already archived"). `None` leaves the key alone:
+/// Open Message's Enter is the focused widget's own, and the others have nothing to say.
+pub fn refused_key_text(
+    id: ActionId,
+    nothing_selected: bool,
+    reason: Option<&'static str>,
+) -> Option<String> {
+    if id == ActionId::OpenMessage {
+        return None;
+    }
+    if nothing_selected {
+        return id
+            .spec()
+            .needs_selection
+            .then(|| "No message selected".to_owned());
+    }
+    reason.map(capitalised)
+}
+
+/// Has `keys` (the list's, the reader's) say in a toast why a command on the selected messages
+/// is off ([`refused_key_text`]): `e` with nothing selected, or in the Archive folder, did
+/// nothing and said nothing.
+pub fn explain_keys(state: &Rc<AppState>, keys: &ScopedShortcuts) {
+    let weak = Rc::downgrade(state);
+    keys.connect_refused(move |id| {
+        let Some(state) = weak.upgrade() else {
+            return false;
+        };
+        let Some(list) = state.list() else {
+            return false;
+        };
+        let positions = list.selected_positions();
+        let reason = COMMANDS
+            .contains(&id)
+            .then(|| {
+                let targets: Vec<Target> = positions
+                    .iter()
+                    .filter_map(|position| list.target_at(*position))
+                    .collect();
+                availability(id, &targets, &state.mailbox().folders()).reason
+            })
+            .flatten();
+        let text = refused_key_text(id, positions.is_empty(), reason);
+        if let Some(text) = &text {
+            state.show_notice(&Notice::plain(text.clone()), false);
+        }
+        text.is_some()
+    });
+}
+
 /// Where an action came from: the user's commands become the last action, which Undo undoes;
 /// a message marked read because it was opened doesn't.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -550,6 +785,8 @@ struct Inner {
     in_flight: Cell<u32>,
     /// [`UNDO_WINDOW`], shorter in the self-test.
     window: Cell<Duration>,
+    /// How long the toast of the [`Controller::queue_with`] under way shows at least.
+    also_shown: Cell<Duration>,
 }
 
 impl Controller {
@@ -567,6 +804,7 @@ impl Controller {
                 queued: Cell::new(0),
                 in_flight: Cell::new(0),
                 window: Cell::new(UNDO_WINDOW),
+                also_shown: Cell::new(Duration::ZERO),
             }),
         }
     }
@@ -586,8 +824,9 @@ impl Controller {
         self.inner.window.set(window);
     }
 
-    /// Runs `work` on the main loop, counted while it waits for the backend.
-    fn spawn(&self, work: impl Future<Output = ()> + 'static) {
+    /// Runs `work` on the main loop, counted while it waits for the backend (or, for an action
+    /// on conversation rows, for the read of their members before it queues).
+    pub fn spawn(&self, work: impl Future<Output = ()> + 'static) {
         let inner = self.inner.clone();
         inner.in_flight.set(inner.in_flight.get() + 1);
         glib::spawn_future_local(async move {
@@ -658,7 +897,19 @@ impl Controller {
     /// Queues `action` on `targets` and reports it when the backend answers. The store gets
     /// the request before this returns.
     pub fn queue(&self, action: Triage, targets: Vec<Target>, origin: Origin) {
-        let Some(outcome) = self.start(action, targets, origin) else {
+        self.queue_counted(action, targets, origin, Counted::Messages);
+    }
+
+    /// [`Controller::queue`], its toast counting what `counted` says: the conversations an
+    /// action on conversation rows took, whose members are `targets`.
+    pub fn queue_counted(
+        &self,
+        action: Triage,
+        targets: Vec<Target>,
+        origin: Origin,
+        counted: Counted,
+    ) {
+        let Some(outcome) = self.start(action, targets, origin, counted) else {
             return;
         };
         let this = self.clone();
@@ -673,20 +924,52 @@ impl Controller {
     /// toast says `lead` after what the action did, and its Undo also runs `undo` (M9: Always
     /// and Never Junk Messages from Sender, whose sender a rules list gained).
     pub fn queue_with(&self, action: Triage, targets: Vec<Target>, lead: String, undo: Also) {
-        let Some(outcome) = self.start(action, targets, Origin::User) else {
+        self.queue_with_counted(action, targets, Counted::Messages, lead, undo);
+    }
+
+    /// [`Controller::queue_with`], its toast counting what `counted` says.
+    fn queue_with_counted(
+        &self,
+        action: Triage,
+        targets: Vec<Target>,
+        counted: Counted,
+        lead: String,
+        undo: Also,
+    ) {
+        let Some(outcome) = self.start(action, targets, Origin::User, counted) else {
             return;
         };
         let this = self.clone();
+        let at_least = self.inner.also_shown.get();
         self.spawn(async move {
             let Some(mut notice) = this.finish(outcome).await else {
                 return;
             };
             notice.text = format!("{}. {lead}", notice.text);
+            notice.shown = notice.shown.max(at_least);
             if let Some(batch) = notice.undo {
                 this.inner.also.replace(Some((batch, undo)));
             }
             this.notify(&notice);
         });
+    }
+
+    /// [`Controller::queue_with`], its toast counting what `counted` says and showing for
+    /// `shown` at least: as long as the change beside the action can be undone (the fork's Send
+    /// and Archive: the send's undo window, `[compose] undo_send_seconds`, which may be longer
+    /// than this one).
+    pub fn queue_with_shown(
+        &self,
+        action: Triage,
+        targets: Vec<Target>,
+        counted: Counted,
+        lead: String,
+        undo: Also,
+        shown: Duration,
+    ) {
+        self.inner.also_shown.set(shown);
+        self.queue_with_counted(action, targets, counted, lead, undo);
+        self.inner.also_shown.set(Duration::ZERO);
     }
 
     /// Makes `batch`, queued outside the controller (rules the user ran on a folder, ADR-020),
@@ -702,11 +985,17 @@ impl Controller {
         targets: Vec<Target>,
         origin: Origin,
     ) -> Option<Notice> {
-        let outcome = self.start(action, targets, origin)?;
+        let outcome = self.start(action, targets, origin, Counted::Messages)?;
         self.finish(outcome).await
     }
 
-    fn start(&self, action: Triage, targets: Vec<Target>, origin: Origin) -> Option<Started> {
+    fn start(
+        &self,
+        action: Triage,
+        targets: Vec<Target>,
+        origin: Origin,
+        counted: Counted,
+    ) -> Option<Started> {
         if targets.is_empty() {
             return None;
         }
@@ -723,9 +1012,9 @@ impl Controller {
         };
         let pending = self.inner.backend.queue(action, &targets, not_before);
         self.inner.queued.set(self.inner.queued.get() + 1);
-        // A single message's read or star change shows in place and toggles back with its
-        // key; it gets no toast and leaves the last action as it was.
-        let notable = origin == Origin::User && (leaves || targets.len() > 1);
+        // A single message's (or conversation's) read or star change shows in place and toggles
+        // back with its key; it gets no toast and leaves the last action as it was.
+        let notable = origin == Origin::User && (leaves || counted.several(targets.len()));
         // A local account has no server and deletes for good at once: nothing to undo.
         let accounts = self.inner.directory.accounts();
         let deleted_now = !plans.is_empty()
@@ -744,6 +1033,7 @@ impl Controller {
             folders,
             notable,
             deleted_now,
+            counted,
         })
     }
 
@@ -755,6 +1045,7 @@ impl Controller {
             folders,
             notable,
             deleted_now,
+            counted,
         } = started;
         let queued = pending.await;
         self.answered();
@@ -782,7 +1073,7 @@ impl Controller {
             self.set_last(Some(batch));
         }
         Some(Notice {
-            text: done_text(action, &queued, &plans, &folders),
+            text: done_text_of(action, &queued, &plans, &folders, counted),
             undo,
             shown: self.window(),
         })
@@ -931,6 +1222,7 @@ struct Started {
     notable: bool,
     /// Deleted for good in local accounts, at once: no Undo to offer.
     deleted_now: bool,
+    counted: Counted,
 }
 
 /// Unix milliseconds, the store's time.
@@ -1001,6 +1293,27 @@ mod tests {
     use super::*;
     use sealwax_domain::account::AccountKey;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_key_whose_command_is_off_says_why() {
+        let said = |id, nothing, reason| refused_key_text(id, nothing, reason);
+        assert_eq!(
+            said(ActionId::Archive, true, None).as_deref(),
+            Some("No message selected")
+        );
+        assert_eq!(
+            said(ActionId::Reply, true, None).as_deref(),
+            Some("No message selected")
+        );
+        assert_eq!(
+            said(ActionId::Archive, false, Some("already archived")).as_deref(),
+            Some("Already archived")
+        );
+        // Nothing to say: the key goes on as before.
+        assert_eq!(said(ActionId::Archive, false, None), None);
+        assert_eq!(said(ActionId::NextInConversation, true, None), None);
+        assert_eq!(said(ActionId::OpenMessage, true, None), None);
+    }
 
     fn folder(id: i64, account: i64, role: FolderRole, name: &str) -> Folder {
         Folder {
@@ -1113,6 +1426,38 @@ mod tests {
         assert_eq!(star_action(&every), Triage::Star(false));
         assert_eq!(availability(ActionId::Star, &some, &all).title, "Star");
         assert_eq!(availability(ActionId::Star, &every, &all).title, "Unstar");
+    }
+
+    #[test]
+    fn u_marks_read_unless_all_are_read_then_unread() {
+        let all = folders();
+        let unread = [target(1, 1, Flags::NONE), target(2, 1, Flags::SEEN)];
+        let read = [target(1, 1, Flags::SEEN), target(2, 1, Flags::SEEN)];
+        assert_eq!(read_action(&unread), Triage::Read(true));
+        assert_eq!(read_action(&read), Triage::Read(false));
+        assert_eq!(read_action(&[]), Triage::Read(true));
+        let toggle = availability(ActionId::ToggleRead, &unread, &all);
+        assert_eq!((toggle.title, toggle.applies), ("Mark as Read", 1));
+        let toggle = availability(ActionId::ToggleRead, &read, &all);
+        assert_eq!((toggle.title, toggle.applies), ("Mark as Unread", 2));
+        assert!(!availability(ActionId::ToggleRead, &[], &all).enabled());
+        // Star's toggle, for comparison: the same rule on stars.
+        assert_eq!(star_action(&read), Triage::Star(true));
+    }
+
+    #[test]
+    fn a_batch_in_one_folder_is_planned_once_and_says_why_not() {
+        let all = folders();
+        let archived: Vec<Target> = (0..500).map(|id| target(id, 2, Flags::SEEN)).collect();
+        let availability = availability(ActionId::Archive, &archived, &all);
+        assert_eq!(availability.applies, 0);
+        assert_eq!(availability.reason, Some("already archived"));
+        let mut mixed = archived.clone();
+        mixed.push(target(900, 1, Flags::NONE));
+        assert_eq!(
+            super::availability(ActionId::Archive, &mixed, &all).applies,
+            1
+        );
     }
 
     #[test]
@@ -1648,5 +1993,189 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    fn member(thread: i64, id: i64, date: i64, flags: Flags) -> ConversationMember {
+        ConversationMember {
+            thread: ThreadId(thread),
+            id: MessageId(id),
+            folder: FolderId(1),
+            flags,
+            date,
+            has_attachments: false,
+        }
+    }
+
+    fn ids(targets: &[Target]) -> Vec<i64> {
+        targets.iter().map(|target| target.id.0).collect()
+    }
+
+    #[test]
+    fn actions_on_conversation_rows_act_on_their_members_by_the_rules() {
+        let read = Flags::SEEN;
+        let starred = Flags::SEEN | Flags::FLAGGED;
+        // Conversation 7: read, read and starred, unread; conversation 8: all read, its newest
+        // first in the read (the store reads each conversation oldest first, but nothing here
+        // leans on it).
+        let members = [
+            member(7, 71, 10, read),
+            member(7, 72, 20, starred),
+            member(7, 73, 30, Flags::NONE),
+            member(8, 82, 50, read),
+            member(8, 81, 40, read),
+        ];
+        // Moves take every member.
+        for action in [
+            Triage::Archive,
+            Triage::Delete,
+            Triage::Junk,
+            Triage::MoveTo(FolderId(5)),
+        ] {
+            assert_eq!(
+                ids(&conversation_targets(action, &members)),
+                [71, 72, 73, 82, 81]
+            );
+        }
+        // Mark as Read: the unread members.
+        assert_eq!(
+            ids(&conversation_targets(Triage::Read(true), &members)),
+            [73]
+        );
+        // Mark as Unread: the newest of each conversation with nothing unread.
+        assert_eq!(
+            ids(&conversation_targets(Triage::Read(false), &members)),
+            [82]
+        );
+        // Star: the newest of each conversation with nothing starred; Unstar: every starred.
+        assert_eq!(
+            ids(&conversation_targets(Triage::Star(true), &members)),
+            [82]
+        );
+        assert_eq!(
+            ids(&conversation_targets(Triage::Star(false), &members)),
+            [72]
+        );
+        assert!(conversation_targets(Triage::Archive, &[]).is_empty());
+        // A member's own folder and flags go with it.
+        let target = conversation_targets(Triage::Read(true), &members)[0];
+        assert_eq!((target.folder, target.flags), (FolderId(1), Flags::NONE));
+    }
+
+    /// Select All on a folder of 41,336 conversations and Star (phase B's review): finding each
+    /// member's conversation by a search took 405 ms in a release build (minutes in a debug
+    /// one); by thread it takes milliseconds, the conversations still in the read's order.
+    #[test]
+    fn conversations_are_grouped_in_one_pass() {
+        let conversations = 60_000;
+        let members: Vec<ConversationMember> = (0..conversations)
+            .flat_map(|thread| {
+                [
+                    member(thread, 2 * thread, 10, Flags::SEEN),
+                    member(thread, 2 * thread + 1, 20, Flags::SEEN),
+                ]
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let starred = conversation_targets(Triage::Star(true), &members);
+        let took = started.elapsed();
+        assert_eq!(starred.len(), conversations as usize);
+        assert_eq!(
+            ids(&starred[..2]),
+            [1, 3],
+            "each conversation's newest, in order"
+        );
+        assert!(
+            took < Duration::from_secs(3),
+            "grouping {conversations} conversations took {took:?}"
+        );
+    }
+
+    #[test]
+    fn a_conversation_row_stands_as_its_anchor_with_its_members_state() {
+        let summary = |unread, flagged| ConversationSummary {
+            thread: ThreadId(7),
+            account: AccountId(1),
+            anchor: MessageId(73),
+            folder: FolderId(1),
+            last_member: MessageId(74),
+            latest: MessageId(75),
+            date: 0,
+            sender_name: String::new(),
+            sender_email: String::new(),
+            snippet: String::new(),
+            subject: String::new(),
+            participants: Vec::new(),
+            participant_count: 0,
+            messages: 3,
+            members: 3,
+            unread,
+            flagged,
+            attachments: 0,
+            has_draft: false,
+        };
+        let unread = Target::of_conversation(&summary(2, 0));
+        assert_eq!((unread.id, unread.folder), (MessageId(73), FolderId(1)));
+        assert!(!unread.flags.is_seen() && !unread.flags.is_flagged());
+        let read = Target::of_conversation(&summary(0, 1));
+        assert!(read.flags.is_seen() && read.flags.is_flagged());
+        // `u` and Star decide by the conversations: read unless every one is read, star
+        // unless every one is starred.
+        assert_eq!(read_action(&[unread, read]), Triage::Read(true));
+        assert_eq!(read_action(&[read]), Triage::Read(false));
+        assert_eq!(star_action(&[unread, read]), Triage::Star(true));
+        assert_eq!(star_action(&[read]), Triage::Star(false));
+        let all = folders();
+        // Available as one per conversation: Mark as Read applies to the unread one.
+        assert_eq!(
+            availability(ActionId::MarkRead, &[unread, read], &all).applies,
+            1
+        );
+        assert_eq!(availability(ActionId::Star, &[read], &all).title, "Unstar");
+        assert_eq!(
+            Target::of_row(&ListRow::Conversation(summary(0, 0))),
+            Target::of_conversation(&summary(0, 0))
+        );
+    }
+
+    #[test]
+    fn toasts_count_conversations_for_conversation_rows() {
+        let queued = Queued {
+            applied: 5,
+            ..Queued::default()
+        };
+        let all = folders();
+        let to = |folder: i64| Plan::Move {
+            to: FolderId(folder),
+            add: Flags::NONE,
+            remove: Flags::NONE,
+        };
+        assert_eq!(
+            done_text_of(
+                Triage::Archive,
+                &queued,
+                &[to(2); 5],
+                &all,
+                Counted::Conversations(1)
+            ),
+            "Archived 1 conversation"
+        );
+        assert_eq!(
+            done_text_of(
+                Triage::Read(true),
+                &queued,
+                &[],
+                &all,
+                Counted::Conversations(2)
+            ),
+            "Marked 2 conversations as read"
+        );
+        assert_eq!(
+            done_text(Triage::Archive, &queued, &[to(2); 5], &all),
+            "Archived 5 messages"
+        );
+        // One conversation's read or star change is no toast; two are.
+        assert!(!Counted::Conversations(1).several(4));
+        assert!(Counted::Conversations(2).several(2));
+        assert!(Counted::Messages.several(2));
     }
 }

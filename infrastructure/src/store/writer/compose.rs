@@ -28,6 +28,11 @@ use std::collections::BTreeSet;
 type Sender<T> = async_channel::Sender<Result<T, StoreError>>;
 
 pub(crate) enum ComposeJob {
+    SaveAuto {
+        save: Box<SaveDraft>,
+        checked: StoreVersion,
+        reply: Sender<DraftSaved>,
+    },
     Save {
         save: Box<SaveDraft>,
         reply: Sender<DraftSaved>,
@@ -593,6 +598,13 @@ impl State {
 impl Writer {
     pub(crate) fn compose_job(&mut self, job: ComposeJob) {
         match job {
+            ComposeJob::SaveAuto {
+                save,
+                checked,
+                reply,
+            } => {
+                let _ = reply.try_send(self.save_auto_reply(&save, checked));
+            }
             ComposeJob::Save { save, reply } => {
                 let _ = reply.try_send(self.save_draft(&save));
             }
@@ -733,6 +745,30 @@ impl Writer {
         }
         // A job that failed half-way publishes none of its outbox changes.
         self.state.outbox.clear();
+    }
+
+    fn save_auto_reply(
+        &mut self,
+        save: &SaveDraft,
+        checked: StoreVersion,
+    ) -> Result<DraftSaved, StoreError> {
+        let Some(source) = save.draft.source else {
+            return Ok(DraftSaved::Gone);
+        };
+        if save.id.is_some() || save.open || self.state.version != checked.0 {
+            return Ok(DraftSaved::Gone);
+        }
+        let busy: bool = self.conn.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM messages WHERE id = ?1) OR EXISTS(
+               SELECT 1 FROM drafts d JOIN messages m ON m.id = d.source_message
+               WHERE m.thread_id = (SELECT thread_id FROM messages WHERE id = ?1))",
+            [source.message.0],
+            |row| row.get(0),
+        )?;
+        if busy {
+            return Ok(DraftSaved::Gone);
+        }
+        self.save_draft(save)
     }
 
     fn save_draft(&mut self, save: &SaveDraft) -> Result<DraftSaved, StoreError> {
@@ -1036,7 +1072,7 @@ impl Writer {
             tracing::warn!(
                 sends = building.len(),
                 copies,
-                "messages left being built when Sealwax stopped aren't built again by themselves"
+                "messages left being built when Pronto stopped aren't built again by themselves"
             );
         }
         self.state.commit_compose(tx, changes.clone(), &[])?;

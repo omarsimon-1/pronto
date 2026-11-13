@@ -1,0 +1,148 @@
+# Snippets (the fork's phase B, Superhuman's Use Snippet…): `snippets.toml` in the config folder,
+# read when it changes (a file with a mistake isn't applied: a toast says where, the previous
+# snippets stay). Ctrl+; opens the snippet picker, found by name, then by what a snippet says. In
+# the inline reply the chosen snippet goes in at the caret, its variables filled in from whom the
+# reply goes to and the sender, the caret where its {cursor} was, its recipients added; from the
+# list it starts a new message with its subject and recipients; in a card it goes in at the body's
+# caret. Ctrl+' does the same (`;` needs Shift on the Norwegian layout). The palette has Use
+# Snippet…. The stand-in backend; every name, address and text is fictional.
+# Run: tools/headless.sh 66 target/debug/pronto --self-test tests/selftest/snippets.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+composer-backend stand-in
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+write-file $TMP/config/pronto/snippets.toml "[[snippet]]\nname = \"Thanks\"\nbody = \"\"\"\nHi {first_name},\n\nThanks! {cursor}\n\n{my_name}\n\"\"\"\n\n[[snippet]]\nname = \"Introduction\"\nsubject = \"Meet {first_name}\"\nto = \"Kari Nordmann <kari@example.com>\"\ncc = [\"ola@example.org\"]\nbody = \"Hi {first_name}, meet Ola. {cursor}See you {date}.\"\n\n[[snippet]]\nname = \"Out of office\"\nbody = \"I'm away until Monday.\"\n"
+folder inbox Personal
+list-wait
+focus list
+wait-until assert-snippets 3
+
+# In the inline reply: the picker over the window, the reply's text and caret after.
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+wait-until assert-quick-reply to tomas@example.test
+key <Control>semicolon
+wait-until assert-picker shown true
+picker-shown-in 250
+assert-picker name snippet-picker
+assert-picker title "Use snippet"
+assert-dialog "Use snippet"
+assert-focus picker-search
+assert-picker rows 3
+assert-picker row 0 Thanks
+assert-picker has "Out of office" "I'm away until Monday."
+# Each preview reads as the snippet would go in, its variables filled in for this reply and no
+# {cursor}, left-aligned in one column after the names (phase C's visual QA); the field finds.
+assert-picker has Thanks "Hi Tomas, Thanks! Personal"
+assert-picker icon system-search-symbolic
+wait-until assert-picker details column
+# Found by name first, then by what it says.
+type monday
+assert-picker rows 1
+assert-picker chosen "Out of office"
+picker-type zzz
+assert-picker rows 1
+assert-picker row 0 "No snippet matches “zzz”"
+picker-type than
+assert-picker chosen Thanks
+key Return
+assert-picker shown false
+wait-until assert-quick-reply text "Hi Tomas,\n\nThanks! \n\nPersonal"
+assert-quick-reply focused true
+assert-quick-caret 19
+type "Vi ses."
+assert-quick-reply text "Hi Tomas,\n\nThanks! Vi ses.\n\nPersonal"
+# A snippet's recipients join whom the reply goes to.
+key <Control>apostrophe
+wait-until assert-picker shown true
+picker-choose Introduction
+wait-until assert-quick-reply to tomas@example.test,kari@example.com
+assert-quick-reply cc ola@example.org
+assert-quick-reply chosen true
+# Escape in the picker, or its key again, leaves the reply as it was.
+key <Control>semicolon
+wait-until assert-picker shown true
+key Escape
+assert-picker shown false
+assert-quick-reply focused true
+key <Control>semicolon
+wait-until assert-picker shown true
+key <Control>semicolon
+assert-picker shown false
+assert-quick-reply focused true
+
+# From the list: a new message with the snippet's subject and recipients, the caret at {cursor}.
+key Escape
+key Escape
+wait-until assert-reader-on-screen false
+key <Control>apostrophe
+wait-until assert-picker shown true
+picker-choose Introduction
+wait-until assert-composer count 1
+composer-wait
+wait-until assert-composer html-has "Hi Kari, meet Ola. See you "
+assert-composer subject "Meet Kari"
+assert-composer chips to kari@example.com
+assert-composer chips cc ola@example.org
+assert-composer focus body
+composer-insert "Her er Ola."
+assert-composer html-has "meet Ola. Her er Ola.See you "
+
+# In a card: at the body's caret, its first recipient's name.
+composer-caret end
+key <Control>semicolon
+wait-until assert-picker shown true
+picker-choose Thanks
+wait-until assert-composer html-has "Hi Kari,"
+assert-composer focus body
+# The caret goes where {cursor} is, whatever comes after it: an emoji with its skin tone is one
+# character to the eye, two to Unicode.
+write-file $TMP/config/pronto/snippets.toml "[[snippet]]\nname = \"Thanks\"\nbody = \"Thanks! {cursor}\"\n\n[[snippet]]\nname = \"Thumbs\"\nbody = \"A{cursor}B 👍🏽 C\"\n\n[[snippet]]\nname = \"Introduction\"\nbody = \"Meet Ola.\"\n\n[[snippet]]\nname = \"Out of office\"\nbody = \"I'm away until Monday.\"\n"
+wait-until assert-snippets 4
+composer-caret end
+key <Control>semicolon
+wait-until assert-picker shown true
+picker-choose Thumbs
+wait-until assert-composer html-has "AB 👍🏽 C"
+composer-type "Y"
+# WebKit applies typed keys after GTK has seen them (composer-editing does the same).
+wait-until assert-composer html-has "AYB 👍🏽 C"
+composer-close
+wait-until assert-composer count 0
+
+# The palette has it.
+focus list
+key <Control>k
+assert-palette open true
+type "snippet"
+assert-palette selected "Use Snippet…"
+key Return
+wait-until assert-picker shown true
+assert-picker name snippet-picker
+key Escape
+assert-picker shown false
+
+# A mistake isn't applied: the toast says where, the snippets stay.
+write-file $TMP/config/pronto/snippets.toml "[[snippet]]\nname = \"Hi\"\nbody = \"Hi {frist_name}\"\n"
+wait-until assert-toast "snippets.toml not applied: line 3, column 12: unknown variable {frist_name}; did you mean {first_name}?; the variables are {first_name}, {last_name}, {name}, {my_name}, {my_first_name}, {date}, {cursor}"
+assert-snippets 4
+# With none, the picker offers to make the file.
+write-file $TMP/config/pronto/snippets.toml "# none yet\n"
+wait-until assert-snippets 0
+key <Control>semicolon
+wait-until assert-picker shown true
+assert-picker rows 1
+assert-picker has "Edit Snippets (snippets.toml)" "No snippets yet"
+key Escape
+assert-labelled

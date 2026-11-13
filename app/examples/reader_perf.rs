@@ -5,13 +5,15 @@
 //! frame GTK painted, also by the conversation's size. Then (ML-057) it opens the sample
 //! conversations (`reader::samples`: six messages, ten with three newsletters, eight newsletters,
 //! 150 messages) from a scratch store, each ten times. Headless numbers come from software
-//! rendering under Broadway; the live measurement is separate.
+//! rendering under Broadway; the live measurement is separate. `--prefetch` hands the reader the
+//! next and previous messages after each open, as the app's list does (`Reader::prefetch`), so
+//! the opens time the swap of a conversation laid out ahead (the fork's Superhuman pass).
 //!
 //! ```sh
-//! cargo build --release -p sealwax-fixtures -p sealwax --example reader_perf
+//! cargo build --release -p sealwax-fixtures -p pronto --example reader_perf
 //! target/release/sealwax-fixtures import --count 2000 --seed 1 \
 //!     --store .local/reader-examples/perf/store.sqlite
-//! SEALWAX_HEADLESS_TIMEOUT=600 tools/headless.sh 37 target/release/examples/reader_perf \
+//! PRONTO_HEADLESS_TIMEOUT=600 tools/headless.sh 37 target/release/examples/reader_perf \
 //!     --store .local/reader-examples/perf/store.sqlite --count 200   # or --ids 12,34
 //! ```
 
@@ -42,18 +44,22 @@ struct Args {
     back_to_back: bool,
     /// These messages instead of the Inbox's newest.
     ids: Vec<MessageId>,
+    /// After each open, the next and previous messages are laid out ahead.
+    prefetch: bool,
 }
 
 fn args() -> Result<Args, String> {
     let mut store = None;
     let mut count = 200;
     let mut back_to_back = false;
+    let mut prefetch = false;
     let mut ids = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--store" => store = args.next().map(PathBuf::from),
             "--back-to-back" => back_to_back = true,
+            "--prefetch" => prefetch = true,
             "--ids" => {
                 ids = args
                     .next()
@@ -77,6 +83,7 @@ fn args() -> Result<Args, String> {
         count,
         back_to_back,
         ids,
+        prefetch,
     })
 }
 
@@ -123,7 +130,7 @@ fn main() -> glib::ExitCode {
     };
     let cache = support::scratch("perf-cache");
     let app = adw::Application::builder()
-        .application_id("io.github.pixdevsapps.Sealwax.ReaderPerf")
+        .application_id("io.github.omarsimon1.Pronto.ReaderPerf")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let passed = Rc::new(Cell::new(false));
@@ -141,11 +148,19 @@ fn main() -> glib::ExitCode {
             let _input = input.clone();
             let count = args.count;
             let back_to_back = args.back_to_back;
+            let prefetch = args.prefetch;
             let chosen = args.ids.clone();
             let cache = cache.clone();
             glib::spawn_future_local(async move {
-                let fixtures =
-                    measure(&store, &reader, &window, count, &chosen, back_to_back).await;
+                let fixtures = measure(
+                    &store,
+                    &reader,
+                    &window,
+                    count,
+                    &chosen,
+                    (back_to_back, prefetch),
+                )
+                .await;
                 reader.clear();
                 let samples = conversations(&theme, &cache, &window).await;
                 match (fixtures, samples) {
@@ -229,7 +244,7 @@ async fn measure(
     window: &sealwax_app::window::Window,
     count: u32,
     chosen: &[MessageId],
-    back_to_back: bool,
+    (back_to_back, prefetch): (bool, bool),
 ) -> Result<bool, String> {
     let reports = support::shown_reports(reader);
     support::resize(window.window(), 1440, 900).await?;
@@ -240,7 +255,7 @@ async fn measure(
         chosen.to_vec()
     };
     println!(
-        "PERF ENV messages={} live_views_before={} build={} mode={}",
+        "PERF ENV messages={} live_views_before={} build={} mode={}{}",
         ids.len(),
         reader.state().live_views,
         if cfg!(debug_assertions) {
@@ -252,6 +267,11 @@ async fn measure(
             "back-to-back"
         } else {
             "settled (two frames and 250 ms before each open)"
+        },
+        if prefetch {
+            ", the next and previous laid out ahead"
+        } else {
+            ""
         }
     );
     let mut ok = true;
@@ -263,6 +283,17 @@ async fn measure(
         for (index, id) in ids.iter().enumerate() {
             let (shown, first_paint) =
                 open_timed(reader, &reports, window, *id, back_to_back).await?;
+            if prefetch {
+                let around: Vec<MessageId> = [
+                    ids.get(index + 1),
+                    index.checked_sub(1).and_then(|at| ids.get(at)),
+                ]
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect();
+                reader.prefetch(&around);
+            }
             let ready_ms = shown.ready.as_secs_f64() * 1000.0;
             if std::env::var_os("READER_PERF_ROWS").is_some() {
                 println!(

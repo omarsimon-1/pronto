@@ -5,9 +5,9 @@
 //! batch does.
 
 use super::{
-    RowChange, Writer, below_counts, folder_counts, free_uid, fts_doc, insert_message, overlay,
-    overlay_new, recompute_thread, removed_positions, resolve_thread, thread_counts, upsert_rows,
-    view_changes,
+    RowChange, Writer, below_counts, folder_counts, free_uid, fts_doc, fts_owed, insert_message,
+    overlay, overlay_new, recompute_thread, removed_positions, resolve_thread, thread_counts,
+    upsert_rows, view_changes, view_changes_except,
 };
 use crate::store::api::{
     ChangeEvent, FolderSpec, StoreVersion, ThreadMerge, Versioned, ViewChange, ViewDiff, ViewId,
@@ -17,7 +17,7 @@ use crate::store::overlay::{Change, HIDDEN};
 use crate::store::sync_api::{
     FlagUpdate, FolderChanges, FolderSynced, FoldersReplaced, ServerStatus,
 };
-use crate::store::{RefusedChange, StoreError, codec, views};
+use crate::store::{RefusedChange, StoreError, codec, remind, views};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use sealwax_domain::model::{AccountId, BlobKey, Flags, FolderId, MessageId, ThreadId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -256,6 +256,8 @@ impl Writer {
         for merge in &merged_threads {
             threads.remove(&merge.from);
         }
+        super::retire_merged(&tx, &merged_threads)?;
+        super::final_merges(&mut merged_threads);
         if let Some(uidnext) = changes.uidnext {
             tx.prepare_cached("UPDATE folders SET uidnext = max(uidnext, ?2) WHERE id = ?1")?
                 .execute(params![folder.0, uidnext])?;
@@ -280,6 +282,7 @@ impl Writer {
             .execute(params![folder.0, older_unread])?;
         }
         refusals.record(&tx)?;
+        let owed = fts_owed(&tx, &docs)?;
         let mut synced = FolderSynced {
             version: StoreVersion(self.state.version),
             inserted: count(inserted.len()),
@@ -291,6 +294,7 @@ impl Writer {
         if rows.is_empty() && below_counts(&tx, folder)? == below_before {
             tx.commit()?;
             drop(open);
+            self.state.unindexed.extend(owed);
             self.state.after_commit();
             return Ok(synced);
         }
@@ -311,6 +315,7 @@ impl Writer {
         };
         synced.version = self.state.commit(tx, event)?;
         drop(open);
+        self.state.unindexed.extend(owed);
         if !docs.is_empty()
             && let Err(error) = self.index_docs(&docs)
         {
@@ -333,6 +338,10 @@ impl Writer {
         if super::pop3::is_pop3(&tx, account)? {
             return Err(StoreError::NotPop3(account));
         }
+        // A Reminders folder the store made that the server doesn't list yet stays while a
+        // move into it waits (the fork's Remind Me; the engine creates it first).
+        let kept = remind::keep_unlisted(&tx, account, folders)?;
+        let folders = kept.as_deref().unwrap_or(folders);
         if let Some(ids) = unchanged(&tx, account, folders)? {
             // The usual account pass: the same list. Only a new folder's STATUS counts may
             // have moved, and nothing else is written or published.
@@ -558,28 +567,27 @@ pub(super) fn drop_folders(
             }
         }
     }
-    let mut views = Vec::new();
-    for (view, spec) in open {
-        let affected = match spec.scope {
+    let reloaded: BTreeSet<ViewId> = open
+        .iter()
+        .filter(|(_, spec)| match spec.scope {
             ViewScope::Folder(folder) => gone.contains(&folder),
             ViewScope::UnifiedInbox => true,
-        };
-        if affected {
-            let folders = views::folders(tx, spec.scope)?;
-            views.push(ViewChange {
-                view: *view,
-                diff: ViewDiff::Reload {
-                    total: views::count(tx, &folders, spec.filter)?,
-                },
-            });
-        }
+        })
+        .map(|(view, _)| *view)
+        .collect();
+    // The other views' diffs first: they settle the conversation table, which the reloads'
+    // conversation totals read.
+    let diffs = view_changes_except(tx, open, &rows, &positions, &reloaded)?;
+    let mut views = Vec::new();
+    for view in &reloaded {
+        views.push(ViewChange {
+            view: *view,
+            diff: ViewDiff::Reload {
+                total: views::total(tx, open[view])?,
+            },
+        });
     }
-    let reloaded: BTreeSet<_> = views.iter().map(|change| change.view).collect();
-    views.extend(
-        view_changes(tx, open, &rows, &positions)?
-            .into_iter()
-            .filter(|change| !reloaded.contains(&change.view)),
-    );
+    views.extend(diffs);
     Ok(Dropped {
         removed,
         threads,

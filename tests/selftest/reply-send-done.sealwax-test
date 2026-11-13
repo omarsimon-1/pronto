@@ -1,0 +1,166 @@
+# Sending from the inline reply for real (the fork's phase B), with the app's store backend and
+# the fake engine, in the app's own layout (Focused). Send (Ctrl+Enter) shows one toast,
+# "Sending…" with Undo for the undo window (`[compose] undo_send_seconds`, 3 s here), which loses
+# its Undo when the window ends and says "Message sent" when the server takes the message; Undo
+# puts the reply back under its conversation, focused, its draft gone. Send and Archive
+# (Ctrl+Shift+Enter, Superhuman's Send + Mark Done) sends, archives the conversation as `e`
+# archives it and moves on to the next; the archive's toast says the send goes, shows while
+# either can be taken back, and its Undo takes both back. With undo_send_seconds = 0 a send goes
+# at once, without Undo (Send and Archive's Undo takes back the archive alone). Every name,
+# address and text is fictional.
+# Run: tools/headless.sh 66 target/debug/pronto --self-test tests/selftest/reply-send-done.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test); the last part here takes one.
+grouping messages
+engine-attach
+triage-account Work work
+conversation-add trip Work
+conversation-add letters Work
+composer-backend store
+composer-limit none
+triage-mark-read-on-open false
+write-file $TMP/config/pronto/config.toml "[compose]\nundo_send_seconds = 3\n"
+folder inbox Work
+list-wait
+focus list
+
+# Send: one toast with Undo; Undo puts the reply back under its conversation, focused.
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+type "Takk, vi ses fredag."
+key <Control>Return
+wait-until assert-quick-sends 1
+assert-quick-send-last trip-6 "Takk, vi ses fredag." reply
+wait-until assert-toast "Sending…"
+assert-quick-reply text ""
+outbox-expect outbox-queued
+wait-until assert-outbox-entries 1
+assert-action-enabled win.undo true
+toast-click Undo
+wait-until assert-quick-reply text "Takk, vi ses fredag."
+assert-quick-reply focused true
+wait-until assert-toast "Send undone"
+# The toast keeps off the reply it put back (phase C's visual QA: it covered the reply's
+# footer, between Send and Pop Out): in the reader's margin at 1440 px.
+wait-until assert-toast-clear
+wait-until assert-outbox-entries 0
+
+# Sent again: after the window the toast keeps "Sending…" without Undo, then says the server
+# took it.
+key <Control>Return
+wait-until assert-toast "Sending…"
+outbox-name first
+sleep 3300
+assert-action-enabled win.undo false
+assert-toast "Sending…"
+assert-outbox first queued
+outbox-engine start first
+outbox-engine sent first
+wait-until assert-toast "Message sent"
+assert-outbox first sent
+
+# Send and Archive: sent, the message archived as `e` archives it, and the next one opens; the
+# toast says both, and its Undo takes both back.
+list-select 0
+wait-until assert-conversation selected trip-6
+assert-list-count 13
+key r
+type "Jeg tar med kaffe."
+key <Control><Shift>Return
+wait-until assert-quick-sends 3
+assert-quick-send-last trip-6 "Jeg tar med kaffe." reply
+wait-until assert-toast "Archived 1 message. Sending…"
+wait-until assert-list-count 12
+wait-until assert-conversation selected trip-5
+assert-reader-on-screen true
+# A card opened meanwhile: the toast is centred in the room beside it, clear of its Send.
+action win.compose
+composer-wait
+wait-until assert-toast-clear
+composer-close
+wait-until assert-composer count 0
+assert-toast "Archived 1 message. Sending…"
+outbox-name second
+assert-outbox second queued
+toast-click Undo
+wait-until assert-list-count 13
+wait-until assert-outbox second gone
+wait-until assert-toast "Undone"
+# The reply waits under its conversation for when it shows.
+list-select 0
+wait-until assert-conversation selected trip-6
+wait-until assert-quick-reply text "Jeg tar med kaffe."
+
+# The send's window longer than the archive's: the toast stays while the send can be taken back,
+# and its Undo takes both back.
+triage-undo-window 1000
+send-window 3000
+key <Control><Shift>Return
+wait-until assert-toast "Archived 1 message. Sending…"
+wait-until assert-list-count 12
+outbox-name fourth
+sleep 1800
+assert-toast "Archived 1 message. Sending…"
+assert-outbox fourth queued
+toast-click Undo
+wait-until assert-outbox fourth gone
+wait-until assert-list-count 13
+wait-until assert-toast "Undone"
+list-select 0
+wait-until assert-conversation selected trip-6
+wait-until assert-quick-reply text "Jeg tar med kaffe."
+send-window setting
+
+# Without an undo window a send goes at once: no Undo.
+write-file $TMP/config/pronto/config.toml "[compose]\nundo_send_seconds = 0\n"
+sleep 500
+action win.quick-reply
+key <Control>Return
+wait-until assert-toast "Sending…"
+outbox-name third
+assert-action-enabled win.undo false
+assert-outbox third queued
+# Send and Archive without one: the toast's Undo takes back the archive alone, as the send went.
+action win.quick-reply
+type "Til fredag."
+key <Control><Shift>Return
+wait-until assert-toast "Archived 1 message. Sending…"
+wait-until assert-list-count 12
+outbox-name fifth
+toast-click Undo
+wait-until assert-list-count 13
+wait-until assert-toast "Undone"
+assert-outbox fifth queued
+assert-conversation criticals 0
+
+# Send and Archive on a conversation row (the app's default since phase B, merged): the
+# conversation leaves the Inbox whole, as `e` takes it, the toast counts it, the next
+# conversation opens, and Undo brings it back with the send.
+write-file $TMP/config/pronto/config.toml "[compose]\nundo_send_seconds = 3\n"
+sleep 500
+grouping conversations
+list-select 0
+wait-until assert-selected-conversation trip-6
+assert-list-count 2
+action win.quick-reply
+type "Vi ses."
+key <Control><Shift>Return
+wait-until assert-toast "Archived 1 conversation. Sending…"
+wait-until assert-list-count 1
+wait-until assert-selected-conversation letters-1
+assert-reader-on-screen true
+outbox-name sixth
+assert-outbox sixth queued
+toast-click Undo
+wait-until assert-list-count 2
+wait-until assert-outbox sixth gone
+wait-until assert-toast "Undone"
+assert-conversation criticals 0

@@ -6,7 +6,7 @@
 # page loaded as a draft's body (a quote not cleaned upstream) runs no script and loads nothing
 # remote. The body follows a live theme switch. Every address is fictional; the canary listens
 # on 127.0.0.1 only.
-# Run: tools/headless.sh 42 target/debug/sealwax --self-test tests/selftest/composer-safety.sealwax-test
+# Run: tools/headless.sh 42 target/debug/pronto --self-test tests/selftest/composer-safety.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -18,7 +18,7 @@ composer-open new
 composer-wait
 assert-composer theme
 # The composer's web process runs in WebKit's sandbox (M9; tools/ci.sh sets
-# WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS for the self-tests, and Sealwax clears it).
+# WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS for the self-tests, and Pronto clears it).
 assert-web-sandbox
 
 # The hostile paste, through the real Ctrl+V.
@@ -93,3 +93,19 @@ wait-until assert-composer theme
 theme matte-black
 wait-until assert-composer theme
 assert-composer labelled
+# The card is the composer's surface, not the command palette's (phase B's tracks both named
+# theirs "raised"): minimized, the card is its bar alone. Adwaita dark tells them apart (the
+# palette's popover colour #36363a stands a step above the card's #2f2f33); in Omarchy themes
+# the card is at most the palette's step (one elevation order), matte-black's the same.
+composer-click composer-minimize
+assert-composer state minimized
+assert-color composer background composer
+palette adwaita
+color-scheme dark
+wait-until assert-composer theme
+assert-color composer background composer
+color-scheme default
+palette omarchy
+wait-until assert-composer theme
+composer-pointer composer-title
+assert-composer state open

@@ -4,7 +4,7 @@
 # the backend's send, and the box empties; Open Reply in Composer on an empty box opens a plain
 # reply; an earlier session's draft fills the box again; Undo send puts a quick reply's text back
 # in its box. Every name, address and text is fictional.
-# Run: tools/headless.sh 44 target/debug/sealwax --self-test tests/selftest/reply-quick-drafts.sealwax-test
+# Run: tools/headless.sh 44 target/debug/pronto --self-test tests/selftest/reply-quick-drafts.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -56,9 +56,10 @@ assert-quick-sends 1
 wait-until assert-stand-in quick-draft trip-6 none
 assert-compose-requests 0
 
-# Open Reply in Composer with nothing typed: a plain reply.
+# Open Reply in Composer with nothing typed: a plain reply, as the box answers (everyone, as
+# Enter does by default since phase C).
 key <Control><Shift>e
-assert-compose-last reply trip-6 reply
+assert-compose-last reply trip-6 reply-all
 composer-close
 
 # An earlier session's draft (closed, its body the quick reply's text) fills the box again, and
@@ -75,10 +76,10 @@ wait-until assert-stand-in quick-draft letters-8 "Thanks for the issue! See you.
 conversation-show trip-6
 assert-quick-reply text ""
 outbox-quick quick-one Work trip-6 "Back in the box"
-assert-toast "Message queued"
+assert-toast "Sending…"
 toast-click Undo
 wait-until assert-quick-reply text "Back in the box"
 wait-until assert-outbox quick-one gone
-wait-until assert-toast "Sending undone: the reply is back under its conversation"
+wait-until assert-toast "Send undone"
 assert-compose-requests 1
 assert-conversation criticals 0

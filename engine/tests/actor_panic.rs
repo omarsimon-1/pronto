@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 const WAIT: Duration = Duration::from_secs(20);
 /// What the fake server says after the response code; nothing of it may reach a log.
 const SERVER_TEXT: &str = "ServerOnlyText";
-const CHILD: &str = "SEALWAX_TEST_PANIC_REPORT_CHILD";
+const CHILD: &str = "PRONTO_TEST_PANIC_REPORT_CHILD";
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -114,7 +114,7 @@ async fn imap_protos_panic_restarts_the_account() {
         .unwrap(),
     );
     let engine = Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: store.clone(),
         blobs,
         paths: AccountPaths::new(&dirs),
@@ -122,6 +122,7 @@ async fn imap_protos_panic_restarts_the_account() {
         secrets: SecretBackend::Memory,
         detect: DetectOptions::default(),
         microsoft_client_id: None,
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig {
             options: SyncOptions {
@@ -228,7 +229,7 @@ async fn imap_protos_panic_restarts_the_account() {
     }
 }
 
-/// The panic's message names a character of the server's reply; Sealwax's report leaves it out.
+/// The panic's message names a character of the server's reply; Pronto's report leaves it out.
 #[test]
 fn a_dependencys_panic_is_reported_without_its_message() {
     if std::env::var_os(CHILD).is_some() {

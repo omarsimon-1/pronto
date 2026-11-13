@@ -24,6 +24,8 @@ pub struct Facts<'a> {
     /// The folder was synced before (it has a UIDVALIDITY), for example because the user opened
     /// it.
     pub synced_before: bool,
+    /// Its first sync finished (`SyncState::Ready`): everything from its floor up is stored.
+    pub first_synced: bool,
 }
 
 /// The roles that sync without being opened.
@@ -41,20 +43,36 @@ pub const SYNCED_ROLES: [FolderRole; 6] = [
 /// `\All` (Gmail's All Mail, which holds every other folder's messages again) never syncs by
 /// itself, even after it was opened.
 pub fn plan(facts: Facts<'_>) -> Plan {
-    let all = facts.role == FolderRole::All
-        || facts
-            .attributes
-            .iter()
-            .any(|attribute| attribute.eq_ignore_ascii_case("\\All"));
     if !facts.selectable {
         Plan::Skip
-    } else if all {
+    } else if all_mail(&facts) {
         Plan::Counts
     } else if SYNCED_ROLES.contains(&facts.role) || facts.synced_before {
         Plan::Sync
     } else {
         Plan::Counts
     }
+}
+
+/// `\All`: Gmail's All Mail, by its role or its LIST attribute.
+fn all_mail(facts: &Facts<'_>) -> bool {
+    facts.role == FolderRole::All
+        || facts
+            .attributes
+            .iter()
+            .any(|attribute| attribute.eq_ignore_ascii_case("\\All"))
+}
+
+/// Whether the op runner passes a move's or a copy's target right after it, to place what the
+/// store couldn't (no COPYUID, or a target never synced, which has no UIDVALIDITY to place by).
+/// Never into a `\All` folder whose first sync isn't done (the fork's Superhuman pass): on Gmail
+/// that is every Archive, the policy never syncs All Mail by itself, and that pass would be All
+/// Mail's first sync (the window's 5,000 headers, minutes at Gmail's pace) on the command
+/// connection, holding every op and send behind it, for a message All Mail held all along; and
+/// so would the rest of a first sync the user started by opening it once and left unfinished.
+/// The message leaves the source as before; All Mail keeps showing its STATUS counts.
+pub fn place_after_move(facts: Facts<'_>) -> bool {
+    facts.selectable && !(all_mail(&facts) && !facts.first_synced)
 }
 
 /// How far back a folder's first sync reaches (ML-043). The first sync keeps the newest
@@ -139,6 +157,7 @@ mod tests {
             attributes,
             selectable: true,
             synced_before,
+            first_synced: synced_before,
         }
     }
 
@@ -166,6 +185,35 @@ mod tests {
             ..facts(FolderRole::Inbox, &[], true)
         };
         assert_eq!(plan(container), Plan::Skip);
+    }
+
+    #[test]
+    fn a_move_never_first_syncs_all_mail() {
+        let all = ["\\All".to_owned()];
+        assert!(!place_after_move(facts(FolderRole::All, &[], false)));
+        assert!(
+            !place_after_move(facts(FolderRole::Other, &all, false)),
+            "by the attribute too"
+        );
+        assert!(
+            place_after_move(facts(FolderRole::All, &[], true)),
+            "opened once and synced: a pass, not a first sync"
+        );
+        assert!(
+            !place_after_move(Facts {
+                first_synced: false,
+                ..facts(FolderRole::All, &[], true)
+            }),
+            "opened once, its first sync left unfinished: no pass, which would go on with it"
+        );
+        for role in [FolderRole::Archive, FolderRole::Trash, FolderRole::Other] {
+            assert!(place_after_move(facts(role, &[], false)), "{role:?}");
+        }
+        let container = Facts {
+            selectable: false,
+            ..facts(FolderRole::Other, &[], false)
+        };
+        assert!(!place_after_move(container));
     }
 
     #[test]

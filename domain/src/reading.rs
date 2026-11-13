@@ -1,7 +1,7 @@
 //! What the reader needs from a raw message beyond what the store keeps (ML-064), from one
 //! parse: which text parts are `format=flowed` (RFC 3676), whether the message is encrypted
 //! (PGP/MIME, RFC 3156; S/MIME enveloped data, RFC 8551) or signed, and which parts are
-//! signatures that the attachment cards leave out. Sealwax 1.0 neither decrypts nor verifies:
+//! signatures that the attachment cards leave out. Pronto 1.0 neither decrypts nor verifies:
 //! encrypted mail says so in place of its body, and signed mail shows its content.
 
 use crate::flowed::Flowed;
@@ -51,10 +51,15 @@ const SMIME_SIGNATURES: [&str; 2] = [
 const SMIME_CONTENT: [&str; 2] = ["application/pkcs7-mime", "application/x-pkcs7-mime"];
 
 pub fn inspect(raw: &[u8]) -> Inspection {
+    MessageParser::default()
+        .parse(raw)
+        .map(|message| inspect_message(&message))
+        .unwrap_or_default()
+}
+
+/// [`inspect`] on a message already parsed (the reader parses each message once).
+pub(crate) fn inspect_message(message: &mail_parser::Message<'_>) -> Inspection {
     let mut found = Inspection::default();
-    let Some(message) = MessageParser::default().parse(raw) else {
-        return found;
-    };
     for (index, part) in message.parts.iter().enumerate() {
         let Ok(index) = u32::try_from(index) else {
             break;

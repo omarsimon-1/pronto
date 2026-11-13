@@ -51,7 +51,7 @@ const BATCH_SET: usize = 4_000;
 /// STORE and UID EXPUNGE commands sent before their replies are read.
 const PIPELINE: usize = 8;
 
-/// The IMAP names of the flags Sealwax changes.
+/// The IMAP names of the flags Pronto changes.
 const NAMES: [(Flags, &str); 8] = [
     (Flags::SEEN, "\\Seen"),
     (Flags::ANSWERED, "\\Answered"),
@@ -260,6 +260,7 @@ impl Selected {
 pub async fn select(conn: &mut Connection, name_raw: &str) -> Result<Selected, WriteError> {
     let command = format!("SELECT {}", quote(name_raw)?);
     conn.selected = None;
+    conn.noticed = false;
     let mut uidvalidity = None;
     let mut uidnext = None;
     let mut exists = 0;

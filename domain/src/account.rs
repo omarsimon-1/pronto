@@ -123,6 +123,18 @@ impl fmt::Debug for CertificatePin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OAuthProvider {
     Microsoft,
+    /// Gmail and Google Workspace (ADR-023).
+    Google,
+}
+
+impl OAuthProvider {
+    /// The provider's name as people know it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Microsoft => "Microsoft",
+            Self::Google => "Google",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -144,7 +156,7 @@ pub enum Receive {
     Pop3(Pop3Policy),
 }
 
-/// What happens on the POP3 server to mail Sealwax has downloaded (PRD A9).
+/// What happens on the POP3 server to mail Pronto has downloaded (PRD A9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Pop3Policy {
     /// Downloaded mail stays on the server.
@@ -265,7 +277,7 @@ pub struct AccountSettings {
     pub key: AccountKey,
     /// The sender name on outgoing mail.
     pub name: String,
-    /// What Sealwax calls the account in the sidebar, banners and menus; `None` shows the
+    /// What Pronto calls the account in the sidebar, banners and menus; `None` shows the
     /// address ([`AccountSettings::title`]).
     pub label: Option<String>,
     /// The account's colour in the sidebar; `None` keeps the theme's plain heading.
@@ -286,7 +298,7 @@ pub struct AccountSettings {
 }
 
 impl AccountSettings {
-    /// What Sealwax calls the account: its label, else its address.
+    /// What Pronto calls the account: its label, else its address.
     pub fn title(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.address)
     }
@@ -410,7 +422,7 @@ pub enum LoginFailure {
     /// The host doesn't resolve or refuses the connection.
     Unreachable,
     Timeout,
-    /// A POP3 server that doesn't number messages for good (no UIDL), so Sealwax can't tell what
+    /// A POP3 server that doesn't number messages for good (no UIDL), so Pronto can't tell what
     /// it has downloaded (M8).
     NoUidl,
     /// The mailbox is in use by another session, or the server wants a pause between logins

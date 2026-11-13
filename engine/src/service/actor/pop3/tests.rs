@@ -309,7 +309,7 @@ async fn harness(
     let (sender, events) = async_channel::unbounded();
     let shared = Arc::new(Shared::new(
         EngineConfig {
-            application: "io.github.pixdevsapps.Sealwax.Test".into(),
+            application: "io.github.omarsimon1.Pronto.Test".into(),
             store: Arc::new(store),
             blobs,
             paths: AccountPaths::new(&dirs),
@@ -317,6 +317,7 @@ async fn harness(
             secrets: SecretBackend::Memory,
             detect: DetectOptions::default(),
             microsoft_client_id: None,
+            google_client: None,
             sign_in: SignInOptions::default(),
             sync,
         },
@@ -342,7 +343,7 @@ async fn harness(
         .store(
             &key.0,
             SecretKind::Password,
-            "Sealwax test",
+            "Pronto test",
             b"fictional-pop-password",
         )
         .await
@@ -726,7 +727,7 @@ async fn not_leaving_mail_deletes_what_is_stored_at_quit() {
     assert!(uidls.iter().all(|uidl| uidl.deleted.is_some()));
     let inbox = h.folder(FolderRole::Inbox).await;
     assert_eq!(h.subjects(inbox).await.len(), 3, "the local copies stay");
-    // The next pass doesn't list them: Sealwax forgets their UIDLs, never their mail.
+    // The next pass doesn't list them: Pronto forgets their UIDLs, never their mail.
     let lists = h.fake.count("LIST");
     h.eventually(|| {
         let fake = h.fake.clone();
@@ -776,6 +777,51 @@ async fn nothing_is_deleted_from_the_server_that_the_store_didnt_record() {
     h.status(SyncStatus::Synced).await;
     assert!(h.fake.uidls().is_empty());
     let inbox = h.folder(FolderRole::Inbox).await;
+    assert_eq!(h.subjects(inbox).await.len(), 3);
+    stop(actor).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nothing_is_deleted_from_the_server_before_the_store_is_on_disk() {
+    let policy = Pop3Policy {
+        leave_on_server: false,
+        delete_after_days: None,
+    };
+    let mut h = harness(policy, quick(), None, Fake::with(1..=3)).await;
+    // A fault planted in the database: the commit that syncs the store fails.
+    let path = h.shared.store.path().to_owned();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fault_insert BEFORE INSERT ON meta WHEN NEW.key = 'flushes' \
+         BEGIN SELECT RAISE(ABORT, 'planted'); END;
+         CREATE TRIGGER fault_update BEFORE UPDATE ON meta WHEN NEW.key = 'flushes' \
+         BEGIN SELECT RAISE(ABORT, 'planted'); END;",
+    )
+    .unwrap();
+    let actor = h.start();
+    h.status(SyncStatus::Synced).await;
+    let inbox = h.folder(FolderRole::Inbox).await;
+    assert_eq!(h.subjects(inbox).await.len(), 3, "stored all the same");
+    let log = h.fake.log();
+    assert!(!log.iter().any(|line| line.starts_with("DELE")), "{log:?}");
+    assert_eq!(h.fake.uidls(), ["u1", "u2", "u3"]);
+    assert!(h.uidls().await.iter().all(|uidl| uidl.deleted.is_none()));
+    // With the fault gone, the next pass deletes what the store holds, after the sync.
+    conn.execute_batch("DROP TRIGGER fault_insert; DROP TRIGGER fault_update;")
+        .unwrap();
+    actor.reconnect();
+    h.eventually(|| {
+        let fake = h.fake.clone();
+        async move { fake.uidls().is_empty() }
+    })
+    .await;
+    assert_eq!(h.fake.count("RETR u1"), 1, "nothing was downloaded twice");
+    let flushes: i64 = conn
+        .query_row("SELECT value FROM meta WHERE key = 'flushes'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(flushes >= 1);
     assert_eq!(h.subjects(inbox).await.len(), 3);
     stop(actor).await;
 }

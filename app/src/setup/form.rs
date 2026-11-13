@@ -110,7 +110,7 @@ pub fn usernames(
     Some((username, second))
 }
 
-/// What the first step names: the sender name, the account's name in Sealwax and its colour.
+/// What the first step names: the sender name, the account's name in Pronto and its colour.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Naming {
     pub name: String,

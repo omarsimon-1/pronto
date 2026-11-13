@@ -5,7 +5,7 @@
 # without an answer (shortened here), Cancel and Escape stop the sign-in, and the
 # username the sign-in belongs to is saved with the sign-in's token. Every address, name and
 # link is fictional. Screenshots go to .local/selftest/.
-# Run: tools/headless.sh 61 target/debug/sealwax --self-test tests/selftest/setup-microsoft.sealwax-test
+# Run: tools/headless.sh 61 target/debug/pronto --self-test tests/selftest/setup-microsoft.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -29,7 +29,7 @@ assert-label setup-title "Outlook.com account"
 assert-sensitive setup-microsoft-button false
 assert-tooltip setup-microsoft-button "Not available in this build yet"
 assert-shown setup-microsoft-unavailable true
-assert-label setup-microsoft-note "Microsoft sign-in isn't available in this build of Sealwax yet."
+assert-label setup-microsoft-note "Microsoft sign-in isn't available in this build of Pronto yet."
 assert-text-contains setup-microsoft-client-id "set client_id under [oauth.microsoft] in config.toml"
 assert-text-contains setup-microsoft-client-id "docs/OAUTH-SETUP.md shows how to register one."
 assert-shown setup-waiting false
@@ -39,7 +39,7 @@ screenshot $DIR/../../.local/selftest/setup-microsoft-no-client-id.png
 engine-expect none
 
 # A client ID put in config.toml makes the step available while it is open.
-write-file $TMP/config/sealwax/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
+write-file $TMP/config/pronto/config.toml "[oauth.microsoft]\nclient_id = \"fictional-client-id\"\n"
 wait-until assert-setup client-id set
 wait-until assert-sensitive setup-microsoft-button true
 assert-shown setup-microsoft-unavailable false
@@ -141,8 +141,8 @@ engine-expect sign-in address=kari@example.test account=none
 assert-shown setup-still-waiting false
 engine-reply sign-in-open https://login.example.test/authorize?client_id=fictional&state=slow
 wait-until assert-shown setup-still-waiting true
-assert-label setup-still-waiting "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Sealwax first: see the user guide."
-assert-announced "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Sealwax first: see the user guide."
+assert-label setup-still-waiting "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Pronto first: see the user guide."
+assert-announced "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Pronto first: see the user guide."
 assert-label setup-waiting-label "Waiting for the browser…"
 assert-shown setup-open-again true
 assert-sensitive setup-cancel true
@@ -167,7 +167,7 @@ assert-announced none
 setup-click setup-microsoft-button
 engine-expect sign-in address=kari@example.test
 wait-until assert-shown setup-still-waiting true
-assert-announced "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Sealwax first: see the user guide."
+assert-announced "Still waiting for Microsoft. If the browser shows “Need admin approval”, your organization must approve Pronto first: see the user guide."
 setup-key escape
 engine-expect cancel-sign-in sign-in=last
 assert-setup step microsoft
@@ -253,6 +253,8 @@ engine-reply added ok
 assert-setup open false
 wait-until assert-shown welcome false
 assert-label sidebar-summary "1 account · synced"
+# The window opens the new account's Inbox once its folders are there (phase C's first view).
+engine-expect folder-opened
 engine-expect none
 
 # Signed in as the address typed (case aside): no question, the account is added at once.

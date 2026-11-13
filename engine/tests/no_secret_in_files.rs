@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tracing_subscriber::fmt::MakeWriter;
 
-const PASSWORD: &str = "Sealwax-dummy-password-7f3c9e1a";
+const PASSWORD: &str = "Pronto-dummy-password-7f3c9e1a";
 const ADDRESS: &str = "no-secret@example.test";
 
 /// Every log line, as the formatter wrote it.
@@ -327,7 +327,7 @@ async fn no_token_reaches_a_file_or_a_log() {
     .unwrap();
     let store = Arc::new(store);
     let engine = Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: store.clone(),
         blobs,
         paths: AccountPaths::new(&dirs),
@@ -335,8 +335,10 @@ async fn no_token_reaches_a_file_or_a_log() {
         secrets: SecretBackend::Memory,
         detect: DetectOptions::default(),
         microsoft_client_id: Some(CLIENT.into()),
+        google_client: None,
         sign_in: SignInOptions {
             microsoft: microsoft.provider(),
+            google: sealwax_engine::oauth::Provider::google(),
             servers: Some((imap.endpoint(), smtp.endpoint())),
             wait: Duration::from_secs(10),
         },

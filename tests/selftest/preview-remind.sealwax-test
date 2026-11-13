@@ -1,0 +1,234 @@
+# Remind Me's UI for review (the fork's phase C, docs/superhuman/remind.md "UI"): the picker,
+# the Reminders view, a conversation back from Reminders with its clock (and a hovered row's
+# quick actions), and the reader's line, at 1440x900 in Adwaita dark, Adwaita light and Tokyo
+# Night, from the app's own defaults. Not part of CI (preview*). Every name, address and
+# message is fictional.
+# Run: tools/headless.sh 64 target/debug/pronto --self-test tests/selftest/preview-remind.sealwax-test
+desktop tiling
+layout-defaults app
+resize 1440 900
+corners 8
+palette adwaita
+color-scheme dark
+list-clock 2026-10-29T14:20:00
+triage-mark-read-on-open false
+composer-backend stand-in
+conversation-account Personal alex.berg@example.test
+write-file $TMP/config/pronto/snippets.toml "[[snippet]]\nname = \"Thanks\"\nbody = \"\"\"\nHi {first_name},\n\nThanks! {cursor}\n\n{my_name}\n\"\"\"\n\n[[snippet]]\nname = \"Introduction\"\nsubject = \"Meet {first_name}\"\nbody = \"Hi {first_name}, meet Ola, who runs the cabin bookings. {cursor}\"\n\n[[snippet]]\nname = \"Meeting times\"\nbody = \"I'm free Tuesday after 14:00 or Thursday morning. Does either work for you?\"\n\n[[snippet]]\nname = \"Out of office\"\nbody = \"I'm away until Monday and will answer when I'm back.\"\n\n[[snippet]]\nname = \"Follow up\"\nbody = \"Just following up on this. Any news? {cursor}\"\n"
+# The samples: trip (6, attachments), links (6), typical (10, attachments), letters (8 newsletters).
+conversation-add trip
+conversation-add links
+conversation-add typical
+conversation-add letters
+# A realistic Inbox around them: multi-person conversations, the user's own replies in Sent, a
+# draft in a conversation, unread and starred mail, attachments, newsletters, older mail.
+notify-mail a1 Personal:inbox "Q4 planning offsite" read "from=Ingrid Solberg" ago=210 "text=Hi both, shall we do the offsite in Lillehammer again? Two nights, mid-November."
+notify-mail a2 Personal:inbox "Re: Q4 planning offsite" read "from=Tomas Berg" ago=150 reply=a1 "text=Lillehammer works. I can sort out the meeting room if someone books the hotel."
+notify-mail a3 Personal:inbox "Re: Q4 planning offsite" "from=Sana Malik" ago=6 reply=a2 "text=Works for me. I'll book the train for Thursday night and send the tickets around."
+notify-mail a4 Personal:drafts "Re: Q4 planning offsite" read "from=Alex Berg" ago=3 reply=a3 "text=Great, I'll take the hotel. Two rooms or three?"
+mail-add Personal:inbox 18m "Lunch on Friday?" "from=Kari Nordmann" "text=Want to try the new ramen place by the station? I can book a table for 12:30."
+notify-mail b1 Personal:inbox "Design review: onboarding flow" read "from=Priya Raman" ago=300 "text=Hi all, the new onboarding screens are in Figma. Comments by Wednesday, please."
+notify-mail b2 Personal:sent "Re: Design review: onboarding flow" read "from=Alex Berg" ago=240 reply=b1 "text=Looks good. Two small notes on the second screen, added in Figma."
+notify-mail b3 Personal:inbox "Re: Design review: onboarding flow" "from=Jonas Lie" ago=40 reply=b2 "text=Agree with Alex on the copy. Can we keep the skip button on every step?"
+mail-add Personal:inbox 2h "Contract renewal: signed copy" read starred attachment "from=Marius Dahl" "text=Signed and scanned, attached. The original goes in the post today."
+mail-add Personal:inbox 3h "Issue 212: Rust in the kernel, again" read html "from=The Weekly Byte" "text=This week: Rust in the kernel, a new GTK release and the best talks from the conference." list=weekly.example.test
+mail-add Personal:inbox 5h "Invoice 2026-114 for October" read attachment "from=Henrik Aas" "text=Hi Alex, here is the invoice for October. Payment within 14 days, as usual."
+mail-add Personal:inbox 26h "Photos from the weekend" read attachment "from=Lena Holm" "text=A few favourites from the hike. The one at the summit is my new background!"
+mail-add Personal:inbox 29h "Check-in is open for your flight to Bergen" read html "from=Norwegian Air" "text=Check in now and choose your seat. Your flight DY 612 leaves Oslo at 07:15."
+notify-mail c1 Personal:inbox "Apartment viewing on Saturday" read "from=Elif Kaya" ago=4500 "text=The landlord can show us the flat on Saturday at 11. Does that suit you?"
+notify-mail c2 Personal:sent "Re: Apartment viewing on Saturday" read "from=Alex Berg" ago=4400 reply=c1 "text=Saturday at 11 is perfect. See you there."
+notify-mail c3 Personal:inbox "Re: Apartment viewing on Saturday" read "from=Elif Kaya" ago=4300 reply=c2 "text=Great! It's the blue door next to the bakery."
+mail-add Personal:inbox 4d "[sealwax] Your pull request was merged" read "from=GitHub" "text=Merged #482 into main: conversation rows in every folder view."
+mail-add Personal:inbox 6d "Board games on Friday" read starred "from=Tomas Berg" "text=Bring Wingspan if you can. I'll make pizza."
+mail-add Personal:inbox 12d "Book club: November pick" read "from=Ingrid Solberg" "text=Vote for November's book by Sunday. The shortlist is in the doc."
+mail-add Personal:inbox 20d "Spare keys" read "from=Kari Nordmann" "text=I left the spare keys with your neighbour on the second floor."
+mail-add Personal:inbox 34d "Your statement is ready" read "from=Bank Norwegian" "text=Your October statement is ready in the app."
+mail-add Personal:inbox 400d "Welcome to the climbing club" read "from=Oslo Climbing" "text=Welcome! Your membership card is attached." attachment
+triage-account Home home
+list-wait
+# A star on the newest conversation (the offsite, with its draft), then a fresh view of the Inbox.
+wait-until assert-snippets 5
+folder inbox Personal
+list-wait
+mail-flag 0 +starred
+folder archive Personal
+list-wait
+folder inbox Personal
+list-wait
+# Four conversations wait in Reminders: today, within the week, later and Someday; one came
+# back an hour ago.
+remind "Invoice 2026-114 for October" +4h
+remind "Board games on Friday" +3d
+remind "Book club: November pick" +20d
+remind "Spare keys" someday
+remind "Lunch on Friday?" +1m
+wake-reminders +2m
+folder inbox Personal
+list-wait
+
+# ---- dark
+palette adwaita
+color-scheme dark
+folder inbox Personal
+list-wait
+focus list
+list-select 0
+hover list-title
+sleep 900
+screenshot $DIR/../../.local/selftest/remind-dark-1-returned-1440x900.png
+hover-row 2
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-dark-2-hover-quick-1440x900.png
+hover list-title
+list-select 3
+focus list
+key x
+key j
+key x
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-dark-2b-select-bar-1440x900.png
+key Escape
+list-select 1
+focus list
+key h
+wait-until assert-picker shown true
+sleep 600
+screenshot $DIR/../../.local/selftest/remind-dark-3-picker-1440x900.png
+picker-type "mon 9"
+sleep 400
+screenshot $DIR/../../.local/selftest/remind-dark-4-picker-typed-1440x900.png
+key Escape
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+list-wait
+focus list
+hover list-title
+sleep 900
+screenshot $DIR/../../.local/selftest/remind-dark-5-reminders-view-1440x900.png
+list-select 1
+key h
+wait-until assert-picker shown true
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-dark-6-picker-change-1440x900.png
+key Escape
+focus list
+list-select 1
+key Return
+wait-until assert-reader-on-screen true
+sleep 1500
+screenshot $DIR/../../.local/selftest/remind-dark-7-reader-line-1440x900.png
+key Escape
+wait-until assert-pane list
+
+# ---- light
+palette adwaita
+color-scheme light
+folder inbox Personal
+list-wait
+focus list
+list-select 0
+hover list-title
+sleep 900
+screenshot $DIR/../../.local/selftest/remind-light-1-returned-1440x900.png
+hover-row 2
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-light-2-hover-quick-1440x900.png
+hover list-title
+list-select 3
+focus list
+key x
+key j
+key x
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-light-2b-select-bar-1440x900.png
+key Escape
+list-select 1
+focus list
+key h
+wait-until assert-picker shown true
+sleep 600
+screenshot $DIR/../../.local/selftest/remind-light-3-picker-1440x900.png
+picker-type "mon 9"
+sleep 400
+screenshot $DIR/../../.local/selftest/remind-light-4-picker-typed-1440x900.png
+key Escape
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+list-wait
+focus list
+hover list-title
+sleep 900
+screenshot $DIR/../../.local/selftest/remind-light-5-reminders-view-1440x900.png
+list-select 1
+key h
+wait-until assert-picker shown true
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-light-6-picker-change-1440x900.png
+key Escape
+focus list
+list-select 1
+key Return
+wait-until assert-reader-on-screen true
+sleep 1500
+screenshot $DIR/../../.local/selftest/remind-light-7-reader-line-1440x900.png
+key Escape
+wait-until assert-pane list
+
+# ---- tokyo
+palette tokyo-night
+folder inbox Personal
+list-wait
+focus list
+list-select 0
+hover list-title
+sleep 900
+screenshot $DIR/../../.local/selftest/remind-tokyo-1-returned-1440x900.png
+hover-row 2
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-tokyo-2-hover-quick-1440x900.png
+hover list-title
+list-select 3
+focus list
+key x
+key j
+key x
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-tokyo-2b-select-bar-1440x900.png
+key Escape
+list-select 1
+focus list
+key h
+wait-until assert-picker shown true
+sleep 600
+screenshot $DIR/../../.local/selftest/remind-tokyo-3-picker-1440x900.png
+picker-type "mon 9"
+sleep 400
+screenshot $DIR/../../.local/selftest/remind-tokyo-4-picker-typed-1440x900.png
+key Escape
+focus list
+key g
+key h
+wait-until assert-reminders-shown wakes
+list-wait
+focus list
+hover list-title
+sleep 900
+screenshot $DIR/../../.local/selftest/remind-tokyo-5-reminders-view-1440x900.png
+list-select 1
+key h
+wait-until assert-picker shown true
+sleep 500
+screenshot $DIR/../../.local/selftest/remind-tokyo-6-picker-change-1440x900.png
+key Escape
+focus list
+list-select 1
+key Return
+wait-until assert-reader-on-screen true
+sleep 1500
+screenshot $DIR/../../.local/selftest/remind-tokyo-7-reader-line-1440x900.png
+key Escape
+wait-until assert-pane list

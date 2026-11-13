@@ -43,7 +43,7 @@ use sealwax_domain::model::{AccountId, Folder, FolderId, FolderRole, MessageId};
 use sealwax_domain::sieve::{Action, Folders, Item, Rule, RuleSet};
 use sealwax_domain::triage::Triage;
 use sealwax_engine::api::{Command, Event, RequestId, RulesError};
-use sealwax_infrastructure::store::{BatchId, ViewScope};
+use sealwax_infrastructure::store::{BatchId, ListRow, RowKey, ViewScope};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -63,7 +63,7 @@ pub const COMMANDS: [ActionId; 5] = [
 pub struct Account {
     pub id: AccountId,
     pub key: AccountKey,
-    /// What Sealwax calls it.
+    /// What Pronto calls it.
     pub name: String,
     /// Its folders as the store holds them.
     pub folders: Vec<Folder>,
@@ -300,7 +300,7 @@ pub fn install_window(state: &Rc<AppState>, window: &Window, actions: &crate::ac
     window.sidebar().connect_apply_rules(
         move |key| match applies.upgrade() {
             Some(state) => folder_of_key(&state, key).map(drop),
-            None => Err("Sealwax is closing"),
+            None => Err("Pronto is closing"),
         },
         move |key| {
             if let Some(state) = activate.upgrade()
@@ -348,7 +348,7 @@ fn runs_on(state: &AppState, folder: FolderId) -> Result<(), &'static str> {
     }
     Account::of(state, folder.account)
         .map(drop)
-        .ok_or("Only accounts set up in Sealwax have rules")
+        .ok_or("Only accounts set up in Pronto have rules")
 }
 
 /// The folder the list shows, when the rules can run on it: not All Inboxes or a search.
@@ -365,58 +365,74 @@ struct Picked {
     account: Account,
     address: String,
     name: String,
-    targets: Vec<Target>,
+    /// The selected rows (a conversation's acts on its members).
+    rows: Vec<ListRow>,
     first: MessageId,
+}
+
+/// Who a selected row is from, for the rules: a message's sender; a conversation's first
+/// writer who isn't the user (else its latest sender), its anchor and its folder.
+fn sender_of(row: &ListRow) -> (String, String, FolderId, MessageId) {
+    match row {
+        ListRow::Message(row) => (
+            row.sender_email.trim().to_owned(),
+            row.sender_name.trim().to_owned(),
+            row.folder,
+            row.id,
+        ),
+        ListRow::Conversation(row) => {
+            let (email, name) = row
+                .participants
+                .iter()
+                .find(|person| !person.is_me)
+                .map_or((&row.sender_email, &row.sender_name), |person| {
+                    (&person.email, &person.name)
+                });
+            (
+                email.trim().to_owned(),
+                name.trim().to_owned(),
+                row.folder,
+                row.anchor,
+            )
+        }
+    }
 }
 
 fn picked(state: &AppState) -> Result<Picked, &'static str> {
     let list = state.list().ok_or("Select a message")?;
-    let positions = list.selected_positions();
-    if positions.is_empty() {
+    if list.selected_positions().is_empty() {
         return Err("Select a message");
     }
-    let mut rows = Vec::with_capacity(positions.len());
-    for position in positions {
-        rows.push(
-            list.model()
-                .row_at(position)
-                .ok_or("Some selected messages haven't loaded")?,
-        );
-    }
-    let address = rows[0].sender_email.trim().to_owned();
+    let rows = list
+        .selected_rows()
+        .map_err(|_| "Some selected messages haven't loaded")?;
+    let senders: Vec<(String, String, FolderId, MessageId)> = rows.iter().map(sender_of).collect();
+    let address = senders[0].0.clone();
     if !address.contains('@') {
         return Err("The message has no sender's address");
     }
-    if rows
+    if senders
         .iter()
-        .any(|row| !row.sender_email.trim().eq_ignore_ascii_case(&address))
+        .any(|(email, ..)| !email.eq_ignore_ascii_case(&address))
     {
         return Err("The messages are from more than one sender");
     }
     let folders = state.mailbox().folders();
-    let accounts: BTreeSet<AccountId> = rows
+    let accounts: BTreeSet<AccountId> = senders
         .iter()
-        .filter_map(|row| folders.iter().find(|folder| folder.id == row.folder))
+        .filter_map(|(_, _, folder, _)| folders.iter().find(|known| known.id == *folder))
         .map(|folder| folder.account)
         .collect();
     let [account] = accounts.into_iter().collect::<Vec<_>>()[..] else {
         return Err("The messages are in more than one account");
     };
-    let account =
-        Account::of(state, account).ok_or("Only accounts set up in Sealwax have rules")?;
+    let account = Account::of(state, account).ok_or("Only accounts set up in Pronto have rules")?;
     Ok(Picked {
         account,
         address,
-        name: rows[0].sender_name.trim().to_owned(),
-        targets: rows
-            .iter()
-            .map(|row| Target {
-                id: row.id,
-                folder: row.folder,
-                flags: row.flags,
-            })
-            .collect(),
-        first: rows[0].id,
+        name: senders[0].1.clone(),
+        first: senders[0].3,
+        rows,
     })
 }
 
@@ -549,15 +565,20 @@ fn list_sender(state: &Rc<AppState>, always: bool) {
             listed,
         };
         let junk = picked.account.junk_ids();
-        let moving: Vec<Target> = picked
-            .targets
+        let rows: Vec<ListRow> = picked
+            .rows
             .into_iter()
-            .filter(|target| junk.contains(&target.folder) != always)
+            .filter(|row| junk.contains(&Target::of_row(row).folder) != always)
             .collect();
+        // Conversations move whole (their members in the list's folders).
+        let moving = state
+            .expand_rows(Triage::Junk, &rows)
+            .await
+            .unwrap_or_default();
         match (state.triage(), state.list()) {
             (Some(triage), Some(list)) if !moving.is_empty() => {
-                let ids: Vec<MessageId> = moving.iter().map(|target| target.id).collect();
-                list.advance_after(&ids);
+                let keys: Vec<RowKey> = rows.iter().map(ListRow::key).collect();
+                list.advance_after(&keys);
                 let undo: Rc<dyn Fn()> = Rc::new(move || revert.clone().run());
                 triage.queue_with(Triage::Junk, moving, lead, undo);
             }
@@ -641,6 +662,7 @@ fn remember(state: &Rc<AppState>, revert: Revert, lead: String) {
             triage.forget_last();
         }
         crate::outbox::forget_last();
+        crate::split_inbox::forget_last();
         let shared = shared();
         shared.last.replace(Some(revert));
         let expiry = glib::timeout_add_local_once(window, || {
@@ -1014,7 +1036,7 @@ pub(crate) fn rename_folders(
     changed
 }
 
-/// A folder of `account` was renamed in Sealwax from `old` to `new` (full names; the folders
+/// A folder of `account` was renamed in Pronto from `old` to `new` (full names; the folders
 /// under it follow): the account's rules that file into them follow too, off the GTK thread.
 /// A folder deleted leaves the rules as they are: a rule filing into a missing folder keeps
 /// the message where it is.

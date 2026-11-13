@@ -7,6 +7,12 @@
 //!   other folders stay quiet, and so does a folder the focused window shows (its list shows the
 //!   mail). `[notifications] enabled = false` turns them off; both settings apply as
 //!   `config.toml` changes, and turning them off or to the count withdraws what is on screen.
+//! - **The Split Inbox's Other side is quiet** (the fork's phase C): while the splits show, a
+//!   conversation with no Important member in its Inbox doesn't notify, unless
+//!   `[notifications] other = true`. A click on a notification shows the side that holds it.
+//! - **One a conversation** (the Superhuman pass, phase B): new messages of one conversation
+//!   share a notification, which shows the newest; more mail in a conversation whose
+//!   notification is on screen replaces it. A click opens the conversation at that message.
 //! - **Grouping:** up to [`SEPARATE`] notifications of their own within [`LIVE`]; past that, one
 //!   notification counts them all ("5 new messages", with the senders), and the others are
 //!   withdrawn. In the count mode there is only that one.
@@ -17,24 +23,34 @@
 //!   Undo works. These actions take a message, so they are not the registry's commands.
 //! - **Withdrawn** when the message is opened from it, read, deleted, or moved out of its Inbox
 //!   anywhere (the store's change events), and when it is archived or marked read from it.
+//! - **Reminders** (Remind Me, phase C): a conversation back from Reminders notifies "Reminder:
+//!   <subject>" (the conversation's, as its row says it) with its latest writer ([`reminders`]),
+//!   once it is back in an Inbox, under the same settings and quiet for the same Inbox a focused
+//!   window shows; a click opens it as a new message's does. It replaces an earlier one of the
+//!   same conversation (`reminder-{thread}`). Past [`SEPARATE`] on screen, one notification
+//!   counts them ("4 reminders" and their subjects), as new mail does; the count mode has only
+//!   that one. Each goes when its reminder ends (Done, Delete, Junk, Move, Remind again, Remove
+//!   Reminder), when the reader shows its conversation, when it is clicked, and with the others
+//!   when notifications are turned off or to the count.
 //! - **Text:** the sender and subject go to the notification server only. Control and direction
 //!   characters are dropped and lengths capped; the body is markup-escaped when the server reads
 //!   markup there (omarchy-shell does: a subject could otherwise carry a link). Nothing here logs
 //!   a sender, a subject or an address.
 
-use crate::application::{AppState, ICON_NAME, SealwaxApplication};
+use crate::application::{AppState, ICON_NAME, ProntoApplication};
 use crate::engine_link::Subscription;
 use crate::list::model::passes;
 use crate::mailbox::folder_key;
-use crate::triage::{Controller, Directory, OpsBackend, Origin, Target};
+use crate::triage::{self, Controller, Counted, Directory, OpsBackend, Origin, Target};
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 use sealwax_domain::config::{NotificationContent, Notifications};
-use sealwax_domain::model::{FolderId, FolderRole, MessageId, MessageSummary};
+use sealwax_domain::message::base_subject;
+use sealwax_domain::model::{FolderId, FolderRole, MessageId, MessageSummary, ThreadId};
 use sealwax_domain::triage::Triage;
 use sealwax_engine::api::Event;
-use sealwax_infrastructure::store::{ChangeEvent, ViewFilter, ViewScope};
+use sealwax_infrastructure::store::{ChangeEvent, ViewFilter, ViewGrouping, ViewScope, ViewSpec};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -50,6 +66,13 @@ pub const ARCHIVE_LABEL: &str = "Archive";
 pub const READ_LABEL: &str = "Mark Read";
 /// The count's title.
 pub const COUNT_TITLE: &str = "New mail";
+/// A reminder's title, before its subject ("Reminder: Passport renewal"), and alone in the
+/// count mode (phase C).
+pub const REMINDER_TITLE: &str = "Reminder";
+/// A reminder's body in the count mode, which names no sender or subject.
+pub const REMINDER_COUNT_BODY: &str = "A conversation is back in your Inbox";
+/// The count mode's title for several reminders.
+pub const REMINDERS_TITLE: &str = "Reminders";
 /// What a click says when its message is gone.
 pub const GONE_TEXT: &str = "The message was moved or deleted";
 /// Notifications of their own at most within [`LIVE`]; more become one that counts them.
@@ -66,6 +89,8 @@ const PAINT_WAIT: Duration = Duration::from_secs(10);
 const REMEMBERED: usize = 500;
 /// The count's notification id.
 const COUNT_ID: &str = "new-mail";
+/// The reminders' count's notification id (phase C).
+const REMINDERS_ID: &str = "reminders";
 /// What [`sent`] and [`clicks`] keep at most, newest last.
 const KEPT_SENT: usize = 1_000;
 const KEPT_CLICKS: usize = 100;
@@ -83,6 +108,10 @@ enum Shown {
 /// prints none.
 struct Notified {
     id: MessageId,
+    thread: ThreadId,
+    /// The message whose notification shows it: its conversation's first one notified, whose
+    /// key the conversation's notification keeps (`message-{head}`).
+    head: MessageId,
     sender: String,
     date: i64,
     shown: Shown,
@@ -92,10 +121,42 @@ impl std::fmt::Debug for Notified {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Notified")
             .field("id", &self.id)
+            .field("head", &self.head)
             .field("sender_chars", &self.sender.chars().count())
             .field("shown", &self.shown)
             .finish()
     }
+}
+
+/// A conversation back from Reminders that was notified (Remind Me, phase C): alone
+/// (`reminder-{thread}`) or counted in the reminders' count. Holds its subject, so it has no
+/// `Debug`.
+struct Returned {
+    thread: ThreadId,
+    /// Its newest message in the Inbox, which a click opens.
+    message: MessageId,
+    subject: String,
+    date: i64,
+    shown: Shown,
+}
+
+impl Returned {
+    fn of(message: &MessageSummary, shown: Shown) -> Returned {
+        Returned {
+            thread: message.thread,
+            message: message.id,
+            subject: reminder_subject(message),
+            date: message.date,
+            shown,
+        }
+    }
+}
+
+/// A returned conversation's subject as its row shows it, without the newest message's "Re:"
+/// ("Reminder: Review trip", not "Reminder: Re: Review trip": the third review's run on the
+/// testbed, where an answer was the newest message).
+fn reminder_subject(message: &MessageSummary) -> String {
+    subject_text(base_subject(&message.subject))
 }
 
 /// What a click on a notification did, for the self-tests and `notify_live`: ids and times.
@@ -118,6 +179,10 @@ pub enum Sent {
     Message(MessageId),
     Count(usize),
     Withdrawn(String),
+    /// A conversation back from Reminders, by the message a click opens (phase C).
+    Reminder(MessageId),
+    /// The reminders' count, counting that many conversations.
+    Reminders(usize),
 }
 
 #[derive(Default)]
@@ -128,6 +193,10 @@ struct Notifier {
     notified: RefCell<Vec<Notified>>,
     /// When the count's notification was last sent, while it is shown.
     count_sent: Cell<Option<Instant>>,
+    /// The conversations back from Reminders notified and not withdrawn, oldest first, and
+    /// when the reminders' count was last sent, while it is shown (phase C).
+    returned: RefCell<Vec<Returned>>,
+    returned_count: Cell<Option<Instant>>,
     /// Whether the server reads markup in the body; asked once, before the first notification.
     markup: Cell<Option<bool>>,
     /// Archive and Mark Read before any window made the triage controller.
@@ -144,8 +213,8 @@ fn shared() -> Rc<Notifier> {
     NOTIFIER.with(Rc::clone)
 }
 
-fn app() -> Option<SealwaxApplication> {
-    gio::Application::default().and_downcast::<SealwaxApplication>()
+fn app() -> Option<ProntoApplication> {
+    gio::Application::default().and_downcast::<ProntoApplication>()
 }
 
 /// Follows the engine's new mail and `[notifications]`, once at startup.
@@ -184,7 +253,7 @@ pub fn install(state: &Rc<AppState>) {
     }
 }
 
-fn install_actions(app: &SealwaxApplication, state: &Rc<AppState>) {
+fn install_actions(app: &ProntoApplication, state: &Rc<AppState>) {
     let id_type = Some(glib::VariantTy::INT64);
     for name in [OPEN_ACTION, ARCHIVE_ACTION, READ_ACTION] {
         let action = gio::SimpleAction::new(name, id_type);
@@ -256,6 +325,82 @@ fn withdraw_all() {
     if notifier.count_sent.take().is_some() {
         withdraw(COUNT_ID);
     }
+    let returned: Vec<ThreadId> = notifier
+        .returned
+        .borrow()
+        .iter()
+        .map(|r| r.thread)
+        .collect();
+    for thread in returned {
+        forget_returned(thread);
+    }
+    if notifier.returned_count.take().is_some() {
+        withdraw(REMINDERS_ID);
+    }
+}
+
+fn reminder_key(thread: ThreadId) -> String {
+    format!("reminder-{}", thread.0)
+}
+
+/// Stops tracking the reminder notification of `thread`'s conversation and withdraws what
+/// shows it: its own, or the reminders' count once it counts nothing more (phase C).
+fn forget_returned(thread: ThreadId) {
+    let notifier = shared();
+    let removed = {
+        let mut returned = notifier.returned.borrow_mut();
+        let at = returned.iter().position(|r| r.thread == thread);
+        at.map(|at| returned.remove(at))
+    };
+    match removed.map(|removed| removed.shown) {
+        Some(Shown::Alone(_)) => withdraw(&reminder_key(thread)),
+        Some(Shown::Counted) => {
+            let counting = notifier
+                .returned
+                .borrow()
+                .iter()
+                .any(|r| r.shown == Shown::Counted);
+            if !counting && notifier.returned_count.take().is_some() {
+                withdraw(REMINDERS_ID);
+            }
+        }
+        None => {}
+    }
+}
+
+/// The conversations back from Reminders now: the notifications of those that aren't any more
+/// (Done, Delete, Junk, Move, Remind again or Remove Reminder ended it) go (phase C).
+pub fn reminders_now(back: &HashSet<ThreadId>) {
+    let ended: Vec<ThreadId> = shared()
+        .returned
+        .borrow()
+        .iter()
+        .map(|r| r.thread)
+        .filter(|thread| !back.contains(thread))
+        .collect();
+    for thread in ended {
+        forget_returned(thread);
+    }
+}
+
+/// Whether a reminder's notification is tracked (phase C).
+pub fn reminders_shown() -> bool {
+    !shared().returned.borrow().is_empty()
+}
+
+/// The reader shows `threads`' conversations on screen: their reminder notifications go, as a
+/// new message's goes once it is read (phase C).
+pub fn reminders_seen(threads: &[ThreadId]) {
+    let seen: Vec<ThreadId> = shared()
+        .returned
+        .borrow()
+        .iter()
+        .map(|r| r.thread)
+        .filter(|thread| threads.contains(thread))
+        .collect();
+    for thread in seen {
+        forget_returned(thread);
+    }
 }
 
 fn message_key(id: MessageId) -> String {
@@ -278,8 +423,8 @@ fn record(sent: Sent) {
     }
 }
 
-/// Stops tracking `id` and withdraws what shows it: its own notification, or the count once
-/// it counts nothing more.
+/// Stops tracking `id` and withdraws what shows it: its conversation's notification once it
+/// shows nothing more, or the count once it counts nothing more.
 fn forget(id: MessageId) {
     let notifier = shared();
     let removed = {
@@ -291,7 +436,16 @@ fn forget(id: MessageId) {
         return;
     };
     match removed.shown {
-        Shown::Alone(_) => withdraw(&message_key(id)),
+        Shown::Alone(_) => {
+            let showing = notifier
+                .notified
+                .borrow()
+                .iter()
+                .any(|n| n.head == removed.head && matches!(n.shown, Shown::Alone(_)));
+            if !showing {
+                withdraw(&message_key(removed.head));
+            }
+        }
         Shown::Counted => {
             let counting = notifier
                 .notified
@@ -340,8 +494,81 @@ fn arrived(state: &Rc<AppState>, folder: FolderId, messages: &[MessageId]) {
         if unread.is_empty() || !settings().enabled || shows_folder(&state, folder) {
             return;
         }
+        if state.splits_enabled() && !settings().other {
+            let threads = unread.iter().map(|message| message.thread).collect();
+            let spec = ViewSpec::folder(folder).with_filter(ViewFilter::Important);
+            // A store that can't say keeps none quiet: mail from people must not be missed.
+            if let Some(important) = important_threads(&state, threads, spec).await {
+                let before = unread.len();
+                unread.retain(|message| important.contains(&message.thread));
+                if unread.len() < before {
+                    tracing::debug!(quiet = before - unread.len(), "new mail in Other: quiet");
+                }
+                if unread.is_empty() {
+                    return;
+                }
+            }
+        }
         show(unread, markup().await);
     });
+}
+
+/// The conversations of `threads` with a member on the Split Inbox's Important side in the
+/// folders of `spec` (a split filter's view); `None` when the store can't say.
+async fn important_threads(
+    state: &AppState,
+    threads: Vec<ThreadId>,
+    spec: ViewSpec,
+) -> Option<HashSet<ThreadId>> {
+    let reply = state
+        .mailbox()
+        .store()
+        .map(|store| store.conversation_members(threads, spec))?;
+    match reply.recv().await {
+        Ok(members) => Some(members.value.iter().map(|member| member.thread).collect()),
+        Err(error) => {
+            tracing::warn!("new mail's side wasn't read, so it notifies: {error}");
+            None
+        }
+    }
+}
+
+/// The side of the Split Inbox the list shows `message` on in `scope`: with conversation rows
+/// its conversation's (Important with a member there that is), else its own.
+async fn side_of(
+    state: &AppState,
+    message: &MessageSummary,
+    scope: ViewScope,
+    grouping: ViewGrouping,
+) -> sealwax_domain::split::Split {
+    use sealwax_domain::split::Split;
+    let spec = ViewSpec {
+        scope,
+        filter: ViewFilter::Important,
+        grouping,
+        split: None,
+    };
+    let Some(reply) = state
+        .mailbox()
+        .store()
+        .map(|store| store.conversation_members(vec![message.thread], spec))
+    else {
+        return Split::Important;
+    };
+    let members = reply
+        .recv()
+        .await
+        .map(|found| found.value)
+        .unwrap_or_default();
+    let important = match grouping {
+        ViewGrouping::Conversations => !members.is_empty(),
+        ViewGrouping::Messages => members.iter().any(|member| member.id == message.id),
+    };
+    if important {
+        Split::Important
+    } else {
+        Split::Other
+    }
 }
 
 /// Whether the focused main window's list shows `folder`'s mail: its own list, or All Inboxes.
@@ -409,8 +636,8 @@ async fn markup() -> bool {
     known.unwrap_or(true)
 }
 
-/// Shows `messages`: each on its own while few are on screen, else one count for them and
-/// those on screen.
+/// Shows `messages`: one notification a conversation (its newest message) while few are on
+/// screen, else one count for them and those on screen.
 fn show(mut messages: Vec<MessageSummary>, markup: bool) {
     let Some(app) = app() else {
         return;
@@ -428,11 +655,22 @@ fn show(mut messages: Vec<MessageSummary>, markup: bool) {
         return;
     }
     let live = |shown: Shown| matches!(shown, Shown::Alone(at) if at.elapsed() < LIVE);
-    let alone_live = notifier
+    // The conversations whose notifications are on screen, by the message that heads them.
+    let shown_heads: HashMap<ThreadId, MessageId> = notifier
         .notified
         .borrow()
         .iter()
         .filter(|n| live(n.shown))
+        .map(|n| (n.thread, n.head))
+        .collect();
+    let alone_live = shown_heads
+        .values()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let conversations = by_conversation(&messages);
+    let new_conversations = conversations
+        .iter()
+        .filter(|conversation| !shown_heads.contains_key(&conversation[0].thread))
         .count();
     let count_live = notifier
         .count_sent
@@ -440,30 +678,54 @@ fn show(mut messages: Vec<MessageSummary>, markup: bool) {
         .is_some_and(|at| at.elapsed() < LIVE);
     let alone = settings.content == NotificationContent::SenderAndSubject
         && !count_live
-        && alone_live + messages.len() <= SEPARATE;
+        && alone_live + new_conversations <= SEPARATE;
     let now = Instant::now();
     if alone {
-        for message in &messages {
+        for conversation in &conversations {
+            let Some(newest) = conversation
+                .iter()
+                .max_by_key(|message| (message.date, message.id))
+            else {
+                continue;
+            };
+            // A conversation on screen keeps its notification: this one replaces it.
+            let head = shown_heads
+                .get(&newest.thread)
+                .copied()
+                .unwrap_or(newest.id);
             app.send_notification(
-                Some(&message_key(message.id)),
-                &message_notification(message, markup),
+                Some(&message_key(head)),
+                &message_notification(newest, markup),
             );
-            record(Sent::Message(message.id));
-            remember(message, Shown::Alone(now));
+            record(Sent::Message(newest.id));
+            for message in conversation {
+                remember(message, head, Shown::Alone(now));
+            }
+            let mut notified = notifier.notified.borrow_mut();
+            for n in notified.iter_mut().filter(|n| n.head == head) {
+                n.shown = Shown::Alone(now);
+            }
         }
-        tracing::debug!(messages = messages.len(), "new mail notified, one each");
+        tracing::debug!(
+            messages = messages.len(),
+            conversations = conversations.len(),
+            "new mail notified, one a conversation"
+        );
         return;
     }
     // The count takes over the notifications on screen and counts every message it took that
     // is still new; it replaces itself.
     for message in &messages {
-        remember(message, Shown::Counted);
+        remember(message, message.id, Shown::Counted);
     }
     {
         let mut notified = notifier.notified.borrow_mut();
+        let mut withdrawn = std::collections::HashSet::new();
         for n in notified.iter_mut().filter(|n| live(n.shown)) {
-            app.withdraw_notification(&message_key(n.id));
-            record(Sent::Withdrawn(message_key(n.id)));
+            if withdrawn.insert(n.head) {
+                app.withdraw_notification(&message_key(n.head));
+                record(Sent::Withdrawn(message_key(n.head)));
+            }
             n.shown = Shown::Counted;
         }
     }
@@ -498,11 +760,31 @@ fn show(mut messages: Vec<MessageSummary>, markup: bool) {
     tracing::debug!(messages = counted.len(), "new mail notified as a count");
 }
 
-fn remember(message: &MessageSummary, shown: Shown) {
+/// `messages` by conversation, each conversation's in the order they came, the conversations
+/// in the order of their first message.
+fn by_conversation(messages: &[MessageSummary]) -> Vec<Vec<MessageSummary>> {
+    // Found by thread in one pass, not a search per message (phase B's review).
+    let mut at: HashMap<ThreadId, usize> = HashMap::new();
+    let mut conversations: Vec<Vec<MessageSummary>> = Vec::new();
+    for message in messages {
+        match at.get(&message.thread) {
+            Some(index) => conversations[*index].push(message.clone()),
+            None => {
+                at.insert(message.thread, conversations.len());
+                conversations.push(vec![message.clone()]);
+            }
+        }
+    }
+    conversations
+}
+
+fn remember(message: &MessageSummary, head: MessageId, shown: Shown) {
     let notifier = shared();
     let mut notified = notifier.notified.borrow_mut();
     notified.push(Notified {
         id: message.id,
+        thread: message.thread,
+        head,
         sender: sender(message),
         date: message.date,
         shown,
@@ -536,6 +818,151 @@ fn message_notification(message: &MessageSummary, markup: bool) -> gio::Notifica
         Some(&target),
     );
     notification
+}
+
+/// Conversations back from Reminders together (Remind Me, phase C), `messages` each one's
+/// newest in its Inbox: "Reminder: <subject>" and its sender each, whose click opens it, while
+/// few are on screen; else one that counts them ("4 reminders" and their subjects; the count
+/// mode's "Reminders", "4 conversations are back in your Inbox"), as new mail switches to a
+/// count. Under `[notifications]` as new mail, and quiet for the Inbox the focused window shows,
+/// where the rows come back to the top with their clocks. Not marked unread.
+pub fn reminders(state: &Rc<AppState>, mut messages: Vec<MessageSummary>) {
+    if !settings().enabled {
+        return;
+    }
+    messages.retain(|message| !shows_folder(state, message.folder));
+    if messages.is_empty() {
+        return;
+    }
+    glib::spawn_future_local(async move {
+        let markup = markup().await;
+        let settings = settings();
+        if let Some(app) = app()
+            && settings.enabled
+        {
+            show_reminders(&app, &messages, settings.content, markup);
+        }
+    });
+}
+
+fn show_reminders(
+    app: &ProntoApplication,
+    messages: &[MessageSummary],
+    content: NotificationContent,
+    markup: bool,
+) {
+    let notifier = shared();
+    let now = Instant::now();
+    let live = |shown: Shown| matches!(shown, Shown::Alone(at) if at.elapsed() < LIVE);
+    // One notified before takes the new one in its place: what showed it goes first, its own
+    // or the count once that counts nothing more (the second review: dropped untracked, either
+    // could stay on screen).
+    let again: Vec<ThreadId> = notifier
+        .returned
+        .borrow()
+        .iter()
+        .map(|r| r.thread)
+        .filter(|thread| messages.iter().any(|message| message.thread == *thread))
+        .collect();
+    for thread in again {
+        forget_returned(thread);
+    }
+    let alone_live = notifier
+        .returned
+        .borrow()
+        .iter()
+        .filter(|r| live(r.shown))
+        .count();
+    let count_live = notifier
+        .returned_count
+        .get()
+        .is_some_and(|at| at.elapsed() < LIVE);
+    if content == NotificationContent::SenderAndSubject
+        && !count_live
+        && alone_live + messages.len() <= SEPARATE
+    {
+        for message in messages {
+            let title = format!("{REMINDER_TITLE}: {}", reminder_subject(message));
+            let notification = gio::Notification::new(&clean(&title, TITLE_CHARS));
+            let from = sender(message);
+            notification.set_body(Some(&if markup { escape_markup(&from) } else { from }));
+            decorate(&notification, &message.id.0.to_variant());
+            app.send_notification(Some(&reminder_key(message.thread)), &notification);
+            record(Sent::Reminder(message.id));
+            notifier
+                .returned
+                .borrow_mut()
+                .push(Returned::of(message, Shown::Alone(now)));
+        }
+        return;
+    }
+    // The count takes over those on screen and counts every conversation it took.
+    {
+        let mut returned = notifier.returned.borrow_mut();
+        for r in returned.iter_mut().filter(|r| live(r.shown)) {
+            app.withdraw_notification(&reminder_key(r.thread));
+            record(Sent::Withdrawn(reminder_key(r.thread)));
+            r.shown = Shown::Counted;
+        }
+        returned.extend(
+            messages
+                .iter()
+                .map(|message| Returned::of(message, Shown::Counted)),
+        );
+    }
+    let mut counted: Vec<(i64, MessageId, String)> = notifier
+        .returned
+        .borrow()
+        .iter()
+        .filter(|r| r.shown == Shown::Counted)
+        .map(|r| (r.date, r.message, r.subject.clone()))
+        .collect();
+    counted.sort_by_key(|(date, message, _)| std::cmp::Reverse((*date, *message)));
+    let Some((_, newest, _)) = counted.first() else {
+        return;
+    };
+    let notification = match content {
+        NotificationContent::Count => {
+            let title = if counted.len() == 1 {
+                REMINDER_TITLE
+            } else {
+                REMINDERS_TITLE
+            };
+            let notification = gio::Notification::new(title);
+            notification.set_body(Some(&back_text(counted.len())));
+            notification
+        }
+        NotificationContent::SenderAndSubject => {
+            let notification = gio::Notification::new(&reminders_text(counted.len()));
+            let subjects: Vec<String> = counted.iter().map(|(.., s)| s.clone()).collect();
+            let body = senders_text(&subjects);
+            notification.set_body(Some(&if markup { escape_markup(&body) } else { body }));
+            notification
+        }
+    };
+    decorate(&notification, &newest.0.to_variant());
+    app.send_notification(Some(REMINDERS_ID), &notification);
+    notifier.returned_count.set(Some(now));
+    record(Sent::Reminders(counted.len()));
+}
+
+/// The reminders' count's title: "1 reminder", "4 reminders" (phase C).
+pub fn reminders_text(count: usize) -> String {
+    if count == 1 {
+        "1 reminder".to_owned()
+    } else {
+        format!("{count} reminders")
+    }
+}
+
+/// The count mode's body for reminders: "A conversation is back in your Inbox", "4
+/// conversations are back in your Inbox".
+pub fn back_text(count: usize) -> String {
+    if count == 1 {
+        REMINDER_COUNT_BODY.to_owned()
+    } else {
+        format!("{count} conversations are back in your Inbox")
+    }
 }
 
 /// The count: "New mail" and how many (the count mode), or how many and from whom; a click
@@ -729,6 +1156,29 @@ fn store_changed(state: &Rc<AppState>, event: &Arc<ChangeEvent>) {
 /// The withdrawal a click on the notification of `id` makes: its own, or the count it is in.
 fn clicked(id: MessageId) {
     let notifier = shared();
+    // A reminder's (phase C): its own, or the reminders' count with all it counted.
+    let returned = notifier
+        .returned
+        .borrow()
+        .iter()
+        .find(|r| r.message == id)
+        .map(|r| (r.thread, r.shown));
+    match returned {
+        Some((_, Shown::Counted)) => {
+            let counted: Vec<ThreadId> = notifier
+                .returned
+                .borrow()
+                .iter()
+                .filter(|r| r.shown == Shown::Counted)
+                .map(|r| r.thread)
+                .collect();
+            for thread in counted {
+                forget_returned(thread);
+            }
+        }
+        Some((thread, Shown::Alone(_))) => forget_returned(thread),
+        None => {}
+    }
     let shown = notifier
         .notified
         .borrow()
@@ -748,7 +1198,25 @@ fn clicked(id: MessageId) {
                 forget(id);
             }
         }
-        Some(Shown::Alone(_)) => forget(id),
+        Some(Shown::Alone(_)) => {
+            // The conversation's notification goes, with every message it showed.
+            let head = notifier
+                .notified
+                .borrow()
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| n.head);
+            let shown: Vec<MessageId> = notifier
+                .notified
+                .borrow()
+                .iter()
+                .filter(|n| Some(n.head) == head)
+                .map(|n| n.id)
+                .collect();
+            for id in shown {
+                forget(id);
+            }
+        }
         None => {}
     }
 }
@@ -818,8 +1286,10 @@ fn update_click(action: Instant, update: impl FnOnce(&mut Click)) {
 }
 
 /// Shows `message` in the list: its folder unless All Inboxes shows it, no search, a filter
-/// that keeps it; then selects it and opens it, as Enter does. False when it never showed.
-async fn select(state: &Rc<AppState>, message: &MessageSummary) -> bool {
+/// that keeps it; then selects its row (with conversation rows, its conversation's) and opens
+/// it at `message`, as Enter does. False when it never showed. The contact pane's Recent list
+/// opens its conversations this way too (phase C).
+pub(crate) async fn select(state: &Rc<AppState>, message: &MessageSummary) -> bool {
     let (Some(window), Some(list)) = (state.window(), state.list()) else {
         return false;
     };
@@ -840,6 +1310,13 @@ async fn select(state: &Rc<AppState>, message: &MessageSummary) -> bool {
     if !passes(list.filter(), message) {
         list.set_filter(ViewFilter::All);
     }
+    // The Split Inbox: the side that holds it.
+    if list.split().is_some()
+        && let Some(scope) = list.scope()
+    {
+        let side = side_of(state, message, scope, list.grouping()).await;
+        list.show_split(side, false);
+    }
     drop((window, list));
     let started = Instant::now();
     loop {
@@ -849,12 +1326,12 @@ async fn select(state: &Rc<AppState>, message: &MessageSummary) -> bool {
         };
         let model = list.model();
         if !model.is_pending() {
-            if let Some(position) = model.position_of(message.id) {
-                list.select_position(position);
-                list.open_selected();
+            let key = list.key_for(message.id, message.thread);
+            if let Some(position) = model.position_of_key(key) {
+                list.open_at(position, message.id);
                 return true;
             }
-            if let Some(unloaded) = (0..model.total()).find(|p| model.row_at(*p).is_none()) {
+            if let Some(unloaded) = (0..model.total()).find(|p| !model.is_loaded(*p)) {
                 model.request_position(unloaded);
             }
         }
@@ -907,12 +1384,15 @@ async fn painted(state: &Rc<AppState>, id: MessageId) -> Option<Instant> {
 }
 
 /// Archive or Mark Read from a notification: withdrawn at once, then queued like the window's
-/// own commands (the toast and Undo show in the window when there is one).
+/// own commands (the toast and Undo show in the window when there is one). With conversation
+/// rows they act on the message's conversation in its folder, as the row's would.
 fn act(state: &Rc<AppState>, id: MessageId, action: Triage) {
-    forget(id);
-    let Some(reply) = state.mailbox().store().map(|store| store.message(id)) else {
+    clicked(id);
+    let Some(store) = state.mailbox().shared_store() else {
         return;
     };
+    let reply = store.message(id);
+    let conversations = state.grouping() == ViewGrouping::Conversations;
     let weak = Rc::downgrade(state);
     glib::spawn_future_local(async move {
         let summary = reply
@@ -924,16 +1404,34 @@ fn act(state: &Rc<AppState>, id: MessageId, action: Triage) {
         let (Some(state), Some(summary)) = (weak.upgrade(), summary) else {
             return;
         };
-        let target = Target {
-            id,
-            folder: summary.folder,
-            flags: summary.flags,
-        };
         tracing::info!(
             archive = action == Triage::Archive,
             "a notification's button was clicked"
         );
-        triage(&state).queue(action, vec![target], Origin::User);
+        let members = if conversations {
+            store
+                .conversation_members(vec![summary.thread], ViewSpec::folder(summary.folder))
+                .recv()
+                .await
+                .map(|read| read.value)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let (targets, counted) = if members.len() > 1 {
+            (
+                triage::conversation_targets(action, &members),
+                Counted::Conversations(1),
+            )
+        } else {
+            let target = Target {
+                id,
+                folder: summary.folder,
+                flags: summary.flags,
+            };
+            (vec![target], Counted::Messages)
+        };
+        triage(&state).queue_counted(action, targets, Origin::User, counted);
     });
 }
 
@@ -1020,6 +1518,30 @@ mod tests {
         let text = senders_text(&long);
         assert_eq!(text.chars().count(), BODY_CHARS);
         assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn reminders_together_read_as_a_count() {
+        let mut message = MessageSummary {
+            id: MessageId(1),
+            folder: FolderId(1),
+            thread: ThreadId(1),
+            sender_name: "Tomas Berg".into(),
+            sender_email: "tomas@example.test".into(),
+            subject: "Re: SV: Review trip".into(),
+            snippet: String::new(),
+            date: 0,
+            flags: sealwax_domain::model::Flags::NONE,
+            has_attachments: false,
+            thread_count: 2,
+        };
+        assert_eq!(reminder_subject(&message), "Review trip");
+        message.subject = "Re: ".to_owned();
+        assert_eq!(reminder_subject(&message), "(no subject)");
+        assert_eq!(reminders_text(1), "1 reminder");
+        assert_eq!(reminders_text(4), "4 reminders");
+        assert_eq!(back_text(1), REMINDER_COUNT_BODY);
+        assert_eq!(back_text(4), "4 conversations are back in your Inbox");
     }
 
     #[test]

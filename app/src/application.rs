@@ -1,11 +1,11 @@
-//! The GApplication (ML-020): one instance per app-id. A second `sealwax mailto:…` hands its
+//! The GApplication (ML-020): one instance per app-id. A second `pronto mailto:…` hands its
 //! command line to the running instance and exits; launchers activate it over D-Bus
 //! (`DBusActivatable=true`: `Activate` and `Open`). The `command-line`, `open` and `activate`
 //! handlers build the window synchronously: GApplication shuts down when one of them returns
 //! with neither a window nor a hold (ADR-003 amendment, S6). Until the window is presented the
 //! GTK thread does nothing but build it. SIGTERM, SIGHUP and SIGINT quit cleanly.
 
-use crate::actions::{self, ActionSet};
+use crate::actions::{self, ActionSet, ScopedShortcuts};
 use crate::background;
 use crate::cli;
 use crate::compose_actions;
@@ -15,7 +15,7 @@ use crate::default_handler;
 use crate::desktop::{self, DesktopEvent, DesktopWatch};
 use crate::engine::{self, EngineOptions};
 use crate::engine_link::{EngineLink, Subscription};
-use crate::list::{MessageList, Quick, Selected};
+use crate::list::{Content, MessageList, Quick, Selected};
 use crate::mailbox::{self, Latch, Mailbox};
 use crate::menu;
 use crate::move_to;
@@ -35,22 +35,25 @@ use crate::triage::{
     self, Controller, Directory, MARK_READ_ON_OPEN, Notice, OpsBackend, Origin, Target,
 };
 use crate::updates;
-use crate::window::{self, Attention, BannerAction, Pane, Window};
+use crate::window::{self, Attention, BannerAction, Pane, ViewMode, Window};
 use gtk4::{gio, glib};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use libadwaita::subclass::prelude::*;
-use sealwax_domain::account::AccountKey;
+use sealwax_domain::account::{AccountKey, OAuthProvider};
 use sealwax_domain::actions::{ActionId, Scope};
-use sealwax_domain::compose::ReplyKind;
 use sealwax_domain::keymap::Keymap;
 use sealwax_domain::layout::Layout;
 use sealwax_domain::mailto::{self, Mailto};
-use sealwax_domain::model::{AccountId, FolderId, FolderRole, MessageId};
+use sealwax_domain::model::{AccountId, DraftId, FolderId, FolderRole, MessageId, ThreadId};
+use sealwax_domain::palette::{PALETTE_FILE, Recent};
 use sealwax_domain::triage::Triage;
 use sealwax_engine::api::{Command, Event};
+use sealwax_engine::oauth::Registration;
 use sealwax_engine::service::Engine;
-use sealwax_infrastructure::store::{ViewFilter, ViewScope};
+use sealwax_infrastructure::store::{
+    ListRow, RowKey, ViewFilter, ViewGrouping, ViewScope, ViewSpec,
+};
 use sealwax_infrastructure::xdg::SealwaxDirs;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::future::Future;
@@ -59,11 +62,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// The installed icon (hicolor), the same for debug and release builds.
-pub const ICON_NAME: &str = "io.github.pixdevsapps.Sealwax";
+pub const ICON_NAME: &str = "io.github.omarsimon1.Pronto";
 
 /// Test hook: overrides the application id, so a self-test and the instances it starts share
-/// an id that no real Sealwax uses.
-pub const APP_ID_ENV: &str = "SEALWAX_APP_ID";
+/// an id that no real Pronto uses.
+pub const APP_ID_ENV: &str = "PRONTO_APP_ID";
 
 /// The signals that end a session: uwsm stops app units with SIGTERM at logout and reboot, a
 /// closing terminal sends SIGHUP, Ctrl+C SIGINT. Linux's numbers.
@@ -100,6 +103,9 @@ pub struct AppConfig {
     /// The build's Microsoft client ID ([`oauth::BUILD_MICROSOFT_CLIENT_ID`]), which
     /// `config.toml` overrides. Self-tests run without one, whatever the build had.
     pub microsoft_client_id: Option<String>,
+    /// The Google client from the environment or the build ([`oauth::google_client_from_env`]),
+    /// which `config.toml`'s `[oauth.google]` overrides. Self-tests run without one.
+    pub google_client: Option<Registration>,
 }
 
 impl AppConfig {
@@ -111,6 +117,7 @@ impl AppConfig {
             tiling: window::tiling_desktop(),
             engine: Some(EngineOptions::from_env()),
             microsoft_client_id: oauth::BUILD_MICROSOFT_CLIENT_ID.map(str::to_owned),
+            google_client: oauth::google_client_from_env(),
         }
     }
 }
@@ -126,20 +133,20 @@ mod imp {
     use super::*;
 
     #[derive(Default)]
-    pub struct SealwaxApplication {
+    pub struct ProntoApplication {
         pub state: OnceCell<Rc<AppState>>,
     }
 
     #[glib::object_subclass]
-    impl ObjectSubclass for SealwaxApplication {
-        const NAME: &'static str = "SealwaxApplication";
-        type Type = super::SealwaxApplication;
+    impl ObjectSubclass for ProntoApplication {
+        const NAME: &'static str = "ProntoApplication";
+        type Type = super::ProntoApplication;
         type ParentType = adw::Application;
     }
 
-    impl ObjectImpl for SealwaxApplication {}
+    impl ObjectImpl for ProntoApplication {}
 
-    impl ApplicationImpl for SealwaxApplication {
+    impl ApplicationImpl for ProntoApplication {
         fn startup(&self) {
             let state = self.state();
             for hook in state.early_startup.take() {
@@ -170,10 +177,10 @@ mod imp {
         }
     }
 
-    impl GtkApplicationImpl for SealwaxApplication {}
-    impl AdwApplicationImpl for SealwaxApplication {}
+    impl GtkApplicationImpl for ProntoApplication {}
+    impl AdwApplicationImpl for ProntoApplication {}
 
-    impl SealwaxApplication {
+    impl ProntoApplication {
         fn state(&self) -> Rc<AppState> {
             self.state
                 .get()
@@ -184,12 +191,12 @@ mod imp {
 }
 
 glib::wrapper! {
-    pub struct SealwaxApplication(ObjectSubclass<imp::SealwaxApplication>)
+    pub struct ProntoApplication(ObjectSubclass<imp::ProntoApplication>)
         @extends adw::Application, gtk4::Application, gio::Application,
         @implements gio::ActionGroup, gio::ActionMap;
 }
 
-impl SealwaxApplication {
+impl ProntoApplication {
     pub fn new(config: AppConfig, started: Instant) -> Self {
         let flags =
             gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::HANDLES_OPEN;
@@ -213,6 +220,7 @@ impl SealwaxApplication {
             quitting: Cell::new(false),
             theme: OnceCell::new(),
             prefs: OnceCell::new(),
+            ai: OnceCell::new(),
             app_actions: OnceCell::new(),
             win_actions: RefCell::new(None),
             mailbox: Mailbox::new(),
@@ -220,6 +228,10 @@ impl SealwaxApplication {
             list: RefCell::new(None),
             store_warned: Cell::new(false),
             reader: RefCell::new(None),
+            contact: RefCell::new(None),
+            contact_selected: Cell::new(None),
+            contact_moved: Cell::new(None),
+            contact_opened: Cell::new(None),
             reader_shows: Cell::new(None),
             engine: EngineLink::new(),
             engine_service: RefCell::new(None),
@@ -238,11 +250,21 @@ impl SealwaxApplication {
             mark_read_on_open: Cell::new(MARK_READ_ON_OPEN),
             read_on_leave: RefCell::new((None, Vec::new())),
             read_when_shown: RefCell::new(Vec::new()),
+            focus_on_shown: Cell::new(None),
+            layout_defaults: Cell::new((ViewMode::Focused, false)),
+            grouping_default: Cell::new(ViewGrouping::Conversations),
+            split_default: Cell::new(None),
             triage_started: Cell::new(None),
             pending_ops: Cell::new(0),
             pending_queued: Cell::new(false),
             pending_recheck: Cell::new(false),
+            palette: RefCell::new(None),
+            window_keys: RefCell::new(None),
+            refresh_queued: Cell::new(false),
         });
+        state
+            .mailbox
+            .set_default_grouping(state.grouping_default.get());
         let mailbox = state.mailbox.clone();
         let dirs = state.config.dirs.clone();
         state.connect_early_startup(move || mailbox.open(&dirs));
@@ -261,8 +283,12 @@ impl SealwaxApplication {
     }
 }
 
+/// `layout.toml`'s writes, numbered as they are asked for, and the newest one on disk.
+static LAYOUT_WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAYOUT_WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
 pub fn run(config: AppConfig, started: Instant) -> glib::ExitCode {
-    SealwaxApplication::new(config, started).run()
+    ProntoApplication::new(config, started).run()
 }
 
 type Hook = Box<dyn FnOnce()>;
@@ -289,6 +315,7 @@ pub struct AppState {
     quitting: Cell<bool>,
     theme: OnceCell<Rc<ThemeController>>,
     prefs: OnceCell<Rc<Preferences>>,
+    ai: OnceCell<Rc<crate::ai::Controller>>,
     app_actions: OnceCell<ActionSet>,
     win_actions: RefCell<Option<ActionSet>>,
     mailbox: Rc<Mailbox>,
@@ -297,6 +324,16 @@ pub struct AppState {
     list: RefCell<Option<MessageList>>,
     store_warned: Cell<bool>,
     reader: RefCell<Option<Reader>>,
+    /// The contact pane beside the reader's conversation (phase C).
+    contact: RefCell<Option<crate::contact::ContactPane>>,
+    /// The conversation's message the contact pane last showed for (the reader's selected
+    /// one), and the explicit message opened from Recent, until the user chooses another
+    /// message. The reader tracks those choices, including pointer and keyboard moves.
+    contact_selected: Cell<Option<MessageId>>,
+    contact_moved: Cell<Option<MessageId>>,
+    /// A conversation of the pane's Recent list being opened, at this message of the person
+    /// shown: they stay shown, as if the user had moved to it.
+    contact_opened: Cell<Option<MessageId>>,
     /// The message the reader shows; `None` while the window shows "No message selected".
     reader_shows: Cell<Option<MessageId>>,
     /// The engine's commands and events (ADR-003); not connected until an engine is attached.
@@ -331,15 +368,36 @@ pub struct AppState {
     /// Unread messages a conversation shown in the Unread view expanded, marked read once the
     /// selection leaves the message it was shown for.
     read_on_leave: RefCell<(Option<MessageId>, Vec<Target>)>,
-    /// Unread messages the reader showed while it was hidden (one pane at a time), marked read
-    /// when the reader is shown.
+    /// Unread messages the reader showed while it was off screen (behind a Focused list, or
+    /// one pane at a time), marked read when the reader is on screen.
     read_when_shown: RefCell<Vec<Target>>,
+    /// A conversation opened before the reader had it on screen: the focus goes into it then.
+    focus_on_shown: Cell<Option<MessageId>>,
+    /// The reading pane and the sidebar of a window whose `layout.toml` doesn't say: Focused
+    /// with the sidebar hidden (the Superhuman pass); the self-test's harness asks for Split
+    /// with the sidebar shown, which its scripts were written for.
+    layout_defaults: Cell<(ViewMode, bool)>,
+    /// The list's rows while `layout.toml` doesn't say: one per conversation (the Superhuman
+    /// pass, phase B); the self-test's harness asks for one per message, which its scripts
+    /// were written for.
+    grouping_default: Cell<ViewGrouping>,
+    /// Whether the Inbox shows the Split Inbox's sides while `layout.toml` doesn't say, over
+    /// `config.toml`'s `[inbox] split` (phase C): the self-test's harness turns them off, which
+    /// its scripts were written for.
+    split_default: Cell<Option<bool>>,
     /// When the last mail command's handler ran, and the window's frame then (measurements).
     triage_started: Cell<Option<(Instant, i64)>>,
     /// The ops waiting for a server, for the offline banner.
     pending_ops: Cell<u32>,
     pending_queued: Cell<bool>,
     pending_recheck: Cell<bool>,
+    /// The window's command palette (Superhuman pass), built with the window.
+    palette: RefCell<Option<palette::Palette>>,
+    /// The window's keys that yield to the focused widget (Ctrl+K), on the window itself.
+    window_keys: RefCell<Option<ScopedShortcuts>>,
+    /// A store change asked for the commands' sensitivity; it is worked out once, before the
+    /// next frame.
+    refresh_queued: Cell<bool>,
 }
 
 impl AppState {
@@ -389,6 +447,11 @@ impl AppState {
         self.reader.borrow().clone()
     }
 
+    /// The contact pane beside the reader's conversation (phase C), once the reader exists.
+    pub fn contact(&self) -> Option<crate::contact::ContactPane> {
+        self.contact.borrow().clone()
+    }
+
     /// The link to the engine; `EngineLink::attach` connects it.
     pub fn engine(&self) -> EngineLink {
         self.engine.clone()
@@ -404,12 +467,24 @@ impl AppState {
         oauth::microsoft_client_id(&config, self.config.microsoft_client_id.as_deref())
     }
 
-    /// For the setup assistant: whether a Microsoft client ID is in use, asked when it draws.
-    fn microsoft_available(self: &Rc<Self>) -> setup::MicrosoftAvailable {
+    /// The Google client in use (ADR-023): `config.toml`'s, else the environment's or the
+    /// build's. Sign in with Google is offered only with one.
+    pub fn google_client(&self) -> Option<Registration> {
+        let config = self
+            .preferences()
+            .map(|prefs| prefs.config())
+            .unwrap_or_default();
+        oauth::google_client(&config, self.config.google_client.as_ref())
+    }
+
+    /// For the setup assistant: whether a provider's client is in use, asked when it draws.
+    fn sign_in_available(self: &Rc<Self>) -> setup::SignInAvailable {
         let weak = Rc::downgrade(self);
-        Rc::new(move || {
-            weak.upgrade()
-                .is_some_and(|state| state.microsoft_client_id().is_some())
+        Rc::new(move |provider| {
+            weak.upgrade().is_some_and(|state| match provider {
+                OAuthProvider::Microsoft => state.microsoft_client_id().is_some(),
+                OAuthProvider::Google => state.google_client().is_some(),
+            })
         })
     }
 
@@ -485,6 +560,7 @@ impl AppState {
             incoming: settings.incoming,
             receive: settings.receive,
             smtp: settings.smtp,
+            auth: settings.auth,
         })
     }
 
@@ -513,15 +589,10 @@ impl AppState {
             .and_then(|first| self.again(first.account.as_ref()?));
         match (action, again) {
             (BannerAction::SignIn, Some(again)) => {
-                setup::sign_in_again(&window, &self.engine, self.microsoft_available(), again);
+                setup::sign_in_again(&window, &self.engine, self.sign_in_available(), again);
             }
             (BannerAction::TypePassword, Some(again)) => {
-                setup::type_password_again(
-                    &window,
-                    &self.engine,
-                    self.microsoft_available(),
-                    again,
-                );
+                setup::type_password_again(&window, &self.engine, self.sign_in_available(), again);
             }
             (BannerAction::Details, Some(again)) => {
                 let weak = Rc::downgrade(self);
@@ -649,7 +720,7 @@ impl AppState {
 
     /// Background mode (D6) is an application hold: with it, closing the window leaves the
     /// process running, and the next activation builds a new window (ADR-003 amendment).
-    pub fn set_background(&self, app: &SealwaxApplication, on: bool) {
+    pub fn set_background(&self, app: &ProntoApplication, on: bool) {
         if on {
             if self.background.borrow().is_none() {
                 self.background.replace(Some(app.hold()));
@@ -668,14 +739,14 @@ impl AppState {
         self.quitting.get()
     }
 
-    /// Whether `--background` holds Sealwax until a main window shows.
+    /// Whether `--background` holds Pronto until a main window shows.
     pub fn is_hidden_start(&self) -> bool {
         self.hidden.borrow().is_some()
     }
 
     /// Shows the main window, built anew when it was closed (background mode): what an
     /// activation and a click on the background notice do.
-    pub fn show_main_window(self: &Rc<Self>, app: &SealwaxApplication) {
+    pub fn show_main_window(self: &Rc<Self>, app: &ProntoApplication) {
         let window = self.window_or_new(app);
         self.present(&window);
     }
@@ -710,10 +781,15 @@ impl AppState {
     }
 
     /// Quits the application: the one path for signals, the exit timer and the Quit action.
-    /// Open composer windows save their drafts first (`composer::save_all`).
-    pub fn quit(&self, app: &SealwaxApplication) {
+    /// Open composer windows save their drafts first (`composer::save_all`), and so do the
+    /// inline replies (`compose_actions::save_quick_drafts`), side by side: Quit waits at most
+    /// `composer::SAVE_ON_QUIT` for both.
+    pub fn quit(&self, app: &ProntoApplication) {
         if self.quitting.replace(true) {
             return;
+        }
+        if let Some(ai) = self.ai.get() {
+            ai.stop();
         }
         self.background.take();
         self.hidden.take();
@@ -724,20 +800,23 @@ impl AppState {
             }
             app.quit();
         };
-        if crate::composer::is_open() {
-            glib::spawn_future_local(async move {
-                crate::composer::save_all().await;
-                finish();
-            });
-        } else {
+        let ai = self.ai();
+        glib::spawn_future_local(async move {
+            let cards = glib::spawn_future_local(crate::composer::save_all());
+            compose_actions::save_quick_drafts().await;
+            let _ = cards.await;
+            if let Some(ai) = ai {
+                ai.finish().await;
+            }
             finish();
-        }
+        });
     }
 
-    fn startup(self: &Rc<Self>, app: &SealwaxApplication) {
+    fn startup(self: &Rc<Self>, app: &ProntoApplication) {
         gtk4::Window::set_default_icon_name(ICON_NAME);
         self.start_settings(app);
-        // Composer windows draft into the store; the ones open when Sealwax last stopped
+        let _ = self.ai.set(crate::ai::Controller::start(self));
+        // Composer windows draft into the store; the ones open when Pronto last stopped
         // reopen once the first frame is painted.
         composer::use_store(app);
         let reopen = app.downgrade();
@@ -797,6 +876,7 @@ impl AppState {
         self.engine_events.replace(Some(subscription));
         outbox::install(self);
         notify::install(self);
+        crate::remind::install(self);
         search::install(self);
         updates::install(self);
         crate::rules::install(self);
@@ -880,7 +960,7 @@ impl AppState {
 
     fn command_line(
         self: &Rc<Self>,
-        app: &SealwaxApplication,
+        app: &ProntoApplication,
         command_line: &gio::ApplicationCommandLine,
     ) -> glib::ExitCode {
         let parsed = match cli::parse(command_line.arguments()) {
@@ -897,7 +977,7 @@ impl AppState {
         };
         if parsed.self_test.is_some() {
             command_line.printerr_literal(
-                "sealwax: --self-test starts its own instance; it cannot be sent to a running \
+                "pronto: --self-test starts its own instance; it cannot be sent to a running \
                  one\n",
             );
             return glib::ExitCode::from(2);
@@ -913,15 +993,18 @@ impl AppState {
         glib::ExitCode::SUCCESS
     }
 
-    /// `--background` (ML-084): no window. A Sealwax with no window yet holds itself until a
+    /// `--background` (ML-084): no window. A Pronto with no window yet holds itself until a
     /// main window shows, so it runs with `[background]` off too, and starts its engine without
     /// waiting for a first frame; a running one shows nothing.
-    fn start_hidden(self: &Rc<Self>, app: &SealwaxApplication) {
+    fn start_hidden(self: &Rc<Self>, app: &ProntoApplication) {
         if app.windows().is_empty() && self.hidden.borrow().is_none() {
             self.hidden.replace(Some(app.hold()));
             tracing::info!("started without a window");
         }
         if self.window().is_none() {
+            if let Some(theme) = self.theme() {
+                reader::prewarm(&self.config.dirs.cache, &theme.theme());
+            }
             self.start_engine_without_window();
         }
     }
@@ -929,7 +1012,7 @@ impl AppState {
     /// `--compose` (ML-084): a new message, the window's Compose (from the account the list
     /// shows). The composer docks in the main window (the user's UI tweak, 2026-10-08), so the
     /// window shows first when it isn't.
-    fn compose_new(self: &Rc<Self>, app: &SealwaxApplication) {
+    fn compose_new(self: &Rc<Self>, app: &ProntoApplication) {
         let window = self.window_or_new(app);
         self.present(&window);
         let compose = ActionId::Compose.detailed_name();
@@ -941,7 +1024,7 @@ impl AppState {
     /// `mailto:` links from the command line or D-Bus `Open`: a composer for each in the main
     /// window, shown first when it isn't (a link from a browser, or background mode after the
     /// window closed).
-    fn compose_links(self: &Rc<Self>, app: &SealwaxApplication, uris: &[&str]) {
+    fn compose_links(self: &Rc<Self>, app: &ProntoApplication, uris: &[&str]) {
         let window = self.window_or_new(app);
         for uri in uris {
             compose(app, uri);
@@ -949,7 +1032,7 @@ impl AppState {
         self.present(&window);
     }
 
-    fn open(self: &Rc<Self>, app: &SealwaxApplication, files: &[gio::File]) {
+    fn open(self: &Rc<Self>, app: &ProntoApplication, files: &[gio::File]) {
         let uris: Vec<String> = files
             .iter()
             .map(|file| file.uri().to_string())
@@ -968,7 +1051,7 @@ impl AppState {
     /// The theme, the settings files and the application's commands. The theme read blocks
     /// for at most `theme::STARTUP_WAIT` (about 9 ms here); the settings are read off the GTK
     /// thread, and the first window waits up to `SETTINGS_WAIT` for them.
-    fn start_settings(self: &Rc<Self>, app: &SealwaxApplication) {
+    fn start_settings(self: &Rc<Self>, app: &ProntoApplication) {
         self.read_layout();
         let prefs = Preferences::start(&self.config.dirs);
         let theme = ThemeController::start(prefs.config().appearance, theme::STARTUP_WAIT);
@@ -983,6 +1066,7 @@ impl AppState {
         for (id, file) in [
             (ActionId::Preferences, SettingsFile::Config),
             (ActionId::CustomizeShortcuts, SettingsFile::Keys),
+            (ActionId::EditSnippets, SettingsFile::Snippets),
         ] {
             let weak = Rc::downgrade(self);
             app_actions.connect(id, move || {
@@ -1020,7 +1104,7 @@ impl AppState {
     }
 
     /// `config.toml` or `keys.toml` changed, or one of them has a mistake.
-    fn settings_changed(&self, app: &SealwaxApplication, update: &Update) {
+    fn settings_changed(&self, app: &ProntoApplication, update: &Update) {
         let Some(prefs) = self.preferences() else {
             return;
         };
@@ -1032,10 +1116,20 @@ impl AppState {
                 reader.set_conversation_order(prefs.config().reader.conversation_order);
                 reader.set_default_reply(prefs.config().reader.reply);
             }
-            // A client ID added or removed makes Microsoft sign-in available or not.
+            // A client ID added or removed makes Microsoft or Google sign-in available or not.
             setup::refresh();
             self.send_microsoft_client();
+            self.send_google_client();
             self.send_storage();
+            // `[inbox] split` changed: it decides again, over Split Inbox's last choice.
+            if update
+                .config_before
+                .as_ref()
+                .is_some_and(|before| before.inbox.split != prefs.config().inbox.split)
+            {
+                self.remember(|layout| layout.split = None);
+            }
+            self.apply_splits();
         }
         if update.keymap_changed {
             let keymap = prefs.keymap();
@@ -1043,6 +1137,9 @@ impl AppState {
             if let Some(window) = self.window() {
                 window.set_menu_model(Some(menu::primary_menu(&keymap).upcast_ref()));
                 window.set_keymap(&keymap);
+            }
+            if let Some(keys) = self.window_keys.borrow().as_ref() {
+                keys.update(&keymap);
             }
             if let Some(list) = self.list() {
                 list.update_keys(&keymap);
@@ -1075,25 +1172,17 @@ impl AppState {
     }
 
     /// The window's commands: the palette, and the main menu built from the registry.
-    fn install_window(self: &Rc<Self>, app: &SealwaxApplication, window: &Window) {
+    fn install_window(self: &Rc<Self>, app: &ProntoApplication, window: &Window) {
         let Some(prefs) = self.preferences() else {
             return;
         };
         let keymap = prefs.keymap();
         let win_actions = actions::install_window_actions(window.window());
-        let target = window.window().downgrade();
+        self.install_palette(window, &keymap);
         let weak = Rc::downgrade(self);
         win_actions.connect(ActionId::CommandPalette, move || {
-            if let (Some(window), Some(state)) = (target.upgrade(), weak.upgrade()) {
-                let titles = state.command_titles();
-                // In a composer the palette lists and runs its commands too.
-                let composer = composer::focused(&window).map(|composer| composer.action_group());
-                palette::present_titled(&window, &prefs.keymap(), composer, &move |id| {
-                    titles
-                        .iter()
-                        .find(|(candidate, _)| *candidate == id)
-                        .map(|(_, title)| title.clone())
-                });
+            if let Some(state) = weak.upgrade() {
+                state.toggle_palette();
             }
         });
         let weak = Rc::downgrade(self);
@@ -1108,7 +1197,7 @@ impl AppState {
                     .iter()
                     .filter_map(|account| account.color)
                     .collect();
-                setup::open(&window, &state.engine, state.microsoft_available(), &used);
+                setup::open(&window, &state.engine, state.sign_in_available(), &used);
             }
         });
         let weak = Rc::downgrade(self);
@@ -1159,31 +1248,311 @@ impl AppState {
             !self.removable_accounts().is_empty(),
         );
         win_actions.set_available(ActionId::EditAccount, !self.editable_accounts().is_empty());
+        self.install_layout_toggles(window, &win_actions);
+        crate::pane_cycle::install(self, window, &win_actions);
         window.set_menu_model(Some(menu::primary_menu(&keymap).upcast_ref()));
         window.set_keymap(&keymap);
         actions::apply_accels(app, &keymap);
         self.install_list(window, &win_actions, &keymap);
         compose_actions::install(self, window, &win_actions);
+        crate::snippets::install(self, window, &win_actions);
+        crate::scheduled::install(self, &win_actions);
         crate::go_to::install(self, &win_actions);
+        crate::remind::install_commands(self, &win_actions);
         crate::folders::install(self, window, &win_actions);
         crate::rules::install_window(self, window, &win_actions);
         self.win_actions.replace(Some(win_actions));
     }
 
+    /// Toggle Sidebar and the Reading Pane (the Superhuman pass, 2026-10-28): the window does
+    /// what they ask, and `layout.toml` remembers the sidebar of a wide window and the mode.
+    fn install_layout_toggles(self: &Rc<Self>, window: &Window, actions: &ActionSet) {
+        let weak = Rc::downgrade(self);
+        actions.connect_toggle(
+            ActionId::ToggleSidebar,
+            window.sidebar_shown(),
+            move |shown| {
+                if let Some(window) = weak.upgrade().and_then(|state| state.window()) {
+                    window.set_sidebar_shown(shown);
+                }
+            },
+        );
+        let weak = Rc::downgrade(self);
+        actions.connect_toggle(
+            ActionId::ToggleReadingPane,
+            window.view_mode() == ViewMode::Split,
+            move |split| {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                let mode = if split {
+                    ViewMode::Split
+                } else {
+                    ViewMode::Focused
+                };
+                if let Some(window) = state.window() {
+                    window.set_view_mode(mode);
+                }
+                if let Some(list) = state.list() {
+                    list.set_focused(mode == ViewMode::Focused);
+                }
+                state.remember(|layout| layout.mode = Some(mode));
+            },
+        );
+        // Contact Details (phase C): the contact pane in the column's margin, where it fits.
+        let weak = Rc::downgrade(self);
+        actions.connect_toggle(
+            ActionId::ContactDetails,
+            self.contact_details(),
+            move |on| {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                if let Some(window) = state.window() {
+                    window.set_contact_wanted(on);
+                    // Turned on where the conversation's margin has no room for it: why
+                    // nothing shows.
+                    if on && window.contact_has_room() == Some(false) {
+                        state.show_toast(
+                            &adw::Toast::new("Contact details show in a wider window"),
+                            true,
+                        );
+                    }
+                }
+                state.remember(|layout| layout.contact = Some(on));
+            },
+        );
+        let weak = Rc::downgrade(self);
+        actions.connect_toggle(
+            ActionId::GroupByConversation,
+            self.grouping() == ViewGrouping::Conversations,
+            move |on| {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                if let Some(list) = state.list() {
+                    list.set_grouping(grouping_of(on));
+                }
+                if let Some(reader) = state.reader() {
+                    reader.set_message_rows(!on);
+                }
+                state.follow_contact();
+                state.remember(|layout| layout.conversations = Some(on));
+            },
+        );
+        // The sidebar also hides by itself: over the list, a click beside it or Escape closes
+        // it, and a narrower window takes it from beside the list.
+        let weak = Rc::downgrade(self);
+        window.connect_sidebar_shown(move |shown, remember| {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            if let Some(actions) = state.win_actions.borrow().as_ref() {
+                actions.set_toggle_state(ActionId::ToggleSidebar, shown);
+            }
+            if remember {
+                state.remember(|layout| layout.sidebar = Some(shown));
+            }
+        });
+    }
+
+    /// The window's remembered (else default) reading pane and sidebar, on it and on its
+    /// toggles.
+    fn apply_window_layout(&self, window: &Window) {
+        let (mode, sidebar) = {
+            let (default_mode, default_sidebar) = self.layout_defaults.get();
+            let layout = self.layout.borrow();
+            let layout = layout.as_ref();
+            (
+                layout
+                    .and_then(|layout| layout.mode)
+                    .unwrap_or(default_mode),
+                layout
+                    .and_then(|layout| layout.sidebar)
+                    .unwrap_or(default_sidebar),
+            )
+        };
+        window.set_view_mode(mode);
+        window.set_sidebar_wanted(sidebar);
+        window.set_contact_wanted(self.contact_details());
+        let grouping = self.grouping();
+        if let Some(list) = self.list() {
+            list.set_grouping(grouping);
+            list.set_focused(mode == ViewMode::Focused);
+        }
+        self.apply_splits();
+        if let Some(reader) = self.reader() {
+            reader.set_message_rows(grouping == ViewGrouping::Messages);
+        }
+        self.follow_contact();
+        if let Some(actions) = self.win_actions.borrow().as_ref() {
+            actions.set_toggle_state(ActionId::ToggleReadingPane, mode == ViewMode::Split);
+            actions.set_toggle_state(ActionId::ToggleSidebar, window.sidebar_shown());
+            actions.set_toggle_state(
+                ActionId::GroupByConversation,
+                grouping == ViewGrouping::Conversations,
+            );
+            actions.set_toggle_state(ActionId::ContactDetails, self.contact_details());
+        }
+    }
+
+    /// The reading pane and sidebar a window opens with while `layout.toml` names neither (the
+    /// self-test's harness: Split with the sidebar shown).
+    pub fn set_layout_defaults(&self, mode: ViewMode, sidebar: bool) {
+        self.layout_defaults.set((mode, sidebar));
+        if let Some(window) = self.window() {
+            self.apply_window_layout(&window);
+        }
+    }
+
+    /// The list's rows while `layout.toml` doesn't say (the self-test's harness: one per
+    /// message); the view the store reads ahead for the first window follows it.
+    pub fn set_grouping_default(&self, grouping: ViewGrouping) {
+        self.grouping_default.set(grouping);
+        self.mailbox.set_default_grouping(grouping);
+        if let Some(window) = self.window() {
+            self.apply_window_layout(&window);
+        }
+    }
+
+    /// Whether the Inbox shows the Split Inbox's sides: Split Inbox's last choice
+    /// (`layout.toml`), else the harness's default, else `config.toml`'s `[inbox] split`.
+    pub fn splits_enabled(&self) -> bool {
+        self.layout
+            .borrow()
+            .as_ref()
+            .and_then(|layout| layout.split)
+            .or(self.split_default.get())
+            .unwrap_or_else(|| {
+                self.preferences()
+                    .is_none_or(|prefs| prefs.config().inbox.split)
+            })
+    }
+
+    /// The splits while `layout.toml` doesn't say, over `config.toml` (`None`: as it says);
+    /// the view the store reads ahead for the first window follows it.
+    pub fn set_split_default(&self, splits: Option<bool>) {
+        self.split_default.set(splits);
+        self.mailbox.set_default_splits(splits);
+        self.apply_splits();
+    }
+
+    /// Split Inbox (the palette, the View menu): on or off, remembered in `layout.toml`.
+    pub fn choose_splits(&self, on: bool) {
+        self.remember(|layout| layout.split = Some(on));
+        self.apply_splits();
+    }
+
+    /// The list shows the sides, or not, as [`AppState::splits_enabled`] says.
+    fn apply_splits(&self) {
+        let on = self.splits_enabled();
+        if let Some(list) = self.list() {
+            list.set_splits(on);
+        }
+        if let Some(actions) = self.win_actions.borrow().as_ref() {
+            actions.set_toggle_state(ActionId::SplitInbox, on);
+        }
+    }
+
+    /// One row per conversation or per message: `layout.toml`'s choice, else the default.
+    pub fn grouping(&self) -> ViewGrouping {
+        self.layout
+            .borrow()
+            .as_ref()
+            .and_then(|layout| layout.conversations)
+            .map_or(self.grouping_default.get(), grouping_of)
+    }
+
+    /// Whether an open conversation shows the contact pane where it fits (`layout.toml`; shown
+    /// until the user turns Contact Details off, phase C).
+    pub fn contact_details(&self) -> bool {
+        self.layout
+            .borrow()
+            .as_ref()
+            .and_then(|layout| layout.contact)
+            .unwrap_or(true)
+    }
+
+    /// Changes the remembered layout, once it has been read (writing it before would drop what
+    /// it holds).
+    fn remember(&self, change: impl FnOnce(&mut Layout)) {
+        if self.layout.borrow().is_some() {
+            self.change_layout(change);
+        }
+    }
+
+    /// Whether composer cards show their formatting toolbar (`layout.toml`; hidden until the
+    /// user shows it, the fork's phase B).
+    pub fn formatting_toolbar(&self) -> bool {
+        self.layout
+            .borrow()
+            .as_ref()
+            .and_then(|layout| layout.formatting)
+            .unwrap_or(false)
+    }
+
+    /// Formatting Toolbar from a card's menu: every open card follows, and `layout.toml`
+    /// remembers it.
+    pub fn set_formatting_toolbar(&self, on: bool) {
+        self.remember(|layout| layout.formatting = Some(on));
+        composer::show_formatting(on);
+    }
+
+    /// Opening a conversation puts the keyboard focus in it, now or once it is on screen; while
+    /// the reader is alone, its Back button holds the focus meanwhile (the reader's keys work
+    /// there too).
+    fn focus_reader(&self, id: MessageId) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        if self.reader().is_some_and(|reader| reader.focus_message(id)) {
+            self.focus_on_shown.set(None);
+            return;
+        }
+        self.focus_on_shown.set(Some(id));
+        window.focus_reader_bar();
+    }
+
     /// The message list (ML-026) in the window's list slot. It shows the folder picked in the
     /// sidebar, which the store fills and keeps current; its keys move and open the selection.
     fn install_list(self: &Rc<Self>, window: &Window, win_actions: &ActionSet, keymap: &Keymap) {
+        let window_opened = Instant::now();
         let list = MessageList::new(self.mailbox.clone());
+        // Before it shows anything: the first view it opens is the one the store read ahead.
+        list.set_grouping(self.grouping());
+        list.set_splits(self.splits_enabled());
         // Known to the state before anything below runs: the handlers look it up there.
         self.list.replace(Some(list.clone()));
         list.set_first_rows(self.first_rows.clone());
         list.install_keys(keymap);
+        // Its keys work from the folder list too, and one whose command is off says why.
+        if let Some(keys) = list.keys() {
+            window.sidebar().attach_keys(&keys);
+            crate::triage::explain_keys(self, &keys);
+        }
         list.set_quick_tooltips(quick_tooltips(keymap));
+        list.set_scheduled(crate::outbox::scheduled_copies());
         window.set_list(list.widget());
+        window.set_list_search(list.search_bar());
         GtkWindowExt::set_focus(window.window(), Some(list.list_view()));
         list.keep_focus(window.window());
+        list.swallow_double_clicks(window.window());
+        if let Some(palette) = self.palette() {
+            palette.set_fallback_focus(list.list_view());
+        }
         self.install_triage(window, &list, win_actions);
         crate::message_menu::install(self, &list);
+        // The list's filters as commands, and Select All (Superhuman pass): every row, the rows
+        // not loaded yet first, as triage waits for them (ML-054); the list's selection handling
+        // puts it in the select mode.
+        self.install_filters(win_actions);
+        let weak = Rc::downgrade(self);
+        win_actions.connect(ActionId::SelectAll, move || {
+            if let Some(list) = weak.upgrade().and_then(|state| state.list()) {
+                list.model().complete_growth();
+                list.selection().select_all();
+            }
+        });
 
         // The window's handlers find the window and the list through the state, never by a
         // clone of their own: a clone would keep a window closed into background mode alive.
@@ -1194,7 +1563,6 @@ impl AppState {
             ),
             (ActionId::PreviousMessage, MessageList::select_previous),
             (ActionId::OpenMessage, MessageList::open_selected),
-            (ActionId::Search, MessageList::focus_search),
         ] {
             let weak = Rc::downgrade(self);
             win_actions.connect(id, move || {
@@ -1203,6 +1571,24 @@ impl AppState {
                 }
             });
         }
+        // Search from a conversation open in the list's place shows the list first.
+        let weak = Rc::downgrade(self);
+        win_actions.connect(ActionId::Search, move || {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            if let Some(window) = state.window()
+                && window.is_one_pane()
+                && window.pane() == Pane::Reader
+            {
+                window.show_pane(Pane::List);
+            }
+            if let Some(list) = state.list() {
+                list.focus_search();
+            }
+        });
+        // Open shows the conversation (in the list's place while one pane shows) and puts the
+        // keyboard focus in it, so the reader's keys work at once.
         let weak = Rc::downgrade(self);
         list.connect_message_opened(move |message| {
             if let Some(state) = weak.upgrade()
@@ -1210,12 +1596,22 @@ impl AppState {
                 && !compose_actions::open_if_draft(&state, &pane, message)
             {
                 pane.show_pane(Pane::Reader);
+                if !pane.reader_has_focus() {
+                    state.focus_reader(message);
+                }
             }
         });
         let weak = Rc::downgrade(self);
         list.connect_message_selected(move |id| {
             if let Some(state) = weak.upgrade() {
                 state.leave_opened(Some(id));
+                if state
+                    .focus_on_shown
+                    .get()
+                    .is_some_and(|opened| opened != id)
+                {
+                    state.focus_on_shown.set(None);
+                }
                 state.set_has_selection(true);
                 state.refresh_commands();
             }
@@ -1224,11 +1620,20 @@ impl AppState {
         list.connect_selection_cleared(move || {
             if let Some(state) = weak.upgrade() {
                 state.leave_opened(None);
+                state.focus_on_shown.set(None);
                 state.set_has_selection(false);
-                if let Some(shown) = state.window()
-                    && shown.reader_page() == "batch"
-                {
-                    shown.clear_reader();
+                if let Some(shown) = state.window() {
+                    if shown.reader_page() == "batch" {
+                        shown.clear_reader();
+                    }
+                    // Nothing left to read in the reader alone (the last conversation archived,
+                    // Inbox Zero): back to the list, with the focus in it.
+                    if shown.is_one_pane() && shown.pane() == Pane::Reader {
+                        shown.show_pane(Pane::List);
+                        if let Some(list) = state.list() {
+                            list.focus_selected();
+                        }
+                    }
                 }
                 state.refresh_commands();
             }
@@ -1243,25 +1648,83 @@ impl AppState {
                     reader.clear();
                     reader.set_position(None);
                 }
-                if let Some(shown) = state.window() {
-                    shown.show_batch(count);
+                if let (Some(shown), Some(list)) = (state.window(), state.list()) {
+                    shown.show_batch(count, list.shows_conversations());
                 }
                 state.set_has_selection(true);
                 state.refresh_commands();
             }
         });
+        // The filter shows as a pill in the list's bar, which removes it; an empty list shows
+        // alone, never beside the reader's own empty page.
+        let weak = Rc::downgrade(self);
+        list.connect_filter_changed(move |filter| {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            if let Some(window) = state.window() {
+                window.set_filter_pill(
+                    (filter != ViewFilter::All).then(|| crate::list::filter_name(filter)),
+                );
+            }
+            // Show All Messages applies while a filter is on: at once, not with the store's
+            // view event a frame later.
+            state.refresh_commands();
+        });
+        let weak = Rc::downgrade(self);
+        window.connect_filter_cleared(move || {
+            if let Some(list) = weak.upgrade().and_then(|state| state.list()) {
+                list.set_filter(ViewFilter::All);
+                list.focus_selected();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        list.connect_empty_changed(move |empty| {
+            if let Some(window) = weak.upgrade().and_then(|state| state.window()) {
+                window.set_list_empty(empty);
+            }
+        });
+        // The search in the header row, in the view name's place; Inbox Zero's tint over the
+        // whole pane; the select mode's bar's Clear, as Escape in the list.
+        let weak = Rc::downgrade(self);
+        list.connect_searching(move |searching| {
+            if let Some(window) = weak.upgrade().and_then(|state| state.window()) {
+                window.set_list_searching(searching);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        list.connect_inbox_zero(move |zero| {
+            if let Some(window) = weak.upgrade().and_then(|state| state.window()) {
+                window.set_inbox_zero(zero);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        window.connect_batch_cleared(move || {
+            if let Some(list) = weak.upgrade().and_then(|state| state.list()) {
+                list.leave_select_mode();
+                list.focus_selected();
+            }
+        });
         let weak = Rc::downgrade(self);
         list.connect_search_changed(move |search| {
-            let Some(heading) = weak.upgrade().and_then(|state| state.window()) else {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let (Some(heading), Some(list)) = (state.window(), state.list()) else {
                 return;
             };
             match search {
                 Some(search) => heading.set_list_heading("Search", &search.subtitle()),
                 None => {
-                    let (title, subtitle) = heading
-                        .sidebar()
-                        .heading(&heading.selected_folder())
-                        .unwrap_or_default();
+                    // With conversation rows the heading counts them ("Inbox 21").
+                    let model = list.model();
+                    let counted = matches!(model.content(), Content::View(_))
+                        && model.content().grouping() == ViewGrouping::Conversations;
+                    heading.set_list_count(
+                        list.shows_conversations(),
+                        (counted && !model.is_pending()).then(|| model.total()),
+                    );
+                    let (title, subtitle) = heading.folder_heading().unwrap_or_default();
                     heading.set_list_heading(&title, &subtitle);
                 }
             }
@@ -1288,6 +1751,7 @@ impl AppState {
                 state.older_wanted(folder);
             }
         });
+        crate::split_inbox::install(self, window, &list, win_actions);
         if self.mailbox.is_ready() {
             self.fill_sidebar(window, &list);
         }
@@ -1303,7 +1767,7 @@ impl AppState {
                 && let (Some(target), Some(shown)) = (state.window(), state.list())
                 && built.upgrade().as_ref() == Some(target.window())
             {
-                state.install_reader(&target, &shown, &prefs.keymap());
+                state.install_reader(&target, &shown, &prefs.keymap(), window_opened);
             }
         });
     }
@@ -1331,6 +1795,7 @@ impl AppState {
                 if state.triage().is_some_and(|triage| triage.can_undo()) {
                     outbox::forget_last();
                     crate::rules::forget_last();
+                    crate::split_inbox::forget_last();
                 }
                 state.refresh_commands();
             }
@@ -1369,6 +1834,7 @@ impl AppState {
             if let Some(state) = weak.upgrade()
                 && !outbox::undo_last(&state)
                 && !crate::rules::undo_last(&state)
+                && !crate::split_inbox::undo_last(&state)
                 && let Some(triage) = state.triage()
             {
                 triage.undo(None);
@@ -1394,10 +1860,15 @@ impl AppState {
         });
         window.window().add_controller(escape);
         let weak = Rc::downgrade(self);
-        list.connect_quick_action(move |id, target| {
+        list.connect_quick_action(move |id, row| {
             if let Some(state) = weak.upgrade() {
                 state.mark_started();
-                state.triage_targets(id, vec![target]);
+                // Remind Me's clock opens its picker for the row (phase C).
+                if id == ActionId::RemindMe {
+                    crate::remind::ask(&state, vec![row]);
+                } else {
+                    state.triage_rows(id, vec![row]);
+                }
             }
         });
         let (applies, activate) = (Rc::downgrade(self), Rc::downgrade(self));
@@ -1421,7 +1892,7 @@ impl AppState {
             let weak = Rc::downgrade(self);
             self.mailbox.connect_event(move |_| {
                 if let Some(state) = weak.upgrade() {
-                    state.refresh_commands();
+                    state.queue_refresh_commands();
                     state.queue_pending_count();
                 }
             });
@@ -1501,9 +1972,17 @@ impl AppState {
         self.triage.borrow().clone()
     }
 
-    /// Whether a message shown in the reader is marked read; the self-test switches it.
+    /// Whether a message shown in the reader is marked read; the self-test switches it. Off, it
+    /// also drops the reads still waiting (for a reader laid out behind a Focused list to come
+    /// on screen, or for the selection to leave an Unread view's message): the Focused cursor
+    /// lays a conversation out as soon as the list fills, which can be before a script switches
+    /// this off, and nothing shown is read once it is off.
     pub fn set_mark_read_on_open(&self, on: bool) {
         self.mark_read_on_open.set(on);
+        if !on {
+            self.read_when_shown.borrow_mut().clear();
+            self.read_on_leave.replace((None, Vec::new()));
+        }
     }
 
     /// When the last mail command's handler ran, and the window's frame counter then.
@@ -1519,7 +1998,7 @@ impl AppState {
         self.triage_started.set(Some((Instant::now(), frame)));
     }
 
-    /// A triage command on the selected messages; selected rows far down a range load first.
+    /// A triage command on the selected rows; selected rows far down a range load first.
     fn triage_command(self: &Rc<Self>, id: ActionId) {
         self.mark_started();
         let Some(list) = self.list() else {
@@ -1529,17 +2008,17 @@ impl AppState {
             self.open_move_to(&list);
             return;
         }
-        match list.selected_targets() {
-            Ok(targets) => self.triage_targets(id, targets),
+        match list.selected_rows() {
+            Ok(rows) => self.triage_rows(id, rows),
             Err(_) => {
                 let weak = Rc::downgrade(self);
                 glib::spawn_future_local(async move {
-                    let targets = list.wait_targets().await;
+                    let rows = list.wait_rows().await;
                     let Some(state) = weak.upgrade() else {
                         return;
                     };
-                    match targets {
-                        Some(targets) => state.triage_targets(id, targets),
+                    match rows {
+                        Some(rows) => state.triage_rows(id, rows),
                         None => state.show_notice(
                             &Notice::plain(
                                 "Some selected messages didn't load in time; nothing changed"
@@ -1553,35 +2032,288 @@ impl AppState {
         }
     }
 
-    fn triage_targets(&self, id: ActionId, targets: Vec<Target>) {
-        let (Some(triage), Some(list)) = (self.triage(), self.list()) else {
-            return;
-        };
+    /// The command `id` on `rows`: Star and Mark as Read or Unread toggle by what the rows
+    /// show (a conversation is unread while a member is, starred while one is).
+    fn triage_rows(self: &Rc<Self>, id: ActionId, rows: Vec<ListRow>) {
+        let shown: Vec<Target> = rows.iter().map(Target::of_row).collect();
         let action = match id {
             ActionId::Archive => Triage::Archive,
             ActionId::Delete => Triage::Delete,
             ActionId::Junk => Triage::Junk,
-            ActionId::Star => triage::star_action(&targets),
+            ActionId::Star => triage::star_action(&shown),
+            ActionId::ToggleRead => triage::read_action(&shown),
             ActionId::MarkRead => Triage::Read(true),
             ActionId::MarkUnread => Triage::Read(false),
             _ => return,
         };
+        self.queue_rows(action, rows);
+    }
+
+    /// Queues `action` on `rows` as one batch, one Undo: message rows act on their messages;
+    /// conversation rows on their members in the view's folders, read from the store first
+    /// (docs/superhuman/conversations.md, `triage::conversation_targets`). The list moves on
+    /// to the row after them once they leave it.
+    fn queue_rows(self: &Rc<Self>, action: Triage, rows: Vec<ListRow>) {
+        let (Some(triage), Some(list)) = (self.triage(), self.list()) else {
+            return;
+        };
+        let keys: Vec<RowKey> = rows.iter().map(ListRow::key).collect();
+        list.advance_after(&keys);
+        let conversations = rows
+            .iter()
+            .filter(|row| matches!(row, ListRow::Conversation(_)))
+            .count() as u32;
+        if conversations == 0 {
+            // Message rows: queued now, in the frame the key was pressed in.
+            let targets: Vec<Target> = rows.iter().map(Target::of_row).collect();
+            self.forget_read_on_leave(action, &targets);
+            triage.queue(action, targets, Origin::User);
+            return;
+        }
+        let members = self.expand_rows(action, &rows);
+        let weak = Rc::downgrade(self);
+        let queue = triage.clone();
+        // Counted as in flight while the members are read, as the queue is after.
+        triage.spawn(async move {
+            let Some(targets) = members.await else {
+                return;
+            };
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            state.forget_read_on_leave(action, &targets);
+            queue.queue_counted(
+                action,
+                targets,
+                Origin::User,
+                triage::Counted::Conversations(conversations),
+            );
+        });
+    }
+
+    /// The messages `action` on `rows` acts on: a message row's own; a conversation row's
+    /// members in the list's folders ([`AppState::member_views`]), as
+    /// `triage::conversation_targets` picks them. The store gets the reads now; `None` when
+    /// they fail.
+    pub(crate) fn expand_rows(
+        &self,
+        action: Triage,
+        rows: &[ListRow],
+    ) -> Pin<Box<dyn Future<Output = Option<Vec<Target>>>>> {
+        let mut targets: Vec<Target> = Vec::new();
+        let mut threads: Vec<ThreadId> = Vec::new();
+        let mut accounts: Vec<AccountId> = Vec::new();
+        for row in rows {
+            match row {
+                ListRow::Message(_) => targets.push(Target::of_row(row)),
+                ListRow::Conversation(row) => {
+                    threads.push(row.thread);
+                    accounts.push(row.account);
+                }
+            }
+        }
+        if threads.is_empty() {
+            return Box::pin(std::future::ready(Some(targets)));
+        }
+        let (Some(list), Some(store)) = (self.list(), self.mailbox.shared_store()) else {
+            return Box::pin(std::future::ready(None));
+        };
+        let replies: Vec<_> = self
+            .member_views(&list, action, &accounts)
+            .into_iter()
+            .map(|spec| store.conversation_members(threads.clone(), spec))
+            .collect();
+        Box::pin(async move {
+            let mut members = Vec::new();
+            for reply in replies {
+                match reply.recv().await {
+                    Ok(read) => members.extend(read.value),
+                    Err(error) => {
+                        tracing::warn!("a conversation's messages couldn't be read: {error}");
+                        return None;
+                    }
+                }
+            }
+            targets.extend(triage::conversation_targets(action, &members));
+            Some(targets)
+        })
+    }
+
+    /// The views whose members an action on the list's conversation rows acts on: the view
+    /// shown (every member, whatever its filter); a search's folder; for a search of every
+    /// folder, each searched folder of the conversations' accounts, except Sent and Drafts
+    /// for a move (archiving a conversation found anywhere leaves the user's own copies
+    /// where they are).
+    fn member_views(
+        &self,
+        list: &MessageList,
+        action: Triage,
+        accounts: &[AccountId],
+    ) -> Vec<ViewSpec> {
+        match list.model().content() {
+            Content::View(spec) => vec![spec.with_filter(ViewFilter::All)],
+            Content::Search {
+                folder: Some(folder),
+                ..
+            } => vec![ViewSpec::folder(folder)],
+            Content::Search { folder: None, .. } | Content::Nothing => {
+                let moves = !matches!(action, Triage::Read(_) | Triage::Star(_));
+                self.mailbox
+                    .folders()
+                    .into_iter()
+                    .filter(|folder| accounts.contains(&folder.account) && folder.selectable)
+                    .filter(|folder| !matches!(folder.role, FolderRole::Trash | FolderRole::Junk))
+                    .filter(|folder| {
+                        !moves || !matches!(folder.role, FolderRole::Sent | FolderRole::Drafts)
+                    })
+                    .map(|folder| ViewSpec::folder(folder.id))
+                    .collect()
+            }
+        }
+    }
+
+    /// Messages the user marks read or unread aren't marked read again when the selection
+    /// leaves the conversation they were opened in.
+    fn forget_read_on_leave(&self, action: Triage, targets: &[Target]) {
         if matches!(action, Triage::Read(_)) {
             self.read_on_leave
                 .borrow_mut()
                 .1
                 .retain(|pending| targets.iter().all(|target| target.id != pending.id));
         }
-        let ids: Vec<MessageId> = targets.iter().map(|target| target.id).collect();
-        list.advance_after(&ids);
-        triage.queue(action, targets, Origin::User);
+    }
+
+    /// Send and Archive (the fork's phase B), once `draft`, a reply to `message`, is queued: its
+    /// conversation is archived as `e` archives it (`rows`, the selection's taken when the send
+    /// was asked for, a conversation row standing for its members in the view's folders;
+    /// `None`: its Inbox messages, read from the store) and the list moves on; the archive's
+    /// toast says the send goes and its Undo takes the send back too. With nothing to archive,
+    /// the send gets its own toast.
+    pub fn archive_after_send(
+        self: &Rc<Self>,
+        draft: DraftId,
+        message: MessageId,
+        rows: Option<Vec<ListRow>>,
+    ) {
+        self.mark_started();
+        let held = outbox::take_held(draft);
+        if let Some(rows) = rows {
+            let keys: Vec<RowKey> = rows.iter().map(ListRow::key).collect();
+            let conversations = rows
+                .iter()
+                .filter(|row| matches!(row, ListRow::Conversation(_)))
+                .count() as u32;
+            let counted = match conversations {
+                0 => triage::Counted::Messages,
+                count => triage::Counted::Conversations(count),
+            };
+            let members = self.expand_rows(Triage::Archive, &rows);
+            let weak = Rc::downgrade(self);
+            glib::spawn_future_local(async move {
+                let targets = members.await.unwrap_or_default();
+                if let Some(state) = weak.upgrade() {
+                    state.archive_sent(draft, held, targets, &keys, counted);
+                }
+            });
+            return;
+        }
+        let Some(reply) = self
+            .mailbox
+            .store()
+            .map(|store| store.conversation(message))
+        else {
+            self.archive_sent(draft, held, Vec::new(), &[], triage::Counted::Messages);
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let conversation = reply.recv().await.ok().and_then(|read| read.value);
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let mut keys = Vec::new();
+            let targets: Vec<Target> = conversation
+                .map(|conversation| {
+                    keys.push(RowKey::Conversation(conversation.thread));
+                    conversation
+                        .messages
+                        .iter()
+                        .filter(|member| member.role == FolderRole::Inbox)
+                        .map(|member| Target {
+                            id: member.summary.id,
+                            folder: member.summary.folder,
+                            flags: member.summary.flags,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // The list may show it as one conversation row or as its message rows.
+            keys.extend(targets.iter().map(|target| RowKey::Message(target.id)));
+            let counted = match state.list() {
+                Some(list) if list.shows_conversations() => triage::Counted::Conversations(1),
+                _ => triage::Counted::Messages,
+            };
+            state.archive_sent(draft, held, targets, &keys, counted);
+        });
+    }
+
+    /// Archives `targets` once `draft` is sent (`held`: its send waits out the undo window),
+    /// the list moving on from the rows of `keys`; the toast counts what `counted` says.
+    fn archive_sent(
+        self: &Rc<Self>,
+        draft: DraftId,
+        held: Option<AccountId>,
+        targets: Vec<Target>,
+        keys: &[RowKey],
+        counted: triage::Counted,
+    ) {
+        let folders = self.mailbox.folders();
+        let archivable = !targets.is_empty()
+            && triage::availability(ActionId::Archive, &targets, &folders).enabled();
+        if !archivable {
+            if held.is_some() {
+                outbox::announce(self, draft);
+            }
+            return;
+        }
+        let (Some(triage), Some(list)) = (self.triage(), self.list()) else {
+            return;
+        };
+        list.advance_after(keys);
+        if held.is_none() {
+            triage.queue_counted(Triage::Archive, targets, Origin::User, counted);
+            return;
+        }
+        // The toast shows while either can be undone: the send's window may be longer than
+        // the archive's. Without one (`undo_send_seconds = 0`) the send went at once: Undo
+        // takes back the archive alone.
+        let window = outbox::send_window(self);
+        let weak = Rc::downgrade(self);
+        let undo: Also = if window.is_zero() {
+            Rc::new(|| {})
+        } else {
+            Rc::new(move || {
+                if let Some(state) = weak.upgrade() {
+                    outbox::undo_send(&state, draft);
+                }
+            })
+        };
+        triage.queue_with_shown(
+            Triage::Archive,
+            targets,
+            counted,
+            outbox::SENDING_TEXT.to_owned(),
+            undo,
+            window,
+        );
     }
 
     /// Move to…: the picker over the account's folders; insensitive across accounts.
     fn open_move_to(self: &Rc<Self>, list: &MessageList) {
-        let (Some(window), Ok(targets)) = (self.window(), list.selected_targets()) else {
+        let (Some(window), Ok(rows)) = (self.window(), list.selected_rows()) else {
             return;
         };
+        let targets: Vec<Target> = rows.iter().map(Target::of_row).collect();
         let folders = self.mailbox.folders();
         let Ok(choices) = triage::move_choices(&targets, &folders) else {
             return;
@@ -1590,58 +2322,32 @@ impl AppState {
             return;
         }
         let weak = Rc::downgrade(self);
-        let count = targets.len() as u32;
-        move_to::present(window.window(), &choices, &folders, count, move |folder| {
-            if let Some(state) = weak.upgrade() {
-                state.move_targets(folder, targets.clone());
-            }
-        });
-    }
-
-    fn move_targets(&self, folder: FolderId, targets: Vec<Target>) {
-        let (Some(triage), Some(list)) = (self.triage(), self.list()) else {
-            return;
-        };
-        self.mark_started();
-        let ids: Vec<MessageId> = targets.iter().map(|target| target.id).collect();
-        list.advance_after(&ids);
-        triage.queue(Triage::MoveTo(folder), targets, Origin::User);
+        let count = rows.len() as u32;
+        let conversations = list.shows_conversations();
+        move_to::present(
+            window.window(),
+            &choices,
+            &folders,
+            count,
+            conversations,
+            move |folder| {
+                if let Some(state) = weak.upgrade() {
+                    state.mark_started();
+                    state.queue_rows(Triage::MoveTo(folder), rows.clone());
+                }
+            },
+        );
     }
 
     /// The folders Mark Folder as Read marks for what the list shows, and its name: a folder,
     /// or every account's Inbox for All Inboxes.
     fn read_folders(&self, scope: Option<ViewScope>) -> (Vec<FolderId>, String) {
-        let folders = self.mailbox.folders();
-        match scope {
-            Some(ViewScope::Folder(id)) => (
-                vec![id],
-                folders
-                    .iter()
-                    .find(|folder| folder.id == id)
-                    .map(triage::folder_title)
-                    .unwrap_or_default(),
-            ),
-            Some(ViewScope::UnifiedInbox) => (
-                folders
-                    .iter()
-                    .filter(|folder| folder.role == FolderRole::Inbox)
-                    .map(|folder| folder.id)
-                    .collect(),
-                "All Inboxes".to_owned(),
-            ),
-            None => (Vec::new(), String::new()),
-        }
+        read_folders(scope, &self.mailbox.folders())
     }
 
     /// Unread messages the sidebar counts for what `scope` shows.
     fn unread_in(&self, scope: Option<ViewScope>) -> u32 {
-        let (ids, _) = self.read_folders(scope);
-        self.mailbox
-            .folders()
-            .iter()
-            .filter(|folder| ids.contains(&folder.id))
-            .map(|folder| folder.unread)
-            .sum()
+        unread_in(scope, &self.mailbox.folders())
     }
 
     fn mark_read(&self, scope: Option<ViewScope>) {
@@ -1655,27 +2361,224 @@ impl AppState {
         }
     }
 
-    /// Commands' titles where they differ from the registry's, for the palette.
+    /// The window's palette, built hidden with it, its recent commands read from
+    /// `palette.toml` and saved there when it runs one; and the window's keys that yield to the
+    /// focused widget, its Ctrl+K (Superhuman pass).
+    fn install_palette(self: &Rc<Self>, window: &Window, keymap: &Keymap) {
+        let palette = palette::install(window.window());
+        let path = self.config.dirs.state.join(PALETTE_FILE);
+        let read = path.clone();
+        let weak = palette.downgrade();
+        glib::spawn_future_local(async move {
+            let recent = gio::spawn_blocking(move || {
+                sealwax_infrastructure::settings_files::read_optional(&read)
+                    .ok()
+                    .flatten()
+                    .map(|text| Recent::parse(&text))
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            if let Some(palette) = weak.upgrade() {
+                palette.set_recent(recent);
+            }
+        });
+        palette.connect_recent_changed(move |recent| {
+            let (path, text) = (path.clone(), recent.to_text());
+            glib::spawn_future_local(async move {
+                let written = gio::spawn_blocking(move || {
+                    if let Some(dir) = path.parent() {
+                        sealwax_infrastructure::xdg::ensure_private_dir(dir)?;
+                    }
+                    sealwax_infrastructure::accounts::replace(&path, &text)
+                })
+                .await;
+                if let Ok(Err(error)) = written {
+                    tracing::warn!(%error, "the palette's recent commands can't be saved");
+                }
+            });
+        });
+        self.palette.replace(Some(palette));
+        let keys = actions::ScopedShortcuts::new(Scope::Window, keymap);
+        keys.attach(window.window(), gtk4::PropagationPhase::Bubble);
+        self.window_keys.replace(Some(keys));
+    }
+
+    /// The window's command palette.
+    pub fn palette(&self) -> Option<palette::Palette> {
+        self.palette.borrow().clone()
+    }
+
+    /// The palette's key: opens it over the window with what suits the focus and the selection,
+    /// or closes it when it is open, so it never stacks. It stays shut while a dialog is open,
+    /// as Superhuman's does in its settings: it would open under the dialog.
+    fn toggle_palette(self: &Rc<Self>) {
+        let requested = Instant::now();
+        let (Some(window), Some(palette), Some(prefs)) =
+            (self.window(), self.palette(), self.preferences())
+        else {
+            return;
+        };
+        if palette.is_open() {
+            palette.close();
+            return;
+        }
+        if window.window().visible_dialog().is_some() {
+            return;
+        }
+        // A store change queued the commands' refresh for the next frame: the palette lists
+        // what applies now.
+        if self.refresh_queued.get() {
+            self.refresh_commands();
+        }
+        // A picker over the window (Send Later's, the snippets') gives way, the focus back in
+        // the draft it was for, before the palette sees where the focus is (the fork's phase B).
+        crate::picker::close_in(window.window());
+        // In a composer the palette lists and runs its commands too.
+        let composer = composer::focused(window.window()).map(|composer| composer.action_group());
+        let selection = self
+            .list()
+            .is_some_and(|list| list.reported() != Selected::Nothing);
+        palette.open(palette::Context {
+            keymap: prefs.keymap(),
+            composer,
+            titles: self.command_titles(),
+            selection,
+            places: self.palette_places(),
+            requested: Some(requested),
+        });
+    }
+
+    /// The folders the palette goes to once something is typed: every folder that holds mail,
+    /// by its sidebar name and, with several accounts, its account's; Go to Inbox and the
+    /// others stand for their own folders.
+    fn palette_places(self: &Rc<Self>) -> Vec<palette::Place> {
+        let folders = self.mailbox.folders();
+        let accounts = self.mailbox.accounts();
+        let commands = crate::go_to::command_places(accounts.len(), &folders);
+        folders
+            .iter()
+            .filter(|folder| folder.selectable)
+            .map(|folder| {
+                let name = crate::go_to::folder_name(folder, &folders);
+                let title = match accounts.iter().find(|account| account.id == folder.account) {
+                    Some(account) if accounts.len() > 1 => {
+                        format!("Go to {name} — {}", account.name)
+                    }
+                    _ => format!("Go to {name}"),
+                };
+                let (weak, id) = (Rc::downgrade(self), folder.id);
+                palette::Place {
+                    key: mailbox::folder_key(folder.id),
+                    title,
+                    command: commands
+                        .iter()
+                        .find(|(_, place)| *place == folder.id)
+                        .map(|(command, _)| *command),
+                    run: Rc::new(move || {
+                        if let Some(state) = weak.upgrade() {
+                            crate::go_to::show_folder(&state, id);
+                        }
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// The list's filters as commands (Superhuman pass; the chips' until then): Show Unread
+    /// Only and Show Starred Only show everything again when they are on, Show All Messages
+    /// clears any filter. The list keeps the keyboard focus, as Go to Starred leaves it there.
+    fn install_filters(self: &Rc<Self>, actions: &ActionSet) {
+        for (id, filter) in [
+            (ActionId::ShowUnreadOnly, ViewFilter::Unread),
+            (ActionId::ShowStarredOnly, ViewFilter::Starred),
+            (ActionId::ShowAttachmentsOnly, ViewFilter::Attachments),
+            (ActionId::ShowAllMessages, ViewFilter::All),
+        ] {
+            let weak = Rc::downgrade(self);
+            actions.connect(id, move || {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                if let Some(list) = state.list() {
+                    let wanted = if list.filter() == filter {
+                        ViewFilter::All
+                    } else {
+                        filter
+                    };
+                    list.set_filter(wanted);
+                    list.focus_selected();
+                }
+                state.refresh_commands();
+            });
+        }
+    }
+
+    /// Commands' titles where they differ from the registry's, for the palette; Go to Account
+    /// 1 to 9 by the accounts' names.
     fn command_titles(&self) -> Vec<(ActionId, String)> {
         let Some(list) = self.list() else {
             return Vec::new();
         };
         let targets = loaded_targets(&list);
         let folders = self.mailbox.folders();
-        let reply_all = compose_actions::reply_kind(self) == ReplyKind::ReplyAll;
+        let accounts: Vec<(ActionId, String)> = self
+            .mailbox
+            .accounts()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, account)| {
+                Some((
+                    ActionId::go_to_account(index + 1)?,
+                    format!("Go to {}", account.name),
+                ))
+            })
+            .collect();
         triage::COMMANDS
             .into_iter()
             .map(|id| (id, triage::availability(id, &targets, &folders).title))
             .filter(|(id, title)| *title != id.title())
             .map(|(id, title)| (id, title.to_owned()))
             .chain(crate::rules::titles(self))
-            .chain(reply_all.then(|| (ActionId::Reply, ActionId::ReplyAll.title().to_owned())))
+            .chain(crate::split_inbox::titles(self))
+            .chain(accounts)
             .collect()
+    }
+
+    /// Works out the commands' sensitivity once before the next frame, however many store
+    /// changes ask for it until then (a sync sends them in bursts). A selection change still
+    /// refreshes at once, so a key pressed right after it sees the right commands.
+    fn queue_refresh_commands(self: &Rc<Self>) {
+        if self.refresh_queued.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let run = move || {
+            if let Some(state) = weak.upgrade()
+                && state.refresh_queued.get()
+            {
+                state.refresh_commands();
+            }
+        };
+        match self.window().filter(|window| window.window().is_mapped()) {
+            Some(window) => {
+                window.window().add_tick_callback(move |_, _| {
+                    run();
+                    glib::ControlFlow::Break
+                });
+            }
+            // No frames without a window on screen: on the next idle instead.
+            None => {
+                glib::idle_add_local_once(run);
+            }
+        }
     }
 
     /// Enables the mail commands where they apply to the selection, with their titles and
     /// reasons in the reader's toolbar and on the batch page (ML-052).
     pub(crate) fn refresh_commands(&self) {
+        // Whatever was queued is done by this one; a tick still to come finds nothing to do.
+        self.refresh_queued.set(false);
         let (Some(list), Some(window)) = (self.list(), self.window()) else {
             return;
         };
@@ -1690,6 +2593,10 @@ impl AppState {
         let targets = loaded_targets(&list);
         let folders = self.mailbox.folders();
         let reader = self.reader();
+        if let Some(reader) = &reader {
+            // Star is filled while it would unstar: every selected message is starred.
+            reader.set_starred(triage::star_action(&targets) == Triage::Star(false));
+        }
         for id in triage::COMMANDS {
             let availability = triage::availability(id, &targets, &folders);
             actions.set_applies(id, availability.enabled());
@@ -1702,6 +2609,18 @@ impl AppState {
                 &reader::tooltip(&keymap, id, availability.title, availability.reason),
             );
         }
+        // Remind Me's clock on the toolbar and the batch bar names its key, and says why it is
+        // off where nothing can be reminded (phase C).
+        let remind = ActionId::RemindMe;
+        let reason = crate::remind::unavailable(&list, &folders);
+        if let Some(reader) = &reader {
+            reader.set_command(remind, remind.title(), reason);
+        }
+        window.batch_page().set_command(
+            remind,
+            remind.title(),
+            &reader::tooltip(&keymap, remind, remind.title(), reason),
+        );
         let one = matches!(list.reported(), Selected::One(_));
         for id in [
             ActionId::OpenMessage,
@@ -1711,23 +2630,29 @@ impl AppState {
         ] {
             actions.set_applies(id, one);
         }
+        // Select All isn't held to the rows: a filter's reload would leave it stale, and on an
+        // empty list it selects nothing.
         actions.set_applies(ActionId::Select, list.model().total() > 0);
         actions.set_applies(
             ActionId::MarkFolderRead,
-            list.query().is_empty() && self.unread_in(list.scope()) > 0,
+            list.query().is_empty() && unread_in(list.scope(), &folders) > 0,
         );
+        actions.set_applies(ActionId::ShowAllMessages, list.filter() != ViewFilter::All);
         let undo = self.triage().is_some_and(|triage| triage.can_undo())
             || outbox::can_undo()
-            || crate::rules::can_undo();
+            || crate::rules::can_undo()
+            || crate::split_inbox::can_undo();
         actions.set_applies(ActionId::Undo, undo);
         compose_actions::refresh(actions, &list, &targets, &folders);
         crate::folders::refresh(self, actions);
         crate::rules::refresh(self, actions);
+        crate::split_inbox::refresh(self, actions);
+        crate::remind::refresh_commands(actions, &list, &folders);
     }
 
     /// Shows `notice` as a toast; with `replaces`, it takes the last action's toast's place
     /// (ADR-015: only the last action is undoable from the toast).
-    fn show_notice(self: &Rc<Self>, notice: &Notice, replaces: bool) {
+    pub(crate) fn show_notice(self: &Rc<Self>, notice: &Notice, replaces: bool) {
         let toast = adw::Toast::builder()
             .title(notice.text.as_str())
             .use_markup(false)
@@ -1765,7 +2690,8 @@ impl AppState {
 
     /// The reader showed message bodies of the selected message's conversation (ML-057): the
     /// unread ones are read now, or in the Unread view once the selection leaves the message, or
-    /// when a hidden reader is shown ([`MARK_READ_ON_OPEN`]).
+    /// when a reader off screen comes on screen ([`MARK_READ_ON_OPEN`]). A reader laid out
+    /// behind a Focused list isn't on screen: moving the list's cursor reads nothing.
     fn messages_opened(&self, opened: &Opened) {
         if !self.mark_read_on_open.get() || self.reader_shows.get() != Some(opened.selected) {
             return;
@@ -1784,8 +2710,8 @@ impl AppState {
             return;
         }
         let visible = self
-            .reader()
-            .is_some_and(|reader| reader.widget().is_mapped());
+            .window()
+            .is_some_and(|window| window.reader_on_screen());
         if visible {
             self.read_opened(opened.selected, targets);
         } else {
@@ -1793,8 +2719,9 @@ impl AppState {
         }
     }
 
-    /// The reader came on screen (one pane at a time): the messages it showed are read now.
-    fn reader_mapped(&self) {
+    /// The reader came on screen (opened in the list's place): the messages it showed are read
+    /// now.
+    fn reader_on_screen(&self) {
         let waiting = self.read_when_shown.take();
         if let Some(selected) = self.reader_shows.get()
             && !waiting.is_empty()
@@ -1848,6 +2775,7 @@ impl AppState {
             blobs,
             options,
             self.microsoft_client_id(),
+            self.google_client(),
         ) {
             Ok(engine) => engine,
             Err(error) => {
@@ -1892,6 +2820,17 @@ impl AppState {
         }
     }
 
+    /// Hands the Google client in use to the engine this application started.
+    fn send_google_client(&self) {
+        if self.engine_service.borrow().is_none() {
+            return;
+        }
+        let client = self.google_client();
+        if self.engine.send(Command::GoogleClient { client }).is_err() {
+            tracing::warn!("the engine stopped listening");
+        }
+    }
+
     /// Reads `layout.toml` off the GTK thread; the first window waits up to `SETTINGS_WAIT`
     /// for it, so its panes start at the widths they were dragged to.
     fn read_layout(self: &Rc<Self>) {
@@ -1926,7 +2865,8 @@ impl AppState {
         self.mailbox
             .set_folded(layout.folded.clone().into_iter().collect());
         self.mailbox.set_view(layout.view.clone());
-        if let Some(window) = self.window() {
+        let window = self.window();
+        if let Some(window) = &window {
             window.set_pane_widths(
                 layout
                     .sidebar_width
@@ -1935,6 +2875,9 @@ impl AppState {
             );
         }
         self.layout.replace(Some(layout));
+        if let Some(window) = window {
+            self.apply_window_layout(&window);
+        }
     }
 
     /// Changes the remembered layout with `change` and writes it off the GTK thread.
@@ -1950,10 +2893,21 @@ impl AppState {
         self.mailbox.set_view(layout.view.clone());
         self.layout.replace(Some(layout.clone()));
         let path = self.config.dirs.layout_file();
+        // Writes run one at a time, and one older than what is on disk is skipped: two changes
+        // in a row (both widths reset by double clicks) could land in either order.
+        let generation = LAYOUT_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         glib::spawn_future_local(async move {
-            let written =
-                gio::spawn_blocking(move || sealwax_infrastructure::layout::write(&path, &layout))
-                    .await;
+            let written = gio::spawn_blocking(move || {
+                let mut on_disk = LAYOUT_WRITTEN
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *on_disk > generation {
+                    return Ok(());
+                }
+                *on_disk = generation;
+                sealwax_infrastructure::layout::write(&path, &layout)
+            })
+            .await;
             if let Ok(Err(error)) = written {
                 tracing::warn!(%error, "the window's layout can't be saved");
             }
@@ -2067,7 +3021,7 @@ impl AppState {
         });
     }
 
-    /// A folder renamed in Sealwax: its fold and its subfolders' follow it in the remembered
+    /// A folder renamed in Pronto: its fold and its subfolders' follow it in the remembered
     /// layout, so the sidebar shows them as the user left them.
     pub(crate) fn folder_renamed(
         &self,
@@ -2090,7 +3044,8 @@ impl AppState {
         });
     }
 
-    /// Remove Account and Edit Account are available while there is an account to offer.
+    /// Remove Account and Edit Account are available while there is an account to offer, and
+    /// Go to Account 1 to 9 up to the number of accounts there are.
     fn update_account_commands(&self) {
         if let Some(actions) = self.win_actions.borrow().as_ref() {
             actions.set_available(
@@ -2098,6 +3053,7 @@ impl AppState {
                 !self.removable_accounts().is_empty(),
             );
             actions.set_available(ActionId::EditAccount, !self.editable_accounts().is_empty());
+            crate::go_to::show_accounts(actions, self.mailbox.accounts().len());
         }
     }
 
@@ -2119,6 +3075,7 @@ impl AppState {
                     address: settings.address.clone(),
                     label: settings.label.clone(),
                     color: settings.color,
+                    signature: settings.signature.clone(),
                 })
             })
             .collect()
@@ -2197,7 +3154,7 @@ impl AppState {
         );
     }
 
-    /// The engine without a first frame (ML-084). When Sealwax starts with no main window
+    /// The engine without a first frame (ML-084). When Pronto starts with no main window
     /// (`--background`, or a `mailto:` link or `--compose` opening a composer alone), the
     /// engine starts once the store is open and the settings are read, with the watch on resume
     /// and the network, so mail syncs and notifications come without a window. A main window
@@ -2245,14 +3202,28 @@ impl AppState {
     /// with it, so the window, its list and its reader are freed (their views back in the
     /// reader's pool) and a window built again costs no more memory. A message the reader left
     /// to be marked read on leaving is left now.
-    fn main_window_closed(&self) {
+    fn main_window_closed(self: &Rc<Self>) {
         self.leave_opened(None);
         self.window.replace(None);
         self.list.replace(None);
-        self.reader.replace(None);
+        if let Some(reader) = self.reader.take() {
+            reader.rest();
+        }
         self.reader_shows.set(None);
         self.toast.replace(None);
         self.win_actions.replace(None);
+        self.palette.replace(None);
+        self.window_keys.replace(None);
+        // The composer's spare editor and web process too, once the window's cards have gone
+        // (they go as it is destroyed), unless a window shows again meanwhile.
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(state) = weak.upgrade()
+                && state.window().is_none()
+            {
+                composer::rest(&state);
+            }
+        });
     }
 
     /// Runs `hook` once `window` has painted its first frame: the first window's with
@@ -2310,23 +3281,69 @@ impl AppState {
     /// The reader (ML-027) shows the list's selection, with its place in the list ("n of N")
     /// and previous and next. Clearing goes reader first, then the window: the other order
     /// moves GTK's focus through a view already back in the pool.
-    fn install_reader(self: &Rc<Self>, window: &Window, list: &MessageList, keymap: &Keymap) {
+    fn install_reader(
+        self: &Rc<Self>,
+        window: &Window,
+        list: &MessageList,
+        keymap: &Keymap,
+        window_opened: Instant,
+    ) {
         let Some(theme) = self.theme() else {
             return;
         };
+        window.follow_reader_column(&theme);
         let source: Rc<dyn MessageSource> = self.mailbox.clone();
         let reader = Reader::new(source, theme, keymap, &self.config.dirs.cache);
+        reader.set_window_opened(window_opened);
         if let Some(prefs) = self.preferences() {
             reader.set_conversation_order(prefs.config().reader.conversation_order);
             reader.set_default_reply(prefs.config().reader.reply);
         }
+        reader.set_message_rows(self.grouping() == ViewGrouping::Messages);
         reader.connect_engine(&self.engine);
-        reader.prewarm();
+        reader.prewarm_in(window.dock().widget());
+        // The composer's spare editor, out of the way of the first frames (the fork's phase B).
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_full(composer::PREWARM_AFTER, glib::Priority::LOW, move || {
+            if let Some(state) = weak.upgrade() {
+                composer::prewarm(&state);
+            }
+            glib::ControlFlow::Break
+        });
         window.set_reader_toolbar(&reader.toolbar());
-        // The batch page stands in for the reader: the Reader scope's keys work there too.
+        window.set_reader_quiet(reader.quiet_check());
+        // Toasts keep off the inline reply while it is open (phase C's visual QA: "Sending
+        // undone" covered the restored reply's footer), placed again when it changes.
+        let shown = reader.clone();
+        window
+            .dock()
+            .keep_toasts_off(move |overlay| shown.quick_reply_area(overlay));
+        let dock = window.dock().downgrade();
+        reader.connect_quick_state(move |_| {
+            if let Some(dock) = dock.upgrade() {
+                dock.place_toasts_again();
+            }
+        });
+        // And as the column scrolls it (phase C's review: a toast placed off the reply could
+        // cover it after a scroll).
+        let dock = window.dock().downgrade();
+        reader.connect_reply_moved(move || {
+            if let Some(dock) = dock.upgrade() {
+                dock.place_toasts_again();
+            }
+        });
+        // The batch page stands in for the reader: the Reader scope's keys work there too. They
+        // work in the whole reader pane, its bar's Back button included, so a focus resting
+        // there doesn't swallow them.
         reader
             .keys()
             .attach(&window.batch_page().widget, gtk4::PropagationPhase::Bubble);
+        if let Some(pane) = window.pane_widget("reader") {
+            reader.keys().attach(&pane, gtk4::PropagationPhase::Bubble);
+        }
+        // `h` where nothing can be reminded says why, in the reader too (phase C).
+        crate::remind::explain_keys(self, reader.keys());
+        crate::triage::explain_keys(self, reader.keys());
 
         let weak = Rc::downgrade(self);
         list.connect_message_selected(move |id| {
@@ -2341,6 +3358,7 @@ impl AppState {
             }
             reader.show_next(id);
             state.update_position();
+            state.prefetch_neighbours();
         });
         let weak = Rc::downgrade(self);
         list.connect_selection_cleared(move || {
@@ -2355,6 +3373,14 @@ impl AppState {
                 if let Some(target) = state.window() {
                     target.clear_reader();
                 }
+            }
+        });
+        // The same conversation still selected over rows read anew (a filter, Split Inbox turned
+        // on or off): "1 of N" counts the new rows.
+        let weak = Rc::downgrade(self);
+        list.connect_reset(move || {
+            if let Some(state) = weak.upgrade() {
+                state.update_position();
             }
         });
         if let Some(id) = list.selected() {
@@ -2380,10 +3406,56 @@ impl AppState {
                 state.messages_opened(opened);
             }
         });
+        // On screen (opened in the list's place, or beside it), what the reader showed is read,
+        // and says its dates as of now (laid out behind a Focused list, it may have waited
+        // there a while); alone in front, it takes the keyboard focus unless it has it. Off
+        // screen (the list in its place), the conversation it keeps starts afresh: opened
+        // again, its reply answers the latest message, not one the user moved to before.
         let weak = Rc::downgrade(self);
-        reader.widget().connect_map(move |_| {
-            if let Some(state) = weak.upgrade() {
-                state.reader_mapped();
+        window.connect_reader_on_screen(move |on| {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            if !on {
+                if let Some(reader) = state.reader() {
+                    reader.left_screen();
+                }
+                state.contact_moved.set(None);
+                state.follow_contact();
+                return;
+            }
+            if let Some(reader) = state.reader() {
+                reader.redate_shown();
+            }
+            state.reader_on_screen();
+            crate::remind::seen(&state);
+            if let (Some(window), Some(list)) = (state.window(), state.list())
+                && window.is_one_pane()
+                && !window.reader_has_focus()
+                && let Some(id) = list.selected()
+            {
+                state.focus_reader(id);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        reader.connect_shown(move |shown| {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            crate::remind::seen(&state);
+            if state.focus_on_shown.get() != Some(shown.id) {
+                return;
+            }
+            state.focus_on_shown.set(None);
+            // Only while the focus still waits where opening left it: a search field or a
+            // folder picked meanwhile keeps it.
+            if let (Some(window), Some(reader), Some(list)) =
+                (state.window(), state.reader(), state.list())
+                && window.reader_on_screen()
+                && list.selected() == Some(shown.id)
+                && focus_waits(&window, &list)
+            {
+                reader.focus_message(shown.id);
             }
         });
         if !self.reader_listening.replace(true) {
@@ -2395,6 +3467,9 @@ impl AppState {
                     if let Some(reader) = state.reader() {
                         reader.store_changed(event);
                     }
+                    if let Some(pane) = state.contact() {
+                        pane.store_changed(event.version.0);
+                    }
                 }
             });
         }
@@ -2402,8 +3477,167 @@ impl AppState {
             crate::reader::commands::connect(actions, &reader);
         }
         compose_actions::connect_reader(&reader, window);
+        self.install_contact(window, &reader);
         self.reader.replace(Some(reader));
         self.refresh_commands();
+    }
+
+    /// The contact pane (phase C, docs/superhuman/contact.md) in the conversation's right
+    /// margin. It follows the conversation the reader shows (laid out behind a Focused list
+    /// too, so Enter shows it complete), the message `n` or `p` moved to and the message whose
+    /// card the user put the keyboard focus in; a Recent conversation opens as a notification's
+    /// does, in its folder; the search link searches every folder from the list.
+    fn install_contact(self: &Rc<Self>, window: &Window, reader: &Reader) {
+        let pane = crate::contact::ContactPane::new(self.mailbox.clone());
+        window.set_contact_pane(&pane.widget());
+        window.set_contact_wanted(self.contact_details());
+        // Hidden with the focus in it: the focus goes to the conversation's message, and the
+        // pane keeps whom it showed.
+        let weak = Rc::downgrade(self);
+        window.connect_contact_left(move || {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let focused = match (state.reader(), state.reader_shows.get()) {
+                (Some(reader), Some(id)) => reader.focus_message(id),
+                _ => false,
+            };
+            if !focused && let Some(window) = state.window() {
+                window.focus_reader_bar();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        pane.connect_open(move |found| {
+            if let Some(state) = weak.upgrade() {
+                state.open_contact_conversation(found.message);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        pane.connect_search(move |person| {
+            if let Some(state) = weak.upgrade() {
+                state.search_all_mail_from(&person.email);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        pane.connect_copied(move |person| {
+            if let Some(state) = weak.upgrade() {
+                state.show_toast(&adw::Toast::new(&format!("Copied {}", person.email)), true);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        reader.connect_shown(move |shown| {
+            if let Some(state) = weak.upgrade() {
+                if state.contact_selected.replace(Some(shown.id)) != Some(shown.id) {
+                    let opened = state.contact_opened.take();
+                    state
+                        .contact_moved
+                        .set(opened.filter(|opened| *opened == shown.id));
+                }
+                state.follow_contact();
+            }
+        });
+        // A reply that came, or the conversation gone (0).
+        let weak = Rc::downgrade(self);
+        reader.connect_size(move |_| {
+            if let Some(state) = weak.upgrade() {
+                state.follow_contact();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        reader.connect_moved(move |_| {
+            if let Some(state) = weak.upgrade() {
+                state.contact_moved.set(None);
+                state.follow_contact();
+            }
+        });
+        self.contact.replace(Some(pane));
+    }
+
+    /// The contact pane shows whom the reader's conversation is with, now.
+    fn follow_contact(&self) {
+        let (Some(reader), Some(pane)) = (self.reader(), self.contact()) else {
+            return;
+        };
+        let Some(conversation) = reader.conversation() else {
+            pane.show(None, None);
+            return;
+        };
+        let mine: Vec<String> = self
+            .mailbox
+            .accounts()
+            .into_iter()
+            .map(|account| account.address.to_lowercase())
+            .collect();
+        let target = crate::contact::target(
+            &conversation,
+            reader.chosen_message().or(self.contact_moved.get()),
+            &mine,
+        );
+        pane.show(target, conversation.thread);
+    }
+
+    /// A conversation of the contact pane's Recent list: shown in the list (its folder, unless
+    /// All Inboxes shows it) and open at `message`, as a notification's click opens one; the
+    /// pane goes on showing the person, as if the user had moved to their message.
+    fn open_contact_conversation(self: &Rc<Self>, message: MessageId) {
+        let Some(reply) = self.mailbox.store().map(|store| store.message(message)) else {
+            return;
+        };
+        self.contact_opened.set(Some(message));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let summary = reply
+                .recv()
+                .await
+                .ok()
+                .and_then(|found| found.value)
+                .map(|detail| detail.summary);
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            match summary {
+                Some(summary) => {
+                    notify::select(&state, &summary).await;
+                }
+                None => state.show_toast(
+                    &adw::Toast::new("That conversation is no longer here."),
+                    true,
+                ),
+            }
+        });
+    }
+
+    /// The contact pane's "Search all mail from …": the list shows the search's results from
+    /// every folder, the first selected.
+    fn search_all_mail_from(&self, email: &str) {
+        if let Some(window) = self.window()
+            && window.is_one_pane()
+            && window.pane() == Pane::Reader
+        {
+            window.show_pane(Pane::List);
+        }
+        if let Some(list) = self.list() {
+            list.search_for(&sealwax_domain::contact::search_query(email));
+        }
+    }
+
+    /// The reader lays out ahead the conversations next to the selection: where `j`, `k`,
+    /// archive and delete go (the list's next row first), so moving there is one swap.
+    fn prefetch_neighbours(&self) {
+        let (Some(reader), Some(list)) = (self.reader(), self.list()) else {
+            return;
+        };
+        let Some(position) = list.selected_position() else {
+            return;
+        };
+        // The messages the list reports for those rows (a conversation's anchor), which are the
+        // ones `show_next` gets when the selection moves there.
+        let ids: Vec<MessageId> = [position.checked_add(1), position.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|position| list.message_at(position))
+            .collect();
+        reader.prefetch(&ids);
     }
 
     /// "n of N" for the message the reader shows; new mail above it moves it.
@@ -2445,9 +3679,19 @@ impl AppState {
         }
     }
 
-    /// Preferences and Customize Shortcuts: the file, created with its defaults when missing,
-    /// in the default text editor; the outcome as a toast.
+    /// Optional AI jobs and settings, shared by the window and reader.
+    pub fn ai(&self) -> Option<Rc<crate::ai::Controller>> {
+        self.ai.get().cloned()
+    }
+
+    /// Preferences opens Settings → AI; other configuration files open in the text editor.
     fn open_settings(&self, file: SettingsFile) {
+        if file == SettingsFile::Config {
+            if let (Some(ai), Some(window)) = (self.ai(), self.window()) {
+                ai.present(window.window());
+            }
+            return;
+        }
         let (Some(prefs), Some(window)) = (self.preferences(), self.window()) else {
             return;
         };
@@ -2469,7 +3713,7 @@ impl AppState {
     }
 
     /// The window, built on the first request.
-    fn window_or_new(self: &Rc<Self>, app: &SealwaxApplication) -> Window {
+    fn window_or_new(self: &Rc<Self>, app: &ProntoApplication) -> Window {
         if let Some(window) = self.window() {
             return window;
         }
@@ -2479,6 +3723,7 @@ impl AppState {
         self.install_window(app, &window);
         composer::keep_drafts_on_close(window.window());
         self.remember_layout(&window);
+        self.apply_window_layout(&window);
         self.update_banner();
         window
     }
@@ -2529,10 +3774,19 @@ impl AppState {
 
 /// A `mailto:` link to write a message from (PRD C8): its safe fields go to a composer window
 /// (`domain::mailto` drops `attach` and the rest); only the request's kind is logged.
-fn compose(app: &SealwaxApplication, uri: &str) {
+fn compose(app: &ProntoApplication, uri: &str) {
     match mailto::parse(uri) {
         Ok(mailto) => composer::open(app, ComposeRequest::Mailto(mailto)),
         Err(error) => tracing::warn!("{error}"),
+    }
+}
+
+/// Group by Conversation's state as the list's grouping.
+fn grouping_of(conversations: bool) -> ViewGrouping {
+    if conversations {
+        ViewGrouping::Conversations
+    } else {
+        ViewGrouping::Messages
     }
 }
 
@@ -2547,6 +3801,53 @@ fn quick_tooltips(keymap: &Keymap) -> Vec<(Quick, String)> {
         .collect()
 }
 
+/// The folders Mark Folder as Read marks for what the list shows, and its name: a folder, or
+/// every account's Inbox for All Inboxes.
+fn read_folders(
+    scope: Option<ViewScope>,
+    folders: &[sealwax_domain::model::Folder],
+) -> (Vec<FolderId>, String) {
+    match scope {
+        Some(ViewScope::Folder(id)) => (
+            vec![id],
+            folders
+                .iter()
+                .find(|folder| folder.id == id)
+                .map(triage::folder_title)
+                .unwrap_or_default(),
+        ),
+        Some(ViewScope::UnifiedInbox) => (
+            folders
+                .iter()
+                .filter(|folder| folder.role == FolderRole::Inbox)
+                .map(|folder| folder.id)
+                .collect(),
+            "All Inboxes".to_owned(),
+        ),
+        None => (Vec::new(), String::new()),
+    }
+}
+
+/// Unread messages the sidebar counts for what `scope` shows.
+fn unread_in(scope: Option<ViewScope>, folders: &[sealwax_domain::model::Folder]) -> u32 {
+    let (ids, _) = read_folders(scope, folders);
+    folders
+        .iter()
+        .filter(|folder| ids.contains(&folder.id))
+        .map(|folder| folder.unread)
+        .sum()
+}
+
+/// The keyboard focus still waits where opening a conversation left it: nowhere, on the
+/// reader's Back button, or on the list's rows.
+fn focus_waits(window: &Window, list: &MessageList) -> bool {
+    let view: &gtk4::Widget = list.list_view().upcast_ref();
+    match GtkWindowExt::focus(window.window()) {
+        None => true,
+        Some(focus) => window.back_has_focus() || &focus == view || focus.is_ancestor(view),
+    }
+}
+
 /// The selected messages whose rows are loaded.
 fn loaded_targets(list: &MessageList) -> Vec<Target> {
     list.selected_positions()
@@ -2554,6 +3855,9 @@ fn loaded_targets(list: &MessageList) -> Vec<Target> {
         .filter_map(|position| list.target_at(position))
         .collect()
 }
+
+/// What a triage command's Undo also runs (Send and Archive: the send goes back too).
+type Also = Rc<dyn Fn()>;
 
 /// Resolves once both futures have, polling them together.
 async fn both(first: impl Future<Output = ()>, second: impl Future<Output = ()>) {

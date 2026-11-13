@@ -57,7 +57,7 @@ fn without_a_keyring_secrets_stay_in_memory_and_the_app_hears_it_once() {
     };
     let store = Store::open(&dirs.store_file(), options).unwrap();
     let engine = Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: Arc::new(store),
         blobs,
         paths: AccountPaths::new(&dirs),
@@ -65,6 +65,7 @@ fn without_a_keyring_secrets_stay_in_memory_and_the_app_hears_it_once() {
         secrets: SecretBackend::Keyring,
         detect: DetectOptions::default(),
         microsoft_client_id: None,
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig::default(),
     })

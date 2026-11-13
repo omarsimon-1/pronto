@@ -1,0 +1,70 @@
+# The reader's toolbar (phase C: the visual QA and phase B's polish review), in the app's own
+# layout: the same centred 32 px buttons at every width (in the 710 px half tile they filled the
+# bar's height, a hovered one a block hanging from the window's top); Star's outline drawn at
+# full strength (Adwaita's own paints at 35 % and read as disabled); the bar kept to the
+# conversation's column in a Split pane narrower than the column (at 1100 px Next ended 10 px
+# past it); previous and next at the bar's end in select mode too (they followed More once
+# "n of N" hid). Every name and message is fictional.
+# Run: tools/headless.sh 70 target/debug/pronto --self-test tests/selftest/reader-bar.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open false
+conversation-account Personal alex.berg@example.test
+conversation-add trip
+conversation-add links
+conversation-add typical
+folder inbox Personal
+list-wait
+focus list
+
+# Focused at 1440 px: Star's outline is the app's full-strength glyph, the buttons 32 px high
+# and centred in the 48 px bar, the bar over the conversation's column.
+conversation-show trip-5
+focus list
+key Return
+wait-until assert-reader-on-screen true
+assert-icon reader-star non-starred-symbolic
+assert-glyph reader-star star-outline
+assert-edge reader-archive height 32
+assert-edge reader-archive top 8
+assert-edge reader-star height 32
+assert-edge reader-next height 32
+assert-edge reader-back height 32
+assert-aligned reader-back reader-page left
+assert-aligned reader-next reader-page right
+
+# The 710 px half tile: the same buttons, centred, not the bar's height.
+resize 710 900
+wait-frames 3
+assert-edge reader-archive height 32
+assert-edge reader-archive top 8
+assert-edge reader-star height 32
+assert-edge reader-back height 32
+assert-aligned reader-back reader-page left
+assert-aligned reader-next reader-page right
+
+# Split at 1100 px: the reader's pane is narrower than the column and its margins; the bar
+# narrows with the column.
+key Escape
+view-mode split
+resize 1100 900
+wait-frames 3
+conversation-show trip-5
+wait-until assert-reader-page message
+assert-shown reader-back false
+assert-aligned reader-archive reader-page left
+assert-aligned reader-next reader-page right
+
+# Select mode in Split: "n of N" hides; previous and next stay at the bar's end.
+resize 1440 900
+wait-frames 3
+assert-aligned reader-next reader-toolbar right
+click-row 0
+click-row 2 ctrl
+assert-select-mode true
+assert-reader-page batch
+wait-frames 2
+assert-shown reader-position false
+assert-aligned reader-next reader-toolbar right

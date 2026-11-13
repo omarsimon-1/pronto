@@ -1,0 +1,189 @@
+# The keyboard focus across the window's width classes (docs/superhuman/layout.md): crossing
+# 1280 px or 900 px keeps it where it was, in the list, an open conversation or the sidebar, so
+# the keys go on working (libadwaita hides the window's content for a frame as it switches, and
+# GTK used to move the focus to the list bar's search button meanwhile). What the new width no
+# longer shows gives the focus to what does. And in Split too, the last conversation archived
+# from the reader leaves Inbox Zero alone, never beside "No message selected". Every name and
+# message is fictional.
+# Run: tools/headless.sh 29 target/debug/pronto --self-test tests/selftest/layout-resize.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open false
+mail-account Personal
+mail-add Personal:inbox 10m "Hyttetur i oktober" "from=Ingrid Solberg" "text=Skal vi dra fredag?"
+mail-add Personal:inbox 20m "Styremøte torsdag" "from=Marius Dahl" "text=Agendaen kommer."
+mail-add Personal:inbox 30m "Kvittering" "from=Leah Kim" "text=Takk for bestillingen."
+mail-add Personal:inbox 40m "Lunsj fredag" "from=Leah Kim" "text=Klokka tolv?"
+folder inbox Personal
+list-wait
+
+# Focused, the list's keys at every crossing, both ways, and by two pixels.
+assert-view-mode focused
+focus list
+list-select 0
+wait-until assert-reader-selected
+key j
+assert-list-selected 1
+resize 1279 900
+assert-layout medium
+assert-list-focus list
+key j
+assert-list-selected 2
+resize 899 900
+assert-layout narrow
+assert-list-focus list
+key k
+assert-list-selected 1
+resize 901 900
+assert-layout medium
+assert-list-focus list
+key j
+assert-list-selected 2
+resize 1281 900
+assert-layout wide
+assert-list-focus list
+key k
+assert-list-selected 1
+# Hyprland's half tile, as a second window opens on the workspace, and back.
+resize 710 900
+assert-list-focus list
+key j
+assert-list-selected 2
+resize 1440 900
+assert-list-focus list
+key k
+assert-list-selected 1
+assert-focus-row 1
+
+# A conversation open in the list's place keeps the focus as well: j goes on, one Escape
+# comes back to the list on the row left.
+key Return
+assert-pane reader
+wait-until assert-focus reader
+resize 1279 900
+assert-focus reader
+resize 710 900
+assert-pane reader
+assert-focus reader
+key j
+assert-list-selected 2
+wait-until assert-reader-selected
+wait-until assert-focus reader
+resize 1440 900
+assert-focus reader
+key Escape
+assert-pane list
+assert-list-focus list
+assert-focus-row 2
+
+# The sidebar beside the list with the focus in it: a narrower window takes it away, and the
+# focus goes to the list.
+sidebar shown
+assert-sidebar inline
+focus folder:all-inboxes
+assert-focus folder:all-inboxes
+resize 1279 900
+assert-sidebar hidden
+wait-until assert-list-focus list
+key j
+assert-list-selected 3
+# Over the list with the focus in it: kept as the window narrows further; closed as it widens
+# past 1280 px unless it is wanted there.
+key <Control><Shift>s
+assert-sidebar overlay
+wait-until assert-focus folder:all-inboxes
+resize 899 900
+assert-sidebar overlay
+assert-focus folder:all-inboxes
+resize 1440 900
+assert-sidebar inline
+assert-focus folder:all-inboxes
+sidebar hidden
+wait-until assert-list-focus list
+resize 1100 900
+key <Control><Shift>s
+assert-sidebar overlay
+wait-until assert-focus folder:all-inboxes
+resize 1440 900
+assert-sidebar hidden
+wait-until assert-list-focus list
+key k
+assert-list-selected 2
+
+# Split: the list and the reader keep the focus across every class.
+view-mode split
+assert-view-mode split
+focus list
+key j
+assert-list-selected 3
+wait-until assert-reader-selected
+resize 1100 900
+assert-list-focus list
+key k
+assert-list-selected 2
+resize 800 900
+assert-pane list
+assert-list-focus list
+key k
+assert-list-selected 1
+resize 1440 900
+assert-list-focus list
+key Return
+wait-until assert-focus reader
+resize 1100 900
+assert-focus reader
+resize 800 900
+assert-pane reader
+assert-focus reader
+key Escape
+assert-pane list
+assert-list-focus list
+# The reader left in front for a narrow window while the focus was in the list: the focus goes
+# into the reader, whose keys work there; widened again, Back hides and the focus goes to the
+# list.
+resize 1440 900
+key Return
+wait-until assert-focus reader
+focus list
+resize 800 900
+assert-pane reader
+wait-until assert-focus reader-back
+assert-shown reader-back true
+resize 1440 900
+assert-shown reader-back false
+wait-until assert-list-focus list
+
+# Split, the last conversation archived from the reader: Inbox Zero alone, its focus with it,
+# the reader's empty page not beside it; its day turns at midnight.
+focus list
+list-select 0
+wait-until assert-reader-selected
+key Return
+wait-until assert-focus reader
+key e
+wait-until assert-list-count 3
+key e
+wait-until assert-list-count 2
+key e
+wait-until assert-list-count 1
+key e
+wait-until assert-list-count 0
+wait-until assert-pane list
+assert-list-empty "Inbox Zero"
+assert-shown inbox-zero true
+assert-shown reader false
+assert-shown reader-empty false
+wait-until assert-focus inbox-zero-area
+screenshot $DIR/../../.local/selftest/layout-split-inbox-zero.png
+list-clock 2026-10-28T23:59:00
+assert-label inbox-zero-date "Wednesday, October 28"
+list-clock 2026-10-29T00:00:30
+assert-label inbox-zero-date "Thursday, October 29"
+list-clock real
+# Undo brings one back: Split shows both panes again.
+key z
+wait-until assert-list-count 1
+assert-shown inbox-zero false
+assert-shown reader true

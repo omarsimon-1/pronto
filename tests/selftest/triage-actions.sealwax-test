@@ -7,7 +7,7 @@
 # (OpsQueued) on the fake engine, which runs none: a moved message is hidden from both folders
 # until the server has it, and Undo before it runs puts it back where it was, counts included.
 # Every message is fictional.
-# Run: tools/headless.sh 23 target/debug/sealwax --self-test tests/selftest/triage-actions.sealwax-test
+# Run: tools/headless.sh 23 target/debug/pronto --self-test tests/selftest/triage-actions.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -30,27 +30,38 @@ list-select 0
 wait-until assert-reader-page message
 assert-action-enabled win.archive true
 assert-tooltip reader-archive "Archive (e, y)"
-assert-tooltip reader-junk "Move to Junk (!, Ctrl+J)"
+assert-reader-more junk "Move to Junk"
 
-# Star and unstar, read and unread: in place, no toast, nothing to undo.
+# Star and unstar, read and unread: in place, no toast, nothing to undo. The toolbar's Star is
+# the outline until the message is starred, then the filled star; the outline is the app's own
+# glyph, drawn at full strength (Adwaita's paints at 35 %: it read as disabled).
+assert-icon reader-star non-starred-symbolic
+assert-glyph reader-star star-outline
 key s
 assert-list-row 0 starred true
 engine-expect ops-queued
 assert-toasts 0
 assert-undoable false
+wait-until assert-icon reader-star starred-symbolic
+assert-glyph reader-star theme
 key s
 assert-list-row 0 starred false
 engine-expect ops-queued
+wait-until assert-icon reader-star non-starred-symbolic
+assert-glyph reader-star star-outline
 key <Shift>i
 assert-list-row 0 unread false
 engine-expect ops-queued
 assert-action-enabled win.mark-read false
-assert-tooltip reader-mark-unread "Mark as Unread (Shift+U)"
-key <Shift>u
+# The key beside it is drawn as typed, "u" (GTK writes a letter in capitals: "U" read as
+# Shift+U, the Unread filter); Print keeps GTK's "Ctrl+P".
+assert-reader-more toggle-read "Mark as Unread" u u
+assert-reader-more print "Print…" <Control>p Ctrl+P
+key u
 assert-list-row 0 unread true
 engine-expect ops-queued
 assert-action-enabled win.mark-unread false
-assert-tooltip reader-mark-unread "Mark as Unread (Shift+U) — already unread"
+assert-reader-more toggle-read "Mark as Read" u u
 assert-toasts 0
 
 # Archive with e: the row leaves, the next message is selected, the toast offers Undo.
@@ -113,7 +124,7 @@ engine-reply older-loaded 0 complete
 assert-list-count 1
 focus list
 list-select 0
-assert-tooltip reader-junk "Not Junk (!, Ctrl+J)"
+assert-reader-more junk "Not Junk"
 assert-action-enabled win.junk true
 key exclam
 assert-toast "Moved 1 message to the Inbox as not junk"
@@ -133,7 +144,7 @@ assert-tooltip reader-archive "Archive (e, y) — already archived"
 setup-dismiss-toasts
 key e
 assert-list-count 1
-assert-toasts 0
+assert-toast "Already archived"
 engine-expect none
 
 # The Trash: Delete deletes for good.

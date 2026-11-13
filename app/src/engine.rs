@@ -8,6 +8,7 @@ use sealwax_domain::model::AccountId;
 use sealwax_engine::api::{Event, SyncStatus};
 use sealwax_engine::autoconfig::DetectOptions;
 use sealwax_engine::net::Trust;
+use sealwax_engine::oauth::Registration;
 use sealwax_engine::service::{Engine, EngineConfig, SecretBackend, SignInOptions, SyncConfig};
 use sealwax_infrastructure::accounts::AccountPaths;
 use sealwax_infrastructure::blobs::BlobStore;
@@ -16,9 +17,9 @@ use sealwax_infrastructure::xdg::SealwaxDirs;
 use std::sync::Arc;
 
 /// Development builds only: a CA file trusted instead of the system's (the mail testbed's).
-pub const TEST_CA_ENV: &str = "SEALWAX_TEST_CA";
+pub const TEST_CA_ENV: &str = "PRONTO_TEST_CA";
 /// Development builds only: `memory` keeps secrets out of the keyring.
-pub const SECRETS_ENV: &str = "SEALWAX_SECRETS";
+pub const SECRETS_ENV: &str = "PRONTO_SECRETS";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineOptions {
@@ -53,6 +54,7 @@ pub fn start(
     blobs: BlobStore,
     options: &EngineOptions,
     microsoft_client_id: Option<String>,
+    google_client: Option<Registration>,
 ) -> std::io::Result<Engine> {
     Engine::start(EngineConfig {
         application: app_id.to_owned(),
@@ -63,6 +65,7 @@ pub fn start(
         secrets: options.secrets,
         detect: DetectOptions::default(),
         microsoft_client_id,
+        google_client,
         sign_in: SignInOptions::default(),
         sync: SyncConfig::default(),
     })

@@ -16,11 +16,14 @@ impl Reader {
     ) -> Result<Versioned<Option<Conversation>>, StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let version = version(&tx)?;
-        let thread: Option<i64> = tx
-            .prepare_cached("SELECT thread_id FROM messages WHERE id = ?1")?
-            .query_row([id.0], |row| row.get(0))
+        let thread: Option<(i64, Option<String>)> = tx
+            .prepare_cached(
+                "SELECT m.thread_id, t.subject FROM messages m \
+                 LEFT JOIN threads t ON t.id = m.thread_id WHERE m.id = ?1",
+            )?
+            .query_row([id.0], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        let Some(thread) = thread else {
+        let Some((thread, subject)) = thread else {
             return Ok(Versioned {
                 version,
                 value: None,
@@ -45,7 +48,10 @@ impl Reader {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Versioned {
             version,
-            value: assemble(ThreadId(thread), id, rows),
+            value: assemble(ThreadId(thread), id, rows).map(|conversation| Conversation {
+                subject: subject.unwrap_or_default(),
+                ..conversation
+            }),
         })
     }
 }

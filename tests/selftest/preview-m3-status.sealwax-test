@@ -2,7 +2,7 @@
 # typing a password again and the certificate's details, each in a dark and a light stock theme
 # (matte-black with square corners, catppuccin-latte rounded). On a scripted engine; every
 # address, name and host is fictional. Not run by CI: it writes into tools/progress/public/.
-# Run: tools/headless.sh 34 target/debug/sealwax --self-test tests/selftest/preview-m3-status.sealwax-test
+# Run: tools/headless.sh 34 target/debug/pronto --self-test tests/selftest/preview-m3-status.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -90,7 +90,7 @@ engine-reply verified ok
 engine-expect add-account
 engine-reply added ok
 assert-setup open false
-write-file $TMP/config/sealwax/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.kari.example.test\"\n\n[account.smtp]\nhost = \"smtp.kari.example.test\"\n\n[[account]]\nkey = \"ola\"\nname = \"Ola Hansen\"\naddress = \"ola@example.test\"\n\n[account.imap]\nhost = \"imap.ola.example.test\"\n\n[account.smtp]\nhost = \"smtp.ola.example.test\"\n\n[[account]]\nkey = \"anne\"\nname = \"Anne Berg\"\naddress = \"anne@example.test\"\n\n[account.imap]\nhost = \"imap.anne.example.test\"\n\n[account.smtp]\nhost = \"smtp.anne.example.test\"\nport = 587\nsecurity = \"starttls\"\n\n[[account]]\nkey = \"per\"\nname = \"Per Lie\"\naddress = \"per@example.test\"\n\n[account.imap]\nhost = \"imap.per.example.test\"\n\n[account.smtp]\nhost = \"smtp.per.example.test\"\n\n[[account]]\nkey = \"siri\"\nname = \"Siri Dahl\"\naddress = \"siri@example.test\"\n\n[account.imap]\nhost = \"imap.siri.example.test\"\n\n[account.smtp]\nhost = \"smtp.siri.example.test\"\n\n[[account]]\nkey = \"tor\"\nname = \"Tor Moe\"\naddress = \"tor@example.test\"\n\n[account.imap]\nhost = \"imap.tor.example.test\"\n\n[account.smtp]\nhost = \"smtp.tor.example.test\"\n"
+write-file $TMP/config/pronto/accounts.toml "[[account]]\nkey = \"kari\"\nname = \"Kari Nordmann\"\naddress = \"kari@example.test\"\nauth = \"microsoft\"\n\n[account.imap]\nhost = \"imap.kari.example.test\"\n\n[account.smtp]\nhost = \"smtp.kari.example.test\"\n\n[[account]]\nkey = \"ola\"\nname = \"Ola Hansen\"\naddress = \"ola@example.test\"\n\n[account.imap]\nhost = \"imap.ola.example.test\"\n\n[account.smtp]\nhost = \"smtp.ola.example.test\"\n\n[[account]]\nkey = \"anne\"\nname = \"Anne Berg\"\naddress = \"anne@example.test\"\n\n[account.imap]\nhost = \"imap.anne.example.test\"\n\n[account.smtp]\nhost = \"smtp.anne.example.test\"\nport = 587\nsecurity = \"starttls\"\n\n[[account]]\nkey = \"per\"\nname = \"Per Lie\"\naddress = \"per@example.test\"\n\n[account.imap]\nhost = \"imap.per.example.test\"\n\n[account.smtp]\nhost = \"smtp.per.example.test\"\n\n[[account]]\nkey = \"siri\"\nname = \"Siri Dahl\"\naddress = \"siri@example.test\"\n\n[account.imap]\nhost = \"imap.siri.example.test\"\n\n[account.smtp]\nhost = \"smtp.siri.example.test\"\n\n[[account]]\nkey = \"tor\"\nname = \"Tor Moe\"\naddress = \"tor@example.test\"\n\n[account.imap]\nhost = \"imap.tor.example.test\"\n\n[account.smtp]\nhost = \"smtp.tor.example.test\"\n"
 wait-until assert-label sidebar-summary "6 accounts · all synced"
 setup-dismiss-toasts
 
@@ -113,7 +113,7 @@ screenshot $DIR/../../tools/progress/public/m3-status-banner-keyring-matte-black
 resize 1440 1500
 screenshot $DIR/../../tools/progress/public/m3-status-sidebar-matte-black-square-2026-10-05.png sidebar
 resize 1100 900
-assert-layout rail
+assert-layout medium
 screenshot $DIR/../../tools/progress/public/m3-status-rail-matte-black-square-2026-10-05.png
 theme catppuccin-latte
 corners 8
@@ -126,7 +126,7 @@ screenshot $DIR/../../tools/progress/public/m3-status-banner-keyring-catppuccin-
 
 # ---- the certificate, and its details ----
 setup-click banner-secondary
-wait-until assert-label banner-title "Sealwax stopped connecting to Anne Berg"
+wait-until assert-label banner-title "Pronto stopped connecting to Anne Berg"
 screenshot $DIR/../../tools/progress/public/m3-status-banner-certificate-catppuccin-latte-rounded-2026-10-05.png banner-strip
 setup-click banner-secondary
 wait-until assert-shown certificate-details true

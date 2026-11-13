@@ -1,0 +1,255 @@
+# Send Later (the fork's phase B, Superhuman's Ctrl+Shift+L), with the app's store backend and the
+# fake engine, in the app's own layout (Focused). In a draft, Ctrl+Shift+L opens the time picker:
+# its presets show when they are, a typed time is read as it is typed and shows first, what isn't a
+# time says so, Escape picks nothing. The chosen time is the outbox's `not_before`: the toast says
+# when ("Sending tomorrow 09:00") and its Undo puts the reply back; the offline banner doesn't
+# count it as waiting. A card sends later the same way, after its checks. Scheduled Messages lists
+# the scheduled sends: Edit takes one back to a draft in a card, Send Now sends it after the undo
+# window. Every name, address and text is fictional.
+# Run: tools/headless.sh 65 target/debug/pronto --self-test tests/selftest/send-later.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+# One row per message, as this script was written for: it follows single messages of a
+# conversation (`conversation-show trip-6`). Conversation rows, the app's default since phase B,
+# have their own scripts (conversations*.sealwax-test).
+grouping messages
+engine-attach
+triage-account Work work
+conversation-add trip Work
+composer-backend store
+composer-limit none
+triage-mark-read-on-open false
+write-file $TMP/config/pronto/config.toml "[compose]\nundo_send_seconds = 3\n"
+folder inbox Work
+list-wait
+focus list
+
+# The inline reply: Ctrl+Shift+L does nothing without text, then opens the time picker.
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+wait-until assert-quick-reply shown true
+key r
+assert-action-enabled win.send-later false
+type "Vi ses fredag."
+assert-action-enabled win.send-later true
+key <Control><Shift>l
+wait-until assert-picker shown true
+picker-shown-in 250
+assert-picker name time-picker
+assert-picker title "Send later"
+# The field reads a time: a clock, and the rows' face; the times at the rows' ends, each
+# starting with a capital as the typed time's row does.
+assert-picker icon document-open-recent-symbolic
+assert-picker details end
+assert-focus picker-search
+assert-dialog "Send later"
+assert-picker has "Tomorrow morning" "Tomorrow 08:00"
+assert-picker has "This weekend"
+assert-picker has "Next week"
+# A typed time is read as it is typed and comes first, chosen; a preset it names stays below.
+picker-type "tomorrow 9am"
+assert-picker row 0 "Tomorrow 09:00"
+assert-picker chosen "Tomorrow 09:00"
+picker-type tomorrow
+assert-picker row 0 "Tomorrow 08:00"
+assert-picker lacks "Tomorrow morning"
+picker-type week
+assert-picker has "Next week"
+assert-picker has "This weekend"
+picker-type banana
+assert-picker rows 1
+assert-picker row 0 "Not a time Pronto reads: try tomorrow 9am, mon 8:30, in 3 days or nov 5"
+assert-picker chosen ""
+picker-type "today 6am"
+assert-picker row 0 "That time has passed"
+# Escape picks nothing: the reply keeps its text and the focus.
+key Escape
+assert-picker shown false
+assert-quick-reply focused true
+assert-quick-reply text "Vi ses fredag."
+assert-quick-sends 0
+
+# Typed and taken with Enter: the reply goes to the outbox until then, and the box empties.
+key <Control><Shift>l
+wait-until assert-picker shown true
+type "tomorrow 9am"
+assert-picker chosen "Tomorrow 09:00"
+key Return
+assert-picker shown false
+wait-until assert-quick-sends 1
+assert-quick-send-last trip-6 "Vi ses fredag." reply
+assert-quick-reply text ""
+wait-until assert-toast "Sending tomorrow 09:00"
+outbox-expect outbox-queued
+wait-until assert-outbox-entries 1
+outbox-name later
+assert-outbox later queued
+assert-outbox-at later "tomorrow 09:00"
+wait-until assert-scheduled-sends 1
+# Not waiting while offline: it goes at its time.
+desktop-network down
+wait-until assert-shown banner true
+assert-shown banner-waiting false
+desktop-network up
+wait-until assert-shown banner false
+# The toast's Undo puts the reply back under its conversation, a draft again.
+toast-click Undo
+wait-until assert-quick-reply text "Vi ses fredag."
+wait-until assert-outbox later gone
+wait-until assert-scheduled-sends 0
+
+# A preset, chosen from the list: Tomorrow morning.
+key <Control><Shift>l
+wait-until assert-picker shown true
+picker-choose "Tomorrow morning"
+wait-until assert-quick-sends 2
+wait-until assert-toast "Sending tomorrow 08:00"
+wait-until assert-outbox-entries 1
+outbox-name morning
+assert-outbox-at morning "tomorrow 08:00"
+assert-quick-reply text ""
+
+# Scheduled Messages lists it; Edit takes it back to a draft, opened where it was written.
+action win.show-scheduled
+wait-until assert-shown scheduled-messages true
+wait-until assert-scheduled 1
+assert-label scheduled-send-now-0 "Send Now"
+click scheduled-edit-0
+wait-until assert-outbox morning gone
+wait-until assert-quick-reply text "Vi ses fredag."
+assert-shown scheduled-messages false
+
+# A card: Send Later checks the draft first (a recipient), then asks when.
+composer-open new
+composer-wait
+composer-focus body
+key <Control><Shift>l
+wait-until assert-composer toast "Add a recipient first"
+assert-picker shown false
+composer-focus to
+composer-type "kari@example.com,"
+composer-focus body
+composer-type "Agenda for mandag."
+key <Control><Shift>l
+wait-until assert-picker shown true
+picker-type "in 3 days 5pm"
+key Return
+wait-until assert-composer count 0
+wait-until assert-outbox-entries 1
+outbox-name card
+assert-outbox card queued
+wait-until assert-scheduled-sends 1
+
+# Edit takes the card's send back to a draft, in a card again; scheduled once more from there.
+action win.show-scheduled
+wait-until assert-scheduled 1
+click scheduled-edit-0
+wait-until assert-outbox card draft
+wait-until assert-compose-draft card
+composer-wait
+assert-composer chips to kari@example.com
+composer-focus body
+key <Control><Shift>l
+wait-until assert-picker shown true
+picker-choose "Tomorrow morning"
+wait-until assert-composer count 0
+wait-until assert-outbox card queued
+assert-outbox-at card "tomorrow 08:00"
+wait-until assert-scheduled-sends 1
+# Its copy in the Drafts folder (the engine uploads a draft as it is written) says when it goes
+# on its row, in the date's place, and to a screen reader (phase C, BRIEF-C).
+outbox-copy card
+folder drafts Work
+list-wait
+wait-until assert-list-row 0 time "Sending tomorrow 08:00"
+assert-list-row 0 label-ends ", Sending tomorrow 08:00"
+assert-list-row 0 draft true
+# A conversation row there too (the app's default grouping): its latest message is the copy.
+grouping conversations
+list-wait
+wait-until assert-list-row 0 time "Sending tomorrow 08:00"
+assert-list-row 0 kind conversation
+grouping messages
+folder inbox Work
+list-wait
+# Opened as a draft (Edit Draft on its copy in Drafts), it says when it goes and how to cancel.
+open-draft card
+wait-until assert-text-contains composer-problem "This message is scheduled to send tomorrow 08:00."
+composer-close
+wait-until assert-composer count 0
+assert-outbox card queued
+
+# Send Now: it goes after the undo window, with the sending toast; its copy's row says its
+# date again.
+action win.show-scheduled
+wait-until assert-scheduled 1
+click scheduled-send-now-0
+wait-until assert-toast "Sending…"
+wait-until assert-scheduled-sends 0
+assert-outbox card queued
+key Escape
+assert-labelled
+folder drafts Work
+list-wait
+wait-until assert-list-row 0 scheduled false
+assert-list-row 0 draft true
+folder inbox Work
+list-wait
+conversation-show trip-6
+key Return
+wait-until assert-reader-on-screen true
+
+# Scheduled Messages keeps the keyboard focus on a row's button while the outbox changes
+# elsewhere (another send starts), and each button says which send it is for.
+quick-send-at 7200000
+wait-until assert-scheduled-sends 1
+action win.show-scheduled
+wait-until assert-scheduled 1
+assert-accessible-name scheduled-edit-0 "Edit “Re: Cabin trip in November?”"
+assert-accessible-name scheduled-send-now-0 "Send “Re: Cabin trip in November?” now"
+focus scheduled-edit-0
+outbox-engine start card
+wait-until assert-outbox card sending
+sleep 300
+assert-focus scheduled-edit-0
+click scheduled-edit-0
+wait-until assert-quick-reply text "Vi ses fredag."
+assert-shown scheduled-messages false
+
+# A time that passed meanwhile (a picker left open past it), or is less than a minute away,
+# goes as Send does: after the undo window, with the sending toast and its Undo, never at once.
+action win.quick-reply
+wait-until assert-quick-reply focused true
+assert-quick-reply text "Vi ses fredag."
+quick-send-at past
+wait-until assert-outbox-entries 2
+outbox-name stale
+assert-outbox stale queued
+wait-until assert-toast "Sending…"
+assert-scheduled-sends 0
+toast-click Undo
+wait-until assert-quick-reply text "Vi ses fredag."
+wait-until assert-outbox stale gone
+quick-send-at soon
+wait-until assert-outbox-entries 2
+outbox-name soon
+wait-until assert-toast "Sending…"
+assert-scheduled-sends 0
+toast-click Undo
+wait-until assert-quick-reply text "Vi ses fredag."
+wait-until assert-outbox soon gone
+
+# The stand-in backend records the time a send was to go too.
+composer-backend stand-in
+action win.quick-reply
+wait-until assert-quick-reply focused true
+assert-quick-reply text "Vi ses fredag."
+key <Control><Shift>l
+wait-until assert-picker shown true
+picker-type "tomorrow 9am"
+key Return
+wait-until assert-sent-at "tomorrow 09:00"
+assert-quick-reply text ""

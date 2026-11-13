@@ -7,6 +7,12 @@
 //! `Command::Storage` arrives and after every batch; after a pass that stored new mail the
 //! actor queues the background prefetch behind the reader's requests.
 //!
+//! The fork's Superhuman pass: what the reader waits for is fetched in batches of its own, never
+//! behind or beside background downloads, whose batches stay under [`BACKGROUND_BYTES`]; and a
+//! lingering connection is kept warm with a NOOP each `reuse_check`, so a click never waits for
+//! a login, nor for that NOOP. It goes at once when the account's actor stops (the account
+//! removed, its settings changed), not after the linger.
+//!
 //! M5 adds the downloads that store nothing (ML-061, ML-063): `Command::FetchPart`, one part of
 //! a message stored as its text parts by the section the store recorded, and
 //! `Command::FetchOriginal`, a message whole as the server has it. The same worker serves them
@@ -23,21 +29,33 @@ use super::{Shared, log_in_with_password, log_in_with_token};
 use crate::api::{BodyError, Event, FetchedPart, Original, SyncStatus};
 use crate::bodies::{enforce_cap, prefetch_ids};
 use crate::imap::bodies::{
-    BodyFetchError, Sink, fetch_bodies, fetch_headers, fetch_original, fetch_part,
+    BodyFetchError, Sink, fetch_bodies, fetch_examined, fetch_headers, fetch_original, fetch_part,
 };
 use crate::imap::{Connection, ImapError};
 use sealwax_domain::account::{AccountSettings, AuthMethod, LoginFailure, Receive};
+use sealwax_domain::bodies::{self as policy, CacheUse, Candidate, Prefetch};
 use sealwax_domain::config::Storage;
 use sealwax_domain::message;
 use sealwax_domain::model::{AccountId, FolderId, MessageId};
 use sealwax_infrastructure::store::{BodyState, BodyTarget, FolderSync, PartSource};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, watch};
 
 /// Messages of one folder fetched per batch.
 const BATCH: usize = 20;
+/// Background downloads per batch, by RFC822.SIZE: what the reader asks for meanwhile waits
+/// for at most this much, or for one larger message, which goes alone (whole up to
+/// [`WHOLE_LIMIT`](sealwax_domain::bodies::WHOLE_LIMIT), else its text parts).
+const BACKGROUND_BYTES: u64 = 2 * 1024 * 1024;
+/// New mail fetched on the IDLE connection before it idles again ([`fetch_arrived`]): each
+/// message at most this large, and this much in all, so IDLE resumes within a moment.
+const ARRIVED_LIMIT: u64 = 1024 * 1024;
+const ARRIVED_BYTES: u64 = 2 * 1024 * 1024;
+/// The slowest link the inline fetch waits for, in bytes a second (about 1 Mbit/s): its limit
+/// grows by the time what it claimed takes at this rate ([`arrived_limit`]).
+const ARRIVED_RATE: u64 = 128 * 1024;
 
 #[derive(Default)]
 struct State {
@@ -427,9 +445,28 @@ fn queue_in(queue: &mut VecDeque<BodyTarget>, targets: Vec<BodyTarget>, front: b
     }
 }
 
+/// [`queue_in`], with a background message that someone asked for while it was on its way to
+/// the queue (`asked` says they wait: `request` found nothing queued to move) at the front too,
+/// never behind the prefetch.
+fn queue_asked(
+    queue: &mut VecDeque<BodyTarget>,
+    targets: Vec<BodyTarget>,
+    front: bool,
+    asked: &HashMap<MessageId, bool>,
+) {
+    let (waited, rest): (Vec<BodyTarget>, Vec<BodyTarget>) = targets
+        .into_iter()
+        .partition(|target| front || asked.get(&target.message) == Some(&true));
+    queue_in(queue, rest, false);
+    queue_in(queue, waited, true);
+}
+
 fn enqueue(shared: &Arc<Shared>, account: AccountId, targets: Vec<BodyTarget>, front: bool) {
     let mut state = shared.bodies.state();
-    queue_in(state.queues.entry(account).or_default(), targets, front);
+    {
+        let State { queues, asked, .. } = &mut *state;
+        queue_asked(queues.entry(account).or_default(), targets, front, asked);
+    }
     start(shared, &mut state, account);
 }
 
@@ -453,13 +490,24 @@ fn start(shared: &Arc<Shared>, state: &mut State, account: AccountId) {
     }
 }
 
-/// The most wanted message and up to [`BATCH`] - 1 more of its folder, in queue order.
-fn take_batch(queue: &mut VecDeque<BodyTarget>) -> Option<(FolderId, Vec<BodyTarget>)> {
-    let folder = queue.front()?.folder;
-    let mut batch = Vec::new();
+/// The most wanted message and up to [`BATCH`] - 1 more of its folder, in queue order: when
+/// someone waits for it (`asked`), only messages someone waits for; else background ones, up
+/// to [`BACKGROUND_BYTES`] in all.
+fn take_batch(
+    queue: &mut VecDeque<BodyTarget>,
+    asked: &HashMap<MessageId, bool>,
+) -> Option<(FolderId, Vec<BodyTarget>)> {
+    let waited = |target: &BodyTarget| asked.get(&target.message).copied().unwrap_or(false);
+    let first = queue.front()?;
+    let (folder, reader) = (first.folder, waited(first));
+    let mut batch: Vec<BodyTarget> = Vec::new();
+    let mut bytes = 0u64;
     let mut index = 0;
     while index < queue.len() && batch.len() < BATCH {
-        if queue[index].folder == folder {
+        let target = &queue[index];
+        let fits = reader || batch.is_empty() || bytes + target.size <= BACKGROUND_BYTES;
+        if target.folder == folder && waited(target) == reader && fits {
+            bytes += target.size;
             batch.extend(queue.remove(index));
         } else {
             index += 1;
@@ -480,7 +528,8 @@ fn next_work(shared: &Shared, account: AccountId) -> Option<Work> {
     if let Some(extra) = state.extras.get_mut(&account).and_then(VecDeque::pop_front) {
         return Some(Work::Extra(extra));
     }
-    let (folder, batch) = take_batch(state.queues.get_mut(&account)?)?;
+    let State { queues, asked, .. } = &mut *state;
+    let (folder, batch) = take_batch(queues.get_mut(&account)?, asked)?;
     Some(Work::Bodies(folder, batch))
 }
 
@@ -524,6 +573,18 @@ async fn reconnected(mut signals: watch::Receiver<Signal>, seen: u64) {
         if signal.reconnects != seen || signal.stop.is_some() {
             return;
         }
+        if signals.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Resolves once the actor these signals are from stops or goes away; never without one.
+async fn stopped(signals: Option<watch::Receiver<Signal>>) {
+    let Some(mut signals) = signals else {
+        return std::future::pending().await;
+    };
+    while signals.borrow_and_update().stop.is_none() {
         if signals.changed().await.is_err() {
             return;
         }
@@ -592,16 +653,53 @@ async fn worker(shared: Arc<Shared>, account: AccountId) {
         .map_or(0, |signals| signals.borrow().reconnects);
     let mut connection: Option<Connection> = None;
     let mut used = Instant::now();
+    // When the worker ends if no work comes; set while it waits with nothing to do.
+    let mut lingering: Option<Instant> = None;
     loop {
         let Some(work) = next_work(&shared, account) else {
-            let woken =
-                tokio::time::timeout(shared.sync.body_linger, waker(&shared, account).notified())
-                    .await;
-            if woken.is_err() && retire(&shared, account) {
-                break;
+            let ends = *lingering.get_or_insert_with(|| Instant::now() + shared.sync.body_linger);
+            // Kept warm: a NOOP whenever the connection would need one before its next use.
+            let warm = connection
+                .as_ref()
+                .map(|_| used + shared.sync.reuse_check)
+                .filter(|due| *due < ends);
+            let wake = warm.unwrap_or(ends);
+            let notify = waker(&shared, account);
+            let actor_stopped = tokio::select! {
+                () = notify.notified() => continue,
+                () = tokio::time::sleep_until(wake.into()) => false,
+                // The account removed, its settings changed: the connection goes now, not after
+                // the linger; more work starts a new worker, with the new actor's settings.
+                () = stopped(signals.clone()) => true,
+            };
+            if actor_stopped {
+                if retire(&shared, account) {
+                    break;
+                }
+                continue;
+            }
+            if warm.is_none() {
+                if retire(&shared, account) {
+                    break;
+                }
+                lingering = None;
+                continue;
+            }
+            let reconnected = signals
+                .as_ref()
+                .is_some_and(|signals| signals.borrow().reconnects != seen);
+            if let Some(conn) = connection.as_mut().filter(|_| !reconnected) {
+                let alive = tokio::time::timeout(shared.sync.noop_timeout, conn.noop()).await;
+                used = Instant::now();
+                if !matches!(alive, Ok(Ok(_))) {
+                    connection = None;
+                }
+            } else {
+                connection = None;
             }
             continue;
         };
+        lingering = None;
         if let Some(signals) = &signals {
             let now = signals.borrow().reconnects;
             if now != seen {
@@ -785,15 +883,158 @@ async fn cap(shared: &Shared, keep: &[MessageId]) {
     }
 }
 
-/// Queues the background prefetch (recent Inbox mail) behind the reader's requests, once the
-/// `[storage]` settings are known.
+/// New mail's bodies on the connection whose pass just stored it, with its folder still open
+/// (the IDLE connection, INBOX), before it idles again: a new message opens at once rather than
+/// after the body connection's login (the fork's Superhuman pass). Within the prefetch's rules
+/// (on, within half the cap), messages up to [`ARRIVED_LIMIT`], [`ARRIVED_BYTES`] in all; what
+/// the body worker has queued or in flight stays its own, and a reader asking meanwhile is
+/// answered. What is left when the fetch fails (the error comes back), takes longer than
+/// `limit` (`SyncConfig::inline_bodies`; a timeout, which leaves the connection in no known
+/// state) or is dropped halfway goes to the body worker ([`Claim`]). Only the FETCH has the
+/// limit: the store's reads and the cache's cap around it aren't the connection's, and a slow
+/// disk mustn't drop a healthy IDLE connection. Notices its FETCH reads mark the connection
+/// [`noticed`](Connection::noticed), for the caller to pass again.
+pub(super) async fn fetch_arrived(
+    shared: &Arc<Shared>,
+    conn: &mut Connection,
+    folder: FolderId,
+    arrived: Vec<MessageId>,
+    limit: Duration,
+) -> Result<(), BodyFetchError> {
+    let Some(storage) = shared.bodies.state().storage else {
+        return Ok(());
+    };
+    let rules = Prefetch::new(&storage);
+    if arrived.is_empty() || !rules.on() {
+        return Ok(());
+    }
+    let (Ok(targets), Ok(usage), Ok(Some(sync))) = (
+        shared.store.body_targets(arrived).recv().await,
+        shared.store.body_usage().recv().await,
+        shared.store.folder_sync(folder).recv().await,
+    ) else {
+        return Ok(());
+    };
+    let candidates: Vec<Candidate> = targets
+        .iter()
+        .filter(|target| target.folder == folder && target.blob.is_none())
+        .map(|target| Candidate {
+            message: target.message,
+            role: sync.role,
+            date: 0,
+            size: target.size,
+            downloaded: false,
+        })
+        .collect();
+    let cache = CacheUse {
+        used: usage.bytes,
+        limit: storage.cache_size,
+    };
+    let wanted = policy::prefetch(&rules, cache, &candidates);
+    let mut bytes = 0;
+    // Claimed in `asked`, as the worker's are, and in the guard that hands back what is left
+    // in the same breath: no await between them, so no cut can leave a claim behind.
+    let (claimed, mut claim): (Vec<BodyTarget>, Claim<'_>) = {
+        let mut state = shared.bodies.state();
+        let claimed: Vec<BodyTarget> = targets
+            .into_iter()
+            .filter(|target| {
+                let fits = wanted.contains(&target.message)
+                    && target.size <= ARRIVED_LIMIT
+                    && bytes + target.size <= ARRIVED_BYTES
+                    && !state.asked.contains_key(&target.message);
+                if fits {
+                    bytes += target.size;
+                    state.asked.insert(target.message, false);
+                }
+                fits
+            })
+            .collect();
+        let left = claimed.iter().map(|target| target.message).collect();
+        (claimed, Claim { shared, left })
+    };
+    if claimed.is_empty() {
+        return Ok(());
+    }
+    let limit = arrived_limit(limit, bytes);
+    let fetch = fetch_examined(conn, sink(shared), &sync, &claimed, now(), |id, result| {
+        claim.left.retain(|left| *left != id);
+        answer(shared, id, result);
+    });
+    let fetched = tokio::time::timeout(limit, fetch)
+        .await
+        .unwrap_or(Err(BodyFetchError::Imap(ImapError::Timeout)));
+    let answered: Vec<MessageId> = claimed
+        .iter()
+        .map(|target| target.message)
+        .filter(|id| !claim.left.contains(id))
+        .collect();
+    drop(claim);
+    tracing::debug!(
+        %folder,
+        fetched = answered.len(),
+        "new mail's bodies fetched where it arrived"
+    );
+    cap(shared, &answered).await;
+    fetched
+}
+
+/// How long the inline fetch of `bytes` may take: `base` (`SyncConfig::inline_bodies`, the
+/// round trips) and the time `bytes` take at [`ARRIVED_RATE`]. A fixed 8 s for up to 2 MiB cut
+/// a large arrival off on links under about 2 Mbit/s: the IDLE connection connected again and
+/// the body connection downloaded the message once more (phase B's review). A stall still ends
+/// within it: 24 s for the 2 MiB at most it claims, 8.5 s for a typical 64 KiB.
+fn arrived_limit(base: Duration, bytes: u64) -> Duration {
+    base + Duration::from_millis(bytes.saturating_mul(1000) / ARRIVED_RATE)
+}
+
+/// What [`fetch_arrived`] claimed and hasn't answered. Whatever is left when it ends goes to
+/// the body worker, also when the IDLE connection drops the fetch halfway (a reconnect after a
+/// resume, the actor stopping): a claim left in `asked` would make every later request for
+/// that message wait for an answer that never comes.
+struct Claim<'a> {
+    shared: &'a Arc<Shared>,
+    left: Vec<MessageId>,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let left = std::mem::take(&mut self.left);
+        if !left.is_empty() {
+            hand_back(self.shared, left);
+        }
+    }
+}
+
+/// Messages [`fetch_arrived`] claimed and couldn't answer go to the body worker, as asked.
+fn hand_back(shared: &Arc<Shared>, messages: Vec<MessageId>) {
+    let (mut waited, mut background) = (Vec::new(), Vec::new());
+    {
+        let mut state = shared.bodies.state();
+        for id in messages {
+            match state.asked.remove(&id) {
+                Some(true) => waited.push(id),
+                Some(false) => background.push(id),
+                None => {}
+            }
+        }
+    }
+    for (list, announce) in [(waited, true), (background, false)] {
+        if !list.is_empty() {
+            request(shared, list, announce);
+        }
+    }
+}
+
+/// Queues the background prefetch (the Inbox and the rest of its conversations) behind the
+/// reader's requests, once the `[storage]` settings are known.
 pub(super) fn prefetch(shared: &Arc<Shared>) {
     let Some(storage) = shared.bodies.state().storage else {
         return;
     };
     let shared = shared.clone();
     tokio::spawn(async move {
-        match prefetch_ids(&shared.store, &storage, shared.sync.options.clock()).await {
+        match prefetch_ids(&shared.store, &storage).await {
             Ok(ids) if !ids.is_empty() => request(&shared, ids, false),
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "the prefetch couldn't be planned"),
@@ -801,18 +1042,37 @@ pub(super) fn prefetch(shared: &Arc<Shared>) {
     });
 }
 
-/// New `[storage]` settings: the cap is enforced at once.
+/// New `[storage]` settings: the cap is enforced at once, and the prefetch planned again where
+/// accounts sync already (settings read after their first pass; at the start they come first,
+/// and each account's first pass plans it).
 pub(super) fn set_storage(shared: &Arc<Shared>, storage: Storage) {
     let changed = shared.bodies.state().storage.replace(storage) != Some(storage);
     if changed {
-        let shared = shared.clone();
-        tokio::spawn(async move { cap(&shared, &[]).await });
+        let capped = shared.clone();
+        tokio::spawn(async move { cap(&capped, &[]).await });
+        if !shared.actors().is_empty() {
+            prefetch(shared);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_inline_fetch_waits_as_long_as_its_bytes_take_on_a_slow_link() {
+        let base = Duration::from_secs(8);
+        assert_eq!(arrived_limit(base, 0), base);
+        assert_eq!(arrived_limit(base, 64 * 1024), Duration::from_millis(8_500));
+        // The most it claims: 2 MiB at about 1 Mbit/s, where 8 s alone cut it off.
+        assert_eq!(arrived_limit(base, ARRIVED_BYTES), Duration::from_secs(24));
+        assert!(arrived_limit(base, ARRIVED_BYTES) > Duration::from_secs(16));
+        assert_eq!(
+            arrived_limit(Duration::from_millis(500), u64::MAX),
+            Duration::from_millis(500) + Duration::from_millis(u64::MAX / ARRIVED_RATE)
+        );
+    }
 
     fn target(message: i64, folder: i64) -> BodyTarget {
         BodyTarget {
@@ -851,6 +1111,7 @@ mod tests {
             .map(|(message, folder)| target(message, folder))
             .chain((10..40).map(|message| target(message, 7)))
             .collect();
+        let take_batch = |queue: &mut VecDeque<BodyTarget>| take_batch(queue, &HashMap::new());
         let (folder, batch) = take_batch(&mut queue).unwrap();
         assert_eq!(folder, FolderId(7));
         assert_eq!(batch.len(), BATCH);
@@ -871,5 +1132,62 @@ mod tests {
         assert_eq!((folder, batch.len()), (FolderId(8), 1));
         assert_eq!(take_batch(&mut queue).unwrap().1.len(), 30 + 2 - BATCH);
         assert!(take_batch(&mut queue).is_none());
+    }
+
+    /// The fork's Superhuman pass: what the reader waits for goes in batches of its own, and
+    /// background batches stay under [`BACKGROUND_BYTES`].
+    #[test]
+    fn the_readers_messages_go_alone_and_background_batches_stay_small() {
+        let sized = |message, size| BodyTarget {
+            size,
+            ..target(message, 7)
+        };
+        let mut queue: VecDeque<BodyTarget> = [
+            sized(1, 100),
+            sized(2, 900_000),
+            sized(3, 100),
+            sized(4, 900_000),
+            sized(5, 900_000),
+            sized(6, 3_000_000),
+            sized(7, 100),
+        ]
+        .into_iter()
+        .collect();
+        let asked: HashMap<MessageId, bool> = [(1, true), (3, true)]
+            .into_iter()
+            .chain((2..=7).filter(|n| *n != 3).map(|n| (n, false)))
+            .map(|(n, waits)| (MessageId(n), waits))
+            .collect();
+        let ids = |batch: Vec<BodyTarget>| batch.iter().map(|t| t.message.0).collect::<Vec<_>>();
+        let (_, batch) = take_batch(&mut queue, &asked).unwrap();
+        assert_eq!(ids(batch), [1, 3], "the reader's, without the prefetch's");
+        let (_, batch) = take_batch(&mut queue, &asked).unwrap();
+        assert_eq!(ids(batch), [2, 4, 7], "2 MiB at most");
+        let (_, batch) = take_batch(&mut queue, &asked).unwrap();
+        assert_eq!(ids(batch), [5]);
+        let (_, batch) = take_batch(&mut queue, &asked).unwrap();
+        assert_eq!(ids(batch), [6], "a larger one alone");
+        assert!(take_batch(&mut queue, &asked).is_none());
+    }
+
+    /// A background message the reader asked for while it was on its way to the queue (a
+    /// prefetch, or new mail the IDLE connection handed back) goes to the front all the same.
+    #[test]
+    fn a_message_asked_for_on_its_way_goes_to_the_front() {
+        let mut queue = VecDeque::new();
+        queue_in(&mut queue, vec![target(1, 1), target(2, 1)], false);
+        let asked: HashMap<MessageId, bool> = [(3, false), (4, true), (5, false)]
+            .into_iter()
+            .map(|(n, waits)| (MessageId(n), waits))
+            .collect();
+        let arriving = vec![target(3, 1), target(4, 1), target(5, 1)];
+        queue_asked(&mut queue, arriving, false, &asked);
+        assert_eq!(messages(&queue), [4, 1, 2, 3, 5]);
+        queue_asked(&mut queue, vec![target(6, 1), target(7, 1)], true, &asked);
+        assert_eq!(
+            messages(&queue),
+            [6, 7, 4, 1, 2, 3, 5],
+            "asked for: all in front"
+        );
     }
 }

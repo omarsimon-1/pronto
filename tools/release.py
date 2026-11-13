@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Make a Sealwax release from the commit tagged v<version> (ADR-021). Three steps, in order:
+"""Make a Pronto release from the commit tagged v<version> (ADR-021). Three steps, in order:
 
   python3 tools/release.py build    the Arch package, a tarball of its files for the AUR and their
                                     SHA-256 sums, in .local/release/<version>/
   python3 tools/release.py github   the GitHub release v<version> with those files and the notes
                                     from CHANGELOG.md
-  python3 tools/release.py aur      sealwax-bin's PKGBUILD and .SRCINFO for <version>, committed
+  python3 tools/release.py aur      pronto-bin's PKGBUILD and .SRCINFO for <version>, committed
                                     and pushed to the AUR
 
 The version is Cargo.toml's. HEAD must be the commit tagged v<version>, the working tree clean,
 and CHANGELOG.md must have a "## <version>" section. build runs tools/package-source.py and
 makepkg (the Microsoft client ID as package-source.py finds it). github needs the tag pushed;
-aur needs the owner's AUR account and SSH key (SEALWAX_AUR_SSH_KEY names the key file if ssh
-doesn't find it). Publishing is the owner's act: an agent runs github and aur only on the
+aur needs the owner's AUR account and SSH key (PRONTO_AUR_SSH_KEY names the key file if ssh
+doesn't find it). build keeps the builder's paths out of the package: with bwrap installed,
+makepkg runs with the build folder mounted at /tmp/pronto-build, and a package that still names
+the home folder is refused. PRONTO_RELEASE_NOCHECK=1 skips makepkg's check() for a commit whose
+tests already ran. Publishing is the owner's act: an agent runs github and aur only on the
 owner's word.
 """
 import gzip
@@ -29,9 +32,10 @@ import tempfile
 import tomllib
 
 root = pathlib.Path(__file__).resolve().parents[1]
-AUR_REPO = "ssh://aur@aur.archlinux.org/sealwax-bin.git"
-AUR_TEMPLATE = root / "packaging" / "aur" / "sealwax-bin" / "PKGBUILD.in"
-STABLE_NAME = "sealwax-x86_64.pkg.tar.zst"
+AUR_REPO = "ssh://aur@aur.archlinux.org/pronto-bin.git"
+AUR_TEMPLATE = root / "packaging" / "aur" / "pronto-bin" / "PKGBUILD.in"
+STABLE_NAME = "pronto-x86_64.pkg.tar.zst"
+NEUTRAL_DIR = pathlib.Path("/tmp/pronto-build")
 
 
 def run(*args: str, cwd: pathlib.Path = root, env: dict | None = None) -> None:
@@ -53,9 +57,9 @@ def release_dir(ver: str) -> pathlib.Path:
 def files(ver: str) -> list[pathlib.Path]:
     out = release_dir(ver)
     return [
-        out / f"sealwax-{ver}-1-x86_64.pkg.tar.zst",
+        out / f"pronto-{ver}-1-x86_64.pkg.tar.zst",
         out / STABLE_NAME,
-        out / f"sealwax-{ver}-x86_64.tar.gz",
+        out / f"pronto-{ver}-x86_64.tar.gz",
         out / "SHA256SUMS",
     ]
 
@@ -97,8 +101,28 @@ def build(ver: str) -> None:
     # Rust from rustup's own installer isn't a pacman package (INSTALL.md).
     if subprocess.run(["pacman", "-T", "rust", "cargo"], capture_output=True).returncode != 0:
         makepkg.append("--nodeps")
+    if os.environ.get("PRONTO_RELEASE_NOCHECK") == "1":
+        makepkg.append("--nocheck")
+    # makepkg writes the folder it ran in into the package's .BUILDINFO, so it runs with the
+    # build folder mounted under a fixed name.
+    bwrap = shutil.which("bwrap")
+    if bwrap:
+        NEUTRAL_DIR.mkdir(exist_ok=True)
+        makepkg = [
+            bwrap, "--dev-bind", "/", "/", "--bind", str(package_dir), str(NEUTRAL_DIR),
+            "--chdir", str(NEUTRAL_DIR), *makepkg,
+        ]
     run(*makepkg, cwd=package_dir)
-    package = package_dir / f"sealwax-{ver}-1-x86_64.pkg.tar.zst"
+    package = package_dir / f"pronto-{ver}-1-x86_64.pkg.tar.zst"
+    home = str(pathlib.Path.home()).encode()
+    with tarfile.open(package, "r:zst") as source:
+        named_home = [
+            member.name
+            for member in source.getmembers()
+            if member.isfile() and home in source.extractfile(member).read()
+        ]
+    if named_home:
+        raise SystemExit(f"{package.name} names the home folder in: {', '.join(named_home)}")
     out = release_dir(ver)
     if out.exists():
         shutil.rmtree(out)
@@ -107,7 +131,7 @@ def build(ver: str) -> None:
     shutil.copy2(package, named)
     shutil.copy2(package, stable)
 
-    # The package's own files (usr/…) as a plain tarball, for sealwax-bin: owned by root, in
+    # The package's own files (usr/…) as a plain tarball, for pronto-bin: owned by root, in
     # name order, with the package's times, so the same package gives the same bytes.
     buffer = io.BytesIO()
     with tarfile.open(package, "r:zst") as source, tarfile.open(
@@ -117,8 +141,8 @@ def build(ver: str) -> None:
             (member for member in source.getmembers() if member.name.startswith("usr")),
             key=lambda member: member.name,
         )
-        if not any(member.name == "usr/bin/sealwax" for member in members):
-            raise SystemExit(f"{package.name} has no usr/bin/sealwax")
+        if not any(member.name == "usr/bin/pronto" for member in members):
+            raise SystemExit(f"{package.name} has no usr/bin/pronto")
         for member in members:
             member.uid = member.gid = 0
             member.uname = member.gname = "root"
@@ -146,7 +170,7 @@ def github(ver: str) -> None:
         raise SystemExit(f"{tag} isn't on origin yet: git push origin {tag}")
     body = notes(ver) + (
         "\n\n---\n\n**Install, update or uninstall:** see "
-        "[INSTALL.md](https://github.com/PixDevsApps/sealwax/blob/main/INSTALL.md), "
+        "[INSTALL.md](https://github.com/omarsimon-1/pronto/blob/main/INSTALL.md), "
         "in plain words.\n"
     )
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
@@ -154,7 +178,7 @@ def github(ver: str) -> None:
         notes_file = handle.name
     try:
         run(
-            "gh", "release", "create", tag, "--verify-tag", "--title", f"Sealwax {ver}",
+            "gh", "release", "create", tag, "--verify-tag", "--title", f"Pronto {ver}",
             "--notes-file", notes_file, *(str(path) for path in files(ver)),
         )
     finally:
@@ -175,10 +199,10 @@ def aur(ver: str) -> None:
         "@SHA256@", hashlib.sha256(tarball.read_bytes()).hexdigest()
     )
     env = dict(os.environ)
-    key = os.environ.get("SEALWAX_AUR_SSH_KEY")
+    key = os.environ.get("PRONTO_AUR_SSH_KEY")
     if key:
         env["GIT_SSH_COMMAND"] = f"ssh -i {key} -o IdentitiesOnly=yes"
-    checkout = root / ".local" / "aur" / "sealwax-bin"
+    checkout = root / ".local" / "aur" / "pronto-bin"
     if checkout.exists():
         run("git", "pull", "--ff-only", cwd=checkout, env=env)
     else:

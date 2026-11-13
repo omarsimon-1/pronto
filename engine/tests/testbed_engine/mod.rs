@@ -57,7 +57,7 @@ impl TestEngine {
             .unwrap(),
         );
         let engine = Engine::start(EngineConfig {
-            application: "io.github.pixdevsapps.Sealwax.Test".into(),
+            application: "io.github.omarsimon1.Pronto.Test".into(),
             store: store.clone(),
             blobs: blobs.clone(),
             paths: AccountPaths::new(&dirs),
@@ -65,6 +65,7 @@ impl TestEngine {
             secrets: SecretBackend::Memory,
             detect: DetectOptions::default(),
             microsoft_client_id: None,
+            google_client: None,
             sign_in: SignInOptions::default(),
             sync,
         })

@@ -1,0 +1,26 @@
+# Pronto starting with the Split Inbox on, its default (the fork's phase C, docs/superhuman/
+# split.md "UI"): the store reads the Inbox's Important side ahead while the window is built,
+# and the window's first view is that one, not a second open; the other side then opens ahead,
+# so the first Tab adopts it. Fixture mail; every name and address is fictional.
+# Run: tools/headless.sh 62 target/debug/pronto --self-test tests/selftest/split-startup.sealwax-test
+
+desktop tiling
+layout-defaults app
+fixtures --count 300 --seed 13 --folders single
+# Before the window's steps: the sides are on from the start, as in the app.
+split-inbox on
+list-wait
+assert-first-view adopted
+assert-split-side important
+assert-split-tabs totals
+assert-action-state win.split-inbox true
+focus list
+# After the startup's own work (the reader's engine, the composer's spare editor), as
+# perf-split waits: the switches must adopt the side opened ahead; their speed is split-inbox's
+# and perf-split's to hold.
+sleep 1500
+measure-split Tab 2 1000
+assert-split-side important
+key Tab
+assert-split-side other
+assert-list-selected 0

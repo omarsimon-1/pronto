@@ -10,7 +10,7 @@ use super::{
 use crate::store::api::{ChangeEvent, StoreVersion};
 use crate::store::ops_api::{OpId, OpsRefusal, RefusedChange};
 use crate::store::overlay::{self, BATCH_FOLDER_READ, Change, Folded, HIDDEN, READ_BELOW};
-use crate::store::{StoreError, compose};
+use crate::store::{StoreError, compose, fork};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sealwax_domain::model::{AccountId, BlobKey, FolderId, MessageId, ThreadId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -566,7 +566,13 @@ impl State {
             recompute_thread(&tx, *thread)?;
         }
         let orphaned_blobs = orphaned(&tx, blobs)?;
-        if rows.is_empty() && folders.is_empty() && self.outbox.is_empty() {
+        if rows.is_empty()
+            && folders.is_empty()
+            && self.outbox.is_empty()
+            && !self.folders_made
+            && !fork::is_dirty(&tx)?
+            && !fork::reminders_touched(&tx)?
+        {
             tx.commit()?;
             drop(open);
             self.after_commit();

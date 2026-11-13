@@ -19,6 +19,9 @@
 //! For folder management (M9): CREATE, RENAME (with the folders under it), DELETE (refused for
 //! a folder with folders under it, as Dovecot does), SUBSCRIBE and UNSUBSCRIBE with the set of
 //! subscriptions, LIST patterns with `*` and `%`, and a hierarchy delimiter of choice.
+//! For the fork's Superhuman pass: a Gmail flavour (one HIGHESTMODSEQ for the account, ID,
+//! MOVE, SASL-IR, archiving into `\All` that keeps the UID All Mail had), APPEND keeping a
+//! reply's In-Reply-To and References, and its TLS identity shared with a test's own servers.
 //! Synthetic data only.
 
 #![allow(dead_code)]
@@ -45,6 +48,11 @@ pub enum Flavor {
     Qresync,
     Condstore,
     Rev1,
+    /// Gmail as Pronto meets it (the fork's Superhuman pass): X-GM-EXT-1, CONDSTORE without
+    /// QRESYNC, MOVE, ID, and one HIGHESTMODSEQ for the whole account; a move into the `\All`
+    /// mailbox of a message it holds already (archiving) keeps that message's UID there.
+    /// Not in [`Flavor::ALL`]: the upstream suites run the three standard flavours.
+    Gmail,
 }
 
 impl Flavor {
@@ -58,11 +66,22 @@ impl Flavor {
             }
             Flavor::Condstore => "IMAP4rev1 LITERAL+ UNSELECT UIDPLUS CONDSTORE SPECIAL-USE IDLE",
             Flavor::Rev1 => "IMAP4rev1",
+            // Gmail's list after login (MOVE comes from `World::moves`, on for this flavour).
+            Flavor::Gmail => {
+                "IMAP4rev1 UNSELECT IDLE NAMESPACE QUOTA ID XLIST CHILDREN X-GM-EXT-1 UIDPLUS \
+                 COMPRESS=DEFLATE ENABLE CONDSTORE ESEARCH UTF8=ACCEPT LIST-EXTENDED LIST-STATUS \
+                 LITERAL- SPECIAL-USE APPENDLIMIT=35651584 SASL-IR"
+            }
         }
     }
 
     fn modseq(self) -> bool {
         self != Flavor::Rev1
+    }
+
+    /// One HIGHESTMODSEQ for every mailbox of the account (Gmail's).
+    fn global_modseq(self) -> bool {
+        self == Flavor::Gmail
     }
 }
 
@@ -75,6 +94,8 @@ pub struct Message {
     pub message_id: String,
     /// Header lines besides the fixed ones, each ending in CRLF (rules' tests, ADR-020).
     pub extra: String,
+    /// In Gmail's Primary tab (the Gmail flavour's `X-GM-RAW "category:primary"`).
+    pub primary: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,6 +164,13 @@ pub struct World {
     pub delimiter: char,
     /// The mailboxes SUBSCRIBE named and UNSUBSCRIBE didn't.
     pub subscribed: BTreeSet<String>,
+    /// The account's mod-sequence where it is one for every mailbox ([`Flavor::Gmail`]).
+    global_modseq: u64,
+    /// Waited before every reply: a network round trip, for timings (none by default).
+    pub latency: std::time::Duration,
+    /// Waited per message a header FETCH returns, as Gmail takes its time to build them
+    /// (none by default).
+    pub header_cost: std::time::Duration,
 }
 
 struct Cut {
@@ -197,7 +225,7 @@ impl World {
             hole: false,
             closings: 0,
             changes: watch::channel(0).0,
-            moves: false,
+            moves: flavor == Flavor::Gmail,
             uidplus: flavor != Flavor::Rev1,
             copyuid: CopyUid::Untagged,
             copyuid_unordered: false,
@@ -208,7 +236,57 @@ impl World {
             header_search_misses: false,
             delimiter: '/',
             subscribed: BTreeSet::new(),
+            global_modseq: 1,
+            latency: std::time::Duration::ZERO,
+            header_cost: std::time::Duration::ZERO,
         }
+    }
+
+    /// The mod-sequence of the next change to `name`: the mailbox's own, or the account's.
+    fn next_modseq(&mut self, name: &str) -> u64 {
+        if self.flavor.global_modseq() {
+            self.global_modseq += 1;
+            let next = self.global_modseq;
+            self.mailbox(name).modseq = next;
+            next
+        } else {
+            let mailbox = self.mailbox(name);
+            mailbox.modseq += 1;
+            mailbox.modseq
+        }
+    }
+
+    /// The HIGHESTMODSEQ STATUS and EXAMINE report for `mailbox`.
+    fn highest_modseq(&self, mailbox: &Mailbox) -> u64 {
+        if self.flavor.global_modseq() {
+            self.global_modseq
+        } else {
+            mailbox.modseq
+        }
+    }
+
+    /// The `\All` mailbox (Gmail's All Mail), if there is one.
+    pub fn all_mail(&self) -> Option<String> {
+        self.mailboxes
+            .iter()
+            .find(|(_, mailbox)| {
+                mailbox
+                    .attributes
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case("\\All"))
+            })
+            .map(|(name, _)| name.clone())
+    }
+
+    /// A new message `days` old in `name` and, as Gmail keeps every message there too, in the
+    /// `\All` mailbox under the same Message-ID; returns its UID in `name`.
+    pub fn deliver(&mut self, name: &str, days: i64, flags: &[&str]) -> u32 {
+        let uid = self.append(name, days, flags);
+        let message_id = self.mailboxes[name].messages[&uid].message_id.clone();
+        if let Some(all) = self.all_mail().filter(|all| all != name) {
+            self.append_id(&all, &message_id, days, flags);
+        }
+        uid
     }
 
     /// Whether `name` is under `parent` in the hierarchy.
@@ -347,6 +425,7 @@ impl World {
             date: NOW - days * 86_400 + 3_600,
             message_id: message_id.to_owned(),
             extra: String::new(),
+            primary: true,
         };
         let uid = self.put(name, message);
         self.changed();
@@ -362,13 +441,22 @@ impl World {
         uid
     }
 
+    /// A new message with `extra` header lines, in Gmail's Primary tab or another one (the
+    /// Split Inbox's tests); returns its UID.
+    pub fn append_tab(&mut self, name: &str, extra: &str, primary: bool) -> u32 {
+        let uid = self.append_extra(name, extra);
+        if let Some(message) = self.mailbox(name).messages.get_mut(&uid) {
+            message.primary = primary;
+        }
+        uid
+    }
+
     /// Stores `message` under the next UID with a new mod-sequence.
     fn put(&mut self, name: &str, mut message: Message) -> u32 {
+        message.modseq = self.next_modseq(name);
         let mailbox = self.mailbox(name);
         let uid = mailbox.uidnext;
         mailbox.uidnext += 1;
-        mailbox.modseq += 1;
-        message.modseq = mailbox.modseq;
         mailbox.messages.insert(uid, message);
         uid
     }
@@ -394,9 +482,8 @@ impl World {
     }
 
     pub fn set_flags(&mut self, name: &str, uid: u32, flags: &[&str]) {
+        let modseq = self.next_modseq(name);
         let mailbox = self.mailbox(name);
-        mailbox.modseq += 1;
-        let modseq = mailbox.modseq;
         let message = mailbox.messages.get_mut(&uid).expect("a stored UID");
         message.flags = flags.iter().map(|f| f.to_string()).collect();
         message.modseq = modseq;
@@ -404,11 +491,9 @@ impl World {
     }
 
     pub fn expunge(&mut self, name: &str, uid: u32) {
-        let mailbox = self.mailbox(name);
-        if mailbox.messages.remove(&uid).is_some() {
-            mailbox.modseq += 1;
-            let modseq = mailbox.modseq;
-            mailbox.expunged.push((uid, modseq));
+        if self.mailbox(name).messages.remove(&uid).is_some() {
+            let modseq = self.next_modseq(name);
+            self.mailbox(name).expunged.push((uid, modseq));
         }
         self.changed();
     }
@@ -469,6 +554,8 @@ pub struct Fake {
     world: Arc<Mutex<World>>,
     _dir: tempfile::TempDir,
     pub trust: Trust,
+    /// The fake's TLS identity, for other servers of a test that the same trust must take.
+    pub tls: Arc<ServerConfig>,
 }
 
 impl Fake {
@@ -478,7 +565,7 @@ impl Fake {
         let port = listener.local_addr().unwrap().port();
         let world = Arc::new(Mutex::new(World::new(flavor)));
         let shared = world.clone();
-        let acceptor = tokio_rustls::TlsAcceptor::from(server);
+        let acceptor = tokio_rustls::TlsAcceptor::from(server.clone());
         tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
                 let _ = tcp.set_nodelay(true);
@@ -510,6 +597,7 @@ impl Fake {
             world,
             _dir: dir,
             trust,
+            tls: server,
         }
     }
 
@@ -813,7 +901,7 @@ fn status_line(world: &World, name: &str, items: &str) -> Option<String> {
             "UIDNEXT" => parts.push(format!("UIDNEXT {}", mailbox.uidnext)),
             "UIDVALIDITY" => parts.push(format!("UIDVALIDITY {}", mailbox.uidvalidity)),
             "HIGHESTMODSEQ" if world.flavor.modseq() => {
-                parts.push(format!("HIGHESTMODSEQ {}", mailbox.modseq));
+                parts.push(format!("HIGHESTMODSEQ {}", world.highest_modseq(mailbox)));
             }
             _ => {}
         }
@@ -980,6 +1068,10 @@ fn answer(world: &mut World, session: &mut Session, tag: &str, command: &str) ->
             ok(&mut out, "enabled");
         }
         "NOOP" => ok(&mut out, "done"),
+        "ID" => {
+            out.push_str("* ID (\"name\" \"fake\")\r\n");
+            ok(&mut out, "done");
+        }
         "UNSELECT" => {
             session.selected = None;
             session.read_write = false;
@@ -1067,7 +1159,10 @@ fn answer(world: &mut World, session: &mut Session, tag: &str, command: &str) ->
                 mailbox.uidvalidity, mailbox.uidnext
             ));
             if world.flavor.modseq() {
-                out.push_str(&format!("* OK [HIGHESTMODSEQ {}] ok\r\n", mailbox.modseq));
+                out.push_str(&format!(
+                    "* OK [HIGHESTMODSEQ {}] ok\r\n",
+                    world.highest_modseq(mailbox)
+                ));
             }
             if read_write {
                 out.push_str(&format!("{tag} OK [READ-WRITE] selected\r\n"));
@@ -1157,12 +1252,23 @@ fn uid_command(
         let mut unseen = false;
         let mut undeleted = false;
         let mut header = None;
+        let mut primary = None;
         let mut i = 0;
         while i < tokens.len() {
             match tokens[i].to_ascii_uppercase().as_str() {
                 "HEADER" => {
                     header = Some(unquote(tokens[i + 2]));
                     i += 2;
+                }
+                // Gmail's search language; only the Primary tab here.
+                "X-GM-RAW" => {
+                    let raw = unquote(tokens.get(i + 1).copied().unwrap_or_default());
+                    if world.flavor != Flavor::Gmail || raw != "category:primary" {
+                        out.push_str(&format!("{tag} BAD unknown search key\r\n"));
+                        return Reply::Text(out);
+                    }
+                    primary = Some(true);
+                    i += 1;
                 }
                 "UID" => {
                     set = Some(tokens[i + 1]);
@@ -1188,6 +1294,7 @@ fn uid_command(
                     .filter(|(uid, _)| set.as_ref().is_none_or(|set| in_set(set, **uid)))
                     .filter(|(_, message)| since.is_none_or(|since| message.date >= since))
                     .filter(|(_, message)| !unseen || !has_flag(message, "\\Seen"))
+                    .filter(|(_, message)| primary.is_none_or(|wanted| message.primary == wanted))
                     .filter(|(_, message)| !undeleted || !has_flag(message, "\\Deleted"))
                     .filter(|(_, message)| {
                         header.as_ref().is_none_or(|needle| {
@@ -1401,10 +1508,7 @@ fn store(
         .filter(|uid| in_set(&set, *uid))
         .collect();
     for uid in uids {
-        let mailbox = world.mailbox(name);
-        let next = mailbox.modseq + 1;
-        let message = mailbox.messages.get_mut(&uid).unwrap();
-        let mut now = message.flags.clone();
+        let mut now = world.mailboxes[name].messages[&uid].flags.clone();
         if operation.starts_with('+') {
             for flag in &flags {
                 if !now.iter().any(|f| f.eq_ignore_ascii_case(flag)) {
@@ -1416,15 +1520,13 @@ fn store(
         } else {
             now = flags.clone();
         }
-        let changed = now != message.flags;
-        if changed {
+        if now != world.mailboxes[name].messages[&uid].flags {
+            let next = world.next_modseq(name);
+            let message = world.mailbox(name).messages.get_mut(&uid).unwrap();
             message.flags = now;
             message.modseq = next;
         }
-        let line = message.flags.join(" ");
-        if changed {
-            mailbox.modseq = next;
-        }
+        let line = world.mailboxes[name].messages[&uid].flags.join(" ");
         if !operation.ends_with(".SILENT")
             && let Some(seq) = session.known.iter().position(|known| *known == uid)
         {
@@ -1485,9 +1587,24 @@ fn transfer(
     if world.copyuid_unordered {
         picked.reverse();
     }
+    // Gmail's All Mail holds every message already: archiving one only takes the source's
+    // label off, and COPYUID names the UID it has there.
+    let all = world.flavor == Flavor::Gmail && world.all_mail().as_deref() == Some(&target);
     let (mut sources, mut targets) = (Vec::new(), Vec::new());
     for (uid, message) in picked {
-        targets.push(world.put(&target, message));
+        let held = all
+            .then(|| {
+                world.mailboxes[&target]
+                    .messages
+                    .iter()
+                    .find(|(_, there)| there.message_id == message.message_id)
+                    .map(|(uid, _)| *uid)
+            })
+            .flatten();
+        targets.push(match held {
+            Some(there) => there,
+            None => world.put(&target, message),
+        });
         sources.push(uid);
         if moving {
             world.expunge(name, uid);
@@ -1576,6 +1693,7 @@ async fn idle(
         }
         (out, world.closings)
     };
+    lag(world).await;
     if write(io, &first).await.is_err() {
         return Idle::Dead;
     }
@@ -1598,6 +1716,7 @@ async fn idle(
                     out.push_str(&format!("{tag} OK idle done\r\n"));
                     out
                 };
+                lag(world).await;
                 return if write(io, &out).await.is_ok() { Idle::Done } else { Idle::Dead };
             }
             changed = changes.changed() => {
@@ -1645,6 +1764,7 @@ async fn session(mut io: BufReader<Box<dyn Io>>, world: Arc<Mutex<World>>, epoch
         return silent(io).await;
     }
     let greeting = format!("* OK [CAPABILITY {caps} AUTH=PLAIN] fake ready\r\n");
+    lag(&world).await;
     if write(&mut io, &greeting).await.is_err() {
         return;
     }
@@ -1663,16 +1783,28 @@ async fn session(mut io: BufReader<Box<dyn Io>>, world: Arc<Mutex<World>>, epoch
             continue;
         };
         if command.to_ascii_uppercase().starts_with("AUTHENTICATE") {
-            if write(&mut io, "+ \r\n").await.is_err() {
-                return;
-            }
-            let mut response = String::new();
-            if io.read_line(&mut response).await.unwrap_or(0) == 0 {
-                return;
+            // SASL-IR: the response came with the command; else it answers the challenge.
+            let initial = command.split_whitespace().count() >= 3;
+            if !initial {
+                lag(&world).await;
+                if write(&mut io, "+ \r\n").await.is_err() {
+                    return;
+                }
+                let mut response = String::new();
+                if io.read_line(&mut response).await.unwrap_or(0) == 0 {
+                    return;
+                }
             }
             let refused = {
                 let mut world = world.lock().unwrap_or_else(|e| e.into_inner());
-                world.commands.push("AUTHENTICATE PLAIN".into());
+                world.commands.push(
+                    if initial {
+                        "AUTHENTICATE PLAIN SASL-IR"
+                    } else {
+                        "AUTHENTICATE PLAIN"
+                    }
+                    .into(),
+                );
                 world.refuse_login
             };
             let reply = if refused {
@@ -1680,6 +1812,7 @@ async fn session(mut io: BufReader<Box<dyn Io>>, world: Arc<Mutex<World>>, epoch
             } else {
                 format!("{tag} OK authenticated\r\n")
             };
+            lag(&world).await;
             if write(&mut io, &reply).await.is_err() {
                 return;
             }
@@ -1730,6 +1863,16 @@ async fn session(mut io: BufReader<Box<dyn Io>>, world: Arc<Mutex<World>>, epoch
                 None => answer(&mut world, &mut state, tag, command),
             }
         };
+        lag(&world).await;
+        if let Reply::Text(text) | Reply::Cut(text) = &reply
+            && command.contains("HEADER.FIELDS (DATE")
+        {
+            let cost = world.lock().unwrap_or_else(|e| e.into_inner()).header_cost;
+            let messages = text.matches(" FETCH (").count() as u32;
+            if !cost.is_zero() && messages > 0 {
+                tokio::time::sleep(cost * messages).await;
+            }
+        }
         match reply {
             Reply::Text(text) => {
                 if write(&mut io, &text).await.is_err() {
@@ -1791,6 +1934,7 @@ async fn append(
         }
         _ => {}
     }
+    lag(world).await;
     if !plus && write(io, "+ go ahead\r\n").await.is_err() {
         return None;
     }
@@ -1832,18 +1976,36 @@ async fn append(
         if world.mailboxes.get(&name).is_none_or(|m| !selectable(m)) {
             format!("{tag} NO [TRYCREATE] no such mailbox\r\n")
         } else {
-            let message_id = sealwax_domain::message::parse(&data)
-                .headers
-                .message_id
-                .unwrap_or_default();
+            let headers = sealwax_domain::message::parse(&data).headers;
+            // A reply appended (a Sent copy) threads as it was sent.
+            let bracketed = |ids: &[String]| {
+                ids.iter()
+                    .map(|id| format!("<{id}>"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let mut extra = String::new();
+            if !headers.in_reply_to.is_empty() {
+                extra.push_str(&format!(
+                    "In-Reply-To: {}\r\n",
+                    bracketed(&headers.in_reply_to)
+                ));
+            }
+            if !headers.references.is_empty() {
+                extra.push_str(&format!(
+                    "References: {}\r\n",
+                    bracketed(&headers.references)
+                ));
+            }
             let uid = world.put(
                 &name,
                 Message {
                     flags,
                     modseq: 0,
                     date: NOW,
-                    message_id,
-                    extra: String::new(),
+                    message_id: headers.message_id.unwrap_or_default(),
+                    extra,
+                    primary: true,
                 },
             );
             world.changed();
@@ -1869,7 +2031,18 @@ async fn append(
             world.lock().unwrap_or_else(|e| e.into_inner()).cuts += 1;
             Some(false)
         }
-        _ => write(io, &reply).await.ok().map(|()| true),
+        _ => {
+            lag(world).await;
+            write(io, &reply).await.ok().map(|()| true)
+        }
+    }
+}
+
+/// The world's latency, waited before a reply.
+async fn lag(world: &Arc<Mutex<World>>) {
+    let latency = world.lock().unwrap_or_else(|e| e.into_inner()).latency;
+    if !latency.is_zero() {
+        tokio::time::sleep(latency).await;
     }
 }
 

@@ -9,8 +9,8 @@
 
 use super::connection::Connection;
 use super::error::ImapError;
-use super::raw;
 use super::sync::view;
+use super::{idle, raw};
 use crate::api::BodyError;
 pub use crate::api::FetchedPart;
 use async_imap::imap_proto::{
@@ -391,8 +391,11 @@ struct Fetched {
 }
 
 /// Runs a UID FETCH and collects, per wanted UID, the bodies and structures it returned.
-/// FETCH responses for other UIDs are unsolicited hints and are dropped. A NO still hands over
-/// what came back; the UIDs missing from it are the caller's to judge.
+/// FETCH responses for other UIDs, or with flags (never asked for here), are unsolicited
+/// notices and are dropped; like any other notice of the open mailbox (EXISTS, EXPUNGE,
+/// VANISHED) they mark the connection [`noticed`](Connection::noticed), since the server won't
+/// repeat them. A NO still hands over what came back; the UIDs missing from it are the
+/// caller's to judge.
 async fn uid_fetch(
     conn: &mut Connection,
     uids: &[u32],
@@ -400,20 +403,27 @@ async fn uid_fetch(
 ) -> Result<HashMap<u32, Fetched>, ImapError> {
     let wanted: HashSet<u32> = uids.iter().copied().collect();
     let mut out: HashMap<u32, Fetched> = HashMap::new();
+    let mut noticed = false;
     let command = format!("UID FETCH {} ({items})", raw::uid_set(uids));
     let result = raw::run(&mut conn.session, &command, |response| {
         let Response::Fetch(_, attributes) = response else {
+            noticed |= idle::notice(response);
             return;
         };
-        let Some(uid) = attributes.iter().find_map(|attribute| match attribute {
-            AttributeValue::Uid(uid) => Some(*uid),
-            _ => None,
-        }) else {
+        noticed |= attributes
+            .iter()
+            .any(|attribute| matches!(attribute, AttributeValue::Flags(_)));
+        let Some(uid) = attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                AttributeValue::Uid(uid) => Some(*uid),
+                _ => None,
+            })
+            .filter(|uid| wanted.contains(uid))
+        else {
+            noticed = true;
             return;
         };
-        if !wanted.contains(&uid) {
-            return;
-        }
         let entry = out.entry(uid).or_default();
         for attribute in attributes {
             match attribute {
@@ -437,6 +447,7 @@ async fn uid_fetch(
         }
     })
     .await;
+    conn.noticed |= noticed;
     match result {
         Ok(()) | Err(ImapError::No(_)) => Ok(out),
         Err(error) => Err(error),
@@ -463,16 +474,7 @@ async fn keep(
     .map_err(|_| BodyFetchError::Blob(io::ErrorKind::Other))??;
     let upgraded = sink.store.upgrade_body(built).recv().await?;
     if !upgraded.orphaned_blobs.is_empty() {
-        let blobs = sink.blobs.clone();
-        let orphaned = upgraded.orphaned_blobs.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            for key in &orphaned {
-                if let Err(error) = blobs.remove(key) {
-                    tracing::warn!(%error, "a raw message no row refers to couldn't be deleted");
-                }
-            }
-        })
-        .await;
+        crate::bodies::discard_blobs(sink.store, sink.blobs, upgraded.orphaned_blobs.clone()).await;
     }
     Ok(if upgraded.found {
         Ok(())
@@ -496,7 +498,6 @@ pub async fn fetch_bodies(
     if targets.is_empty() {
         return Ok(());
     }
-    let started = Instant::now();
     let uidvalidity = examine(conn, &folder.name_raw).await?;
     if uidvalidity.is_none() || uidvalidity != folder.uidvalidity {
         tracing::info!(%folder.folder, "the folder's UIDVALIDITY changed; its bodies are gone");
@@ -505,6 +506,40 @@ pub async fn fetch_bodies(
         }
         return Ok(());
     }
+    fetch_open(conn, sink, folder, targets, used, done).await
+}
+
+/// [`fetch_bodies`] on a connection that has `folder` selected or examined already, at the
+/// store's UIDVALIDITY (a pass just checked it, and a server can't change it under an open
+/// mailbox): no EXAMINE first (the IDLE connection's new mail, the fork's Superhuman pass).
+/// With another mailbox open, it EXAMINEs as [`fetch_bodies`] does.
+pub async fn fetch_examined(
+    conn: &mut Connection,
+    sink: Sink<'_>,
+    folder: &FolderSync,
+    targets: &[BodyTarget],
+    used: i64,
+    done: impl FnMut(MessageId, Result<(), BodyError>),
+) -> Result<(), BodyFetchError> {
+    if conn.selected.as_deref() != Some(folder.name_raw.as_str()) {
+        return fetch_bodies(conn, sink, folder, targets, used, done).await;
+    }
+    fetch_open(conn, sink, folder, targets, used, done).await
+}
+
+/// The fetches of [`fetch_bodies`] with `folder` open on `conn`.
+async fn fetch_open(
+    conn: &mut Connection,
+    sink: Sink<'_>,
+    folder: &FolderSync,
+    targets: &[BodyTarget],
+    used: i64,
+    mut done: impl FnMut(MessageId, Result<(), BodyError>),
+) -> Result<(), BodyFetchError> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let started = Instant::now();
     let (whole, large): (Vec<&BodyTarget>, Vec<&BodyTarget>) = targets
         .iter()
         .partition(|target| target.size <= WHOLE_LIMIT);

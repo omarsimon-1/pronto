@@ -483,7 +483,7 @@ fn memory() -> [f64; 7] {
 }
 
 /// Pss from `/proc/self/smaps`, summed by what is mapped, so the GPU driver's share can be told
-/// from Sealwax's own heap. Files are named by their base name only.
+/// from Pronto's own heap. Files are named by their base name only.
 struct Mappings {
     kinds: Vec<(&'static str, f64)>,
     files: Vec<(String, f64)>,
@@ -583,9 +583,9 @@ fn mapping_kind(path: &str) -> &'static str {
     } else if lower
         .rsplit('/')
         .next()
-        .is_some_and(|name| name.starts_with("sealwax"))
+        .is_some_and(|name| name.starts_with("pronto"))
     {
-        "the sealwax binary"
+        "the pronto binary"
     } else if has(&[".so"]) {
         "other libraries"
     } else {

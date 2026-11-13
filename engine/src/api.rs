@@ -94,9 +94,15 @@ pub enum Command {
     /// The Microsoft client ID in use (ADR-008: `config.toml`, else the build's), after every
     /// read of `config.toml` that changes it; `None` makes sign-in unavailable.
     MicrosoftClient { client_id: Option<String> },
+    /// The Google client in use (ADR-023: `config.toml`'s, else the environment's, else the
+    /// build's), after every read of `config.toml` that changes it; `None` makes Sign in with
+    /// Google unavailable. Its debug form shows neither the ID nor the secret.
+    GoogleClient {
+        client: Option<crate::oauth::Registration>,
+    },
     /// Delete the account's settings, secrets, rows and blobs (ML-038).
     RemoveAccount { request: RequestId, key: AccountKey },
-    /// Set what Sealwax calls the account and its colour: its `label` and `color` lines in
+    /// Set the account's `label`, `color` and plain-text `signature` lines in
     /// `accounts.toml`, `None` taking a line out (the user's UI tweak, 2026-10-08). The store's
     /// name follows with the `Accounts` the app sends once it has read the file.
     EditAccount {
@@ -104,6 +110,7 @@ pub enum Command {
         key: AccountKey,
         label: Option<String>,
         color: Option<AccountColor>,
+        signature: Option<String>,
     },
     /// The accounts `accounts.toml` lists, after every read without mistakes: the store follows
     /// them, and every listed account gets its folder list and first INBOX sync.
@@ -114,6 +121,14 @@ pub enum Command {
     LoadOlder { folder: FolderId },
     /// Download the bodies of `messages`, most wanted first: the reader's message (ML-044).
     FetchBodies { messages: Vec<MessageId> },
+    /// Sample recent Sent mail for writing style. Only the chosen bodies are fetched, in
+    /// memory; neither message rows nor blobs are created by this request.
+    SampleSent {
+        request: RequestId,
+        account: AccountId,
+        options: crate::sent_sample::SampleOptions,
+        cancel: crate::sent_sample::Cancel,
+    },
     /// Download the part at mail-parser index `part` of `message` by the IMAP section the store
     /// recorded (M5, ML-061): an attachment, or an inline image, of a message stored as its text
     /// parts (`BodyState::Text`). Answered with one `PartFetched`; nothing is stored.
@@ -175,10 +190,14 @@ pub enum Command {
         account: AccountId,
         change: FolderChange,
     },
-    /// Ask GitHub which release of Sealwax is the latest (Check for Updates, ADR-021
+    /// Ask GitHub which release of Pronto is the latest (Check for Updates, ADR-021
     /// amendment): one HTTPS request, only when the user runs the command. Answered with one
     /// `UpdateChecked`.
     CheckForUpdates { request: RequestId },
+    /// The app set, moved or cancelled a reminder in the store (the fork's Remind Me,
+    /// docs/superhuman/remind.md): the engine's timer looks again at when the next is due.
+    /// Its moves are queued ops: the app sends `OpsQueued` for their accounts too.
+    RemindersChanged,
     /// Stop every connection and the runtime.
     Shutdown,
 }
@@ -277,6 +296,17 @@ pub enum Event {
         message: MessageId,
         result: Result<(), BodyError>,
     },
+    SentSampleProgress {
+        request: RequestId,
+        account: AccountId,
+        fetched: usize,
+        total: usize,
+    },
+    SentSampled {
+        request: RequestId,
+        account: AccountId,
+        result: Result<crate::sent_sample::SentSample, BodyError>,
+    },
     /// The answer to `FetchPart`.
     PartFetched {
         message: MessageId,
@@ -298,7 +328,7 @@ pub enum Event {
         request: RequestId,
         result: Result<(), LoginError>,
     },
-    /// The keyring didn't answer: secrets stay in memory until Sealwax quits (ADR-008).
+    /// The keyring didn't answer: secrets stay in memory until Pronto quits (ADR-008).
     KeyringUnavailable,
     /// The server refused queued changes for good (ML-051), such as a move into a folder that
     /// is gone: the store has dropped the ops and put `messages` back as the server has them.
@@ -323,7 +353,7 @@ pub enum Event {
         draft: DraftId,
         error: SendError,
     },
-    /// `draft`'s data may have reached the server, and `reason` says why Sealwax can't tell:
+    /// `draft`'s data may have reached the server, and `reason` says why Pronto can't tell:
     /// it may have been sent. It is never sent again without the user (ADR-015).
     SendUncertain {
         account: AccountId,
@@ -332,7 +362,7 @@ pub enum Event {
     },
     /// Mail that arrived in `folder` after its first sync, above the UIDNEXT the store held,
     /// sent once the rows are committed (ML-083). Never for a first sync, older mail loaded
-    /// below the floor, or a message Sealwax's own op moved there. Any folder and any flags:
+    /// below the floor, or a message Pronto's own op moved there. Any folder and any flags:
     /// the app decides what notifies.
     NewMail {
         account: AccountId,
@@ -369,7 +399,7 @@ pub enum Event {
 /// Why an account's rules didn't run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RulesError {
-    /// The script doesn't parse, or uses what Sealwax doesn't run. Its `Debug` leaves out the
+    /// The script doesn't parse, or uses what Pronto doesn't run. Its `Debug` leaves out the
     /// message; the app may show it.
     Script(sealwax_domain::sieve::Error),
     /// The file can't be read: over 1 MiB, not UTF-8, or not readable.
@@ -504,16 +534,16 @@ pub enum SendError {
     Store,
     #[error("sending failed")]
     Other,
-    /// Sealwax stopped while it built the message (which may be what stopped it); it isn't
+    /// Pronto stopped while it built the message (which may be what stopped it); it isn't
     /// built again until the user sends it again.
-    #[error("Sealwax stopped while it built the message")]
+    #[error("Pronto stopped while it built the message")]
     Interrupted,
 }
 
 /// Why a send's outcome is unknown (issue #2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UncertainReason {
-    /// Sealwax stopped while the message was going out; found at the next start.
+    /// Pronto stopped while the message was going out; found at the next start.
     Stopped,
     /// No reply to the message's end: the connection closed, broke or timed out.
     NoReply,

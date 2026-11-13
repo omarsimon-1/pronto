@@ -32,6 +32,7 @@ Use this page for decisions with meaningful long-term cost. Keep each entry shor
 | 020 | Folders and rules: Sieve run by Sealwax | Accepted (user decision, 2026-10-09); built: folders (A1), the Sieve subset (A2), the rules on new mail (B1) and in the app (B2); the user's review next |
 | 021 | A public repository, releases on GitHub and the AUR | Accepted (user decisions, 2026-10-09): 0.4.0; a fresh public repository; GitHub Releases and `sealwax-bin` on the AUR (waiting: the AUR closed new accounts the same day); no update check in Sealwax. Amended 2026-10-18 (user decision): no AUR package; GitHub Releases only. Amended 2026-10-20 (user request): Check for Updates…, run only by the user |
 | 022 | The headless checks run GTK's Broadway daemon with a patch of Sealwax's | Accepted (2026-10-19) as a stopgap: GTK 4.24.1's daemon aborts in about 30 of the 81 CI scripts; dropped once a GTK release fixes it |
+| 023 | Sign in with Google with your own OAuth client | Accepted (owner's request, 2026-10-22): Gmail over XOAUTH2 with the user's own Desktop app client from `config.toml` or the environment; none ships; built and tested offline |
 
 ## ADR-001 — Standalone native application (2026-10-04)
 
@@ -191,6 +192,19 @@ Built as decided, with these details:
 **Status:** Accepted — the user's UI tweak, 2026-10-08 ("have an option to choose a beautiful muted color to that account").
 
 An account may have a colour the user picks, the one colour in the chrome that doesn't come from the palette. Eight named colours (rose, clay, olive, sage, teal, slate, iris, mauve) are fixed OKLCH hues 35–55° apart; the theme layer sets their lightness and chroma per mode (0.74 and 0.065 on dark themes, 0.52 and 0.075 on light ones, as muted as the live theme's own colours at about 0.03–0.07) and moves the lightness away from the background until each reads at 4.5:1 on the window and the sidebar, in every stock theme (`domain/tests/theme.rs`). OKLCH rather than HSL keeps the eight equally light; palette positions couldn't give named hues (matte-black's `green` is amber). The colours reach CSS as `--sw-account-<name>-color`; the sidebar's heading name and synced dot take them, never the warning and error dots.
+
+### ADR-004 amendment — Adwaita's look by default, Tokyo Night, Omarchy on request (2026-10-22)
+
+**Status:** Accepted — the owner's request, 2026-10-22 (the visual polish: "Adwaita Sans, heavier font weights and higher text contrast/brightness tuned for HiDPI … add a Tokyo Night palette option (alongside the default Adwaita look)").
+
+**Decision:** `config.toml`'s new `palette` chooses where the colours come from:
+- `"adwaita"` (the default): libadwaita's own look, GNOME 50's palette with the text a step brighter (white on dark, `#1c1c20` on light), light or dark as the desktop prefers. The built-in palettes the follower used outside Omarchy are these.
+- `"tokyo-night"`: a built-in Tokyo Night, Omarchy's `tokyo-night` surfaces with its brightest text colour (`#c0caf5`) as the foreground; always dark.
+- `"omarchy"`: the live Omarchy theme as before (Adwaita's colours outside Omarchy).
+
+The chrome and message text use **Adwaita Sans** by default (`chrome_font` and `reading_font` gain `"adwaita"`; `"omarchy"`, `"sans"` and `"mono"` stay). Weights are a shade heavier than Pango's 400 (`--sw-weight-regular` 450 on dark themes, 500 on light; medium 550/600, bold 700, heavy 800), and secondary text mixes 25 % toward the background instead of 35 %, still held to 4.5:1. Every other part of ADR-004 stands: the follower still reads the font, `shell.toml` and Hyprland's rounding, and roles still map to palette positions.
+
+**Consequence:** a new install no longer changes colour with the Omarchy theme until `palette = "omarchy"` is set; the self-tests that swap Omarchy fixtures pin that palette (`theme`), and `palette` pins the others.
 
 ## ADR-005 — SQLite with FTS5 plus a blob store (2026-10-04)
 
@@ -613,6 +627,10 @@ The owner's decision on the sign-off sheet (2026-10-19): packagers of other dist
 
 The owner's decision on the sign-off sheet (2026-10-19), for M8: Sign in with Microsoft asks for IMAP's and SMTP's permissions only, and a POP3 account signs in with a password in 1.0. Microsoft accounts use IMAP.
 
+### ADR-008 amendment — Sign in with Google returns, with the user's own client (2026-10-22)
+
+The owner's request of 2026-10-22: Gmail signs in with Google through a client the user makes and configures, none shipped. See [ADR-023](#adr-023--sign-in-with-google-with-your-own-oauth-client-2026-10-22), which supersedes the amendment of 2026-10-07 for that case; without a Google client, Gmail keeps the app password.
+
 ## ADR-009 — Settings in files: config.toml, keys.toml, accounts.toml (2026-10-04)
 
 **Status:** Proposed.
@@ -630,6 +648,10 @@ Built in M1: `config.toml` holds `[appearance]` (`corner_radius`, `chrome_font`,
 - applied whole or not at all;
 - reread 150 ms after a change seen on their folder and its parent;
 - created with every default commented out when the palette opens a missing one.
+
+### ADR-009 amendment — config.toml holds Google's Desktop client secret (2026-10-22)
+
+For [ADR-023](#adr-023--sign-in-with-google-with-your-own-oauth-client-2026-10-22): `config.toml` gains `[oauth.google]` with `client_id` and `client_secret`. Google issues that secret to every Desktop app client, requires it at its token endpoint, and documents that an installed app can't keep it confidential; it is the user's own client's. It is the only secret-like value a settings file may hold: `[oauth.microsoft]` still refuses `client_secret`, `accounts.toml` still refuses any field named like a secret, and `OAuthClient`'s `Debug` shows neither the ID nor the secret. `accounts.toml`'s `auth` takes `"google"` beside `"password"` and `"microsoft"`.
 
 ### ADR-009 amendment — accounts.toml as built (M2, 2026-10-05)
 
@@ -1398,3 +1420,22 @@ The same day, the AUR answered the owner's registration with "New account regist
 **Alternatives:** waiting for a GTK fix (`ci.sh --ui` unusable meanwhile; Broadway is deprecated, so a fix may be slow); `GSK_RENDERER=cairo` (Broadway's cairo path sends a malformed node and aborts on the second frame); an `LD_PRELOAD` that ignores the assertion (`g_assertion_message_expr` doesn't return); a proxy rewriting the app's node stream (it would have to rebuild nodes and pass textures' file descriptors); a GTK of our own for the app (a whole GTK build); changing how Sealwax draws its icons (any two identical symbolic icons trigger it, GTK's own included).
 
 **Consequences:** the headless runs need a C compiler, `pkg-config`, `patch`, `curl` and Python, and download a 17 MB tarball from download.gnome.org once per GTK version and checkout. A browser on such a display could show a copied node or a blank where the stock daemon would have aborted; the self-tests' client draws nothing, and screenshots come from GTK in the app. Each GTK update needs a look at the patch and a checksum line.
+
+## ADR-023 — Sign in with Google with your own OAuth client (2026-10-22)
+
+**Status:** Accepted — the owner's request, 2026-10-22 ("Add Gmail sign-in via XOAUTH2 (IMAP + SMTP) using OAuth 2.0 with PKCE and a loopback redirect … The Google OAuth client ID (and optional client secret for desktop clients) must be configurable via environment variable and/or config file; commit NO client ID or secret anywhere … Omar uses 3 Gmail accounts, so multi-account must work"). Supersedes, for a user who configures a Google client, [ADR-008's amendment of 2026-10-07](#adr-008-amendment--google-dropped-2026-10-07) ("Sign in with Google is never built"); Gmail without a client keeps the app password of [the amendment of 2026-10-11](#adr-008-amendment--gmail-with-an-app-password-documented-2026-10-11). Built and tested offline the same day; not yet signed in live.
+
+**Context:** ADR-008 dropped Google because `https://mail.google.com/`, the only scope Gmail's IMAP and SMTP take with XOAUTH2, is restricted: a client offered to everyone needs Google's verification and a yearly security assessment (CASA), and in Testing its refresh tokens expire after 7 days. Those costs fall on a *published* client. A client the user makes for their own accounts, listed as its test users or published unverified for personal use (Google allows up to 100 users, behind an "unverified app" warning), needs neither.
+
+**Decision:**
+- **No Google client ships.** Sealwax's packages and the repository carry no Google client ID or secret. The user makes a **Desktop app** client in their own Google Cloud project ([GOOGLE-OAUTH-SETUP.md](GOOGLE-OAUTH-SETUP.md)) and gives it to Sealwax through, in order: `config.toml`'s `[oauth.google]` (`client_id`, `client_secret`), applied when the file is saved; else `SEALWAX_GOOGLE_CLIENT_ID` and `SEALWAX_GOOGLE_CLIENT_SECRET` in Sealwax's environment; else the same variables at build time (`option_env!`). A section with a client ID is used whole: its secret never pairs with another source's ID. `tools/package-source.py` is unchanged and builds no Google client in.
+- **The client secret** is allowed in `config.toml`, the one exception to ADR-009's "no settings file holds a secret" ([ADR-009 amendment](#adr-009-amendment--configtoml-holds-googles-desktop-client-secret-2026-10-22)): Google issues it to Desktop app clients, requires it at the token endpoint, and documents that an installed app can't keep it confidential. It never reaches a log, a `Debug` form, `accounts.toml` or the sign-in page; only the token endpoint gets it, over HTTPS.
+- **The flow** is ADR-008's own code (`engine::oauth`), now provider-aware (`oauth::Provider` carries `OAuthProvider::Google`): the authorization-code flow with PKCE (S256) in the system browser, at `https://accounts.google.com/o/oauth2/v2/auth` and `https://oauth2.googleapis.com/token`; the redirect is `http://127.0.0.1:<ephemeral port>` (Google's loopback IP form for Desktop app clients, which accept any port without registration; Microsoft keeps `http://localhost:<port>`), on the same listeners that ignore a request without the sign-in's state. Scopes `https://mail.google.com/ openid email`, with `access_type=offline` (else Google issues no refresh token) and `prompt=consent select_account` (so a re-sign-in, or a second Sealwax, still gets one; the user picks the account). No `login_hint`, as for Microsoft.
+- **The username** is the ID token's `email`, which must have `email_verified`; the ID token's issuer must be Google's (`https://accounts.google.com` or `accounts.google.com`) and its audience this client. As for Microsoft, the ID token comes from the token endpoint over TLS with the platform verifier, which stands in for its signature (OpenID Connect Core 3.1.3.7).
+- **Servers:** a new Google account's sign-in is checked on `imap.gmail.com:993` and `smtp.gmail.com:465` (TLS), then saved with `auth = "google"` in `accounts.toml`. The setup assistant offers Sign in with Google for a detection whose IMAP host is Gmail's (`presets::google_host`: under `gmail.com` or `googlemail.com`, which Google Workspace domains use too) only while a Google client is in use; otherwise the app-password step stays exactly as before.
+- **Tokens, per account:** the refresh token lives only in the keyring under the account's key (ADR-008's M2 amendment), access tokens only in memory in `AccessTokens`, keyed by the account key, refreshed with 5 minutes left or once after a refusal. Google doesn't rotate refresh tokens: a refresh answer without one keeps the stored one. A refused refresh (`invalid_grant`) asks that account alone to sign in again; a refused *client* (`invalid_client`, a wrong secret) is a setup failure, not a sign-in to repeat. Each account refreshes with its own provider's client; the engine keeps one client per provider (`Command::GoogleClient` beside `Command::MicrosoftClient`).
+- **Multi-account:** several Google accounts share the one client and nothing else. Tested offline: three Gmail accounts signed in one after another through the engine, each syncing as its own address with its own tokens, refreshing with its own refresh token, and one revoked account asking to sign in again while the other two kept syncing (`engine/tests/google_sign_in.rs`; `engine/src/oauth/google_tests.rs`).
+
+**Alternatives:** shipping a project Google client (needs Google's verification and CASA every year: the reason Google was dropped); the `oauth2` crate (ADR-008's reasons stand); the Gmail API instead of IMAP (a second sync engine); app passwords only (they stay as the fallback, but need 2-Step Verification and are refused by some Workspace admins and by Advanced Protection); `http://localhost` for Google's redirect too (Google's native-app guide asks for the loopback IP literal).
+
+**Consequences:** setting up a Google client takes the user about ten minutes in the Google Cloud console. In Testing, every Google account signs in again each 7 days (one click on the banner's **Sign in**); published unverified, the sign-in page shows Google's warning. The `https://mail.google.com/` scope grants full mail access; that is what IMAP needs, and it is the user's own client. Nothing changes for Microsoft accounts (their texts, flow and tests are unchanged) or for Gmail without a client.

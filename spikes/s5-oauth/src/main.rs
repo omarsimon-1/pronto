@@ -1,5 +1,5 @@
 //! Live S5 run against a dedicated test account, with the client ID in
-//! SEALWAX_MICROSOFT_CLIENT_ID (or SEALWAX_GOOGLE_CLIENT_ID and SEALWAX_GOOGLE_CLIENT_SECRET):
+//! PRONTO_MICROSOFT_CLIENT_ID (or PRONTO_GOOGLE_CLIENT_ID and PRONTO_GOOGLE_CLIENT_SECRET):
 //!
 //! - `email-spike-s5 microsoft sign-in <address>` opens the system browser once (no
 //!   `login_hint`: the address never goes into the URL), completes the flow, keeps the refresh
@@ -307,14 +307,14 @@ async fn main() -> Result<(), Error> {
         "google" => (
             Provider::google(),
             Client {
-                id: std::env::var("SEALWAX_GOOGLE_CLIENT_ID")?,
-                secret: std::env::var("SEALWAX_GOOGLE_CLIENT_SECRET").ok(),
+                id: std::env::var("PRONTO_GOOGLE_CLIENT_ID")?,
+                secret: std::env::var("PRONTO_GOOGLE_CLIENT_SECRET").ok(),
             },
         ),
         "microsoft" => (
             Provider::microsoft(),
             Client {
-                id: std::env::var("SEALWAX_MICROSOFT_CLIENT_ID")?,
+                id: std::env::var("PRONTO_MICROSOFT_CLIENT_ID")?,
                 secret: None,
             },
         ),

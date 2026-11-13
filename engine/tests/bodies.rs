@@ -226,7 +226,7 @@ fn bodies_are_fetched_once_answered_per_message_and_kept_under_the_cap() {
         .unwrap(),
     );
     let engine = Engine::start(EngineConfig {
-        application: "io.github.pixdevsapps.Sealwax.Test".into(),
+        application: "io.github.omarsimon1.Pronto.Test".into(),
         store: store.clone(),
         blobs: blobs.clone(),
         paths: AccountPaths::new(&dirs),
@@ -234,6 +234,7 @@ fn bodies_are_fetched_once_answered_per_message_and_kept_under_the_cap() {
         secrets: SecretBackend::Memory,
         detect: DetectOptions::default(),
         microsoft_client_id: None,
+        google_client: None,
         sign_in: SignInOptions::default(),
         sync: SyncConfig::default(),
     })

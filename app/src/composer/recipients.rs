@@ -28,7 +28,7 @@ pub type Parsed = (Address, bool);
 
 /// Splits a typed or pasted list at commas, semicolons and line breaks outside quotes and
 /// angle brackets, and reads each item with the compose rules (`compose::address`): the
-/// addresses Sealwax can send to are valid chips, anything else is an error chip.
+/// addresses Pronto can send to are valid chips, anything else is an error chip.
 pub fn parse_list(text: &str) -> Vec<Parsed> {
     let (mut items, rest) = split(text);
     items.push(rest);
@@ -83,7 +83,7 @@ fn parse_item(item: &str) -> Vec<Parsed> {
     valid.chain(invalid).collect()
 }
 
-/// An address Sealwax can send to (`compose::address::is_valid`).
+/// An address Pronto can send to (`compose::address::is_valid`).
 pub fn valid_address(email: &str) -> bool {
     address::is_valid(email)
 }
@@ -534,6 +534,16 @@ impl RecipientField {
                 glib::Propagation::Stop
             }
             gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter if plain && open => {
+                if let Some(index) = self.selected_suggestion() {
+                    self.take_suggestion(index);
+                } else {
+                    self.commit();
+                }
+                glib::Propagation::Stop
+            }
+            // Tab takes the highlighted suggestion, as Enter does: the typed part alone would
+            // become an invalid chip when the focus leaves.
+            gdk::Key::Tab if plain && open => {
                 if let Some(index) = self.selected_suggestion() {
                     self.take_suggestion(index);
                 } else {

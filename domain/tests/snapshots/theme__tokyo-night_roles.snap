@@ -3,13 +3,20 @@ source: domain/tests/theme.rs
 expression: roles(&theme)
 ---
 mode dark
-secondary_text #7d839f
-hovered row: secondary_text #8187a5 on #1f212b
-selected row: secondary_text #9198b8 on #2e303d
+secondary_text #858caa
+hovered row: secondary_text #858caa on #1e202a
+selected row: secondary_text #8b92b1 on #232b3f
+rows: read_text #949bbc draft #f7768e reminder #ad8ee6
+tertiary_text #7d839f hovered #8086a3 selected #8b92b1
+window hovered row: secondary_text #858caa on #252633
+window selected row: secondary_text #9198b8 on #293147
+window rows: read_text #949bbc draft #f7768e reminder #ad8ee6
+window tertiary_text #7d839f hovered #858caa selected #9198b8
 star #7aa2f7
 unread #7aa2f7
 selected_chip #7aa2f7 on #2b334c
 accent_text #1a1b26
+primary #1a1b26 on #7aa2f7; composer #1e202f
 border #2f3347
 error #f7768e warning #e0af68 success #9ece6a
 avatar 0 #ffffff on #2f4574

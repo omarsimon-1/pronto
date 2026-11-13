@@ -2,10 +2,11 @@
 # and enters the select mode, whose rows show checkboxes and whose reader shows "N messages
 # selected" with the batch actions; Shift+click, Shift+j/k and Shift+Down/Up extend; j/k and
 # the arrows move a cursor there, x and Space toggle the row under it, Escape leaves with that
-# message alone; every action applies to every selected message, and after the selected
-# messages leave the list the next one is selected. Move to… doesn't move between accounts.
-# Every message is fictional.
-# Run: tools/headless.sh 23 target/debug/sealwax --self-test tests/selftest/triage-select.sealwax-test
+# message alone; Ctrl+A selects every row (the Superhuman pass), Ctrl+Shift+A does nothing;
+# every action applies to every selected message, and after the selected messages leave the
+# list the next one is selected. Move to… doesn't move between accounts. Every message is
+# fictional.
+# Run: tools/headless.sh 23 target/debug/pronto --self-test tests/selftest/triage-select.sealwax-test
 
 desktop tiling
 resize 1440 900
@@ -89,9 +90,27 @@ assert-list-selection 0,1,2,3
 key Down
 key x
 assert-list-selection 0,1,2
-# GtkListView's own Ctrl+A is not a command here: it selects nothing more.
+# Ctrl+A is Select All since the Superhuman pass: every row, in the select mode.
 key <Control>a
+assert-list-selection 0,1,2,3,4,5,6,7
+assert-select-mode true
+assert-label batch-title "8 messages selected"
+# GtkListView's own Ctrl+Shift+A (unselect all) is not a command here: nothing changes.
+key <Control><Shift>a
+assert-list-selection 0,1,2,3,4,5,6,7
+assert-select-mode true
+# x takes the last five out again; the cursor goes back to the fourth row.
+key x
+key j
+key x
+key j
+key x
+key j
+key x
+key j
+key x
 assert-list-selection 0,1,2
+key k 4
 
 # Every action applies to every selected message: star all, then unstar all.
 key s

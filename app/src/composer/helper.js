@@ -4,9 +4,12 @@
     return;
   }
   const handlers = window.webkit && window.webkit.messageHandlers;
+  // Every key the page has seen (counted below): every message says it, so the card knows how
+  // far the page is behind the keys it gave the view (Send waits for them).
+  let keysSeen = 0;
   const post = (message) => {
     if (handlers && handlers.composer) {
-      handlers.composer.postMessage(message);
+      handlers.composer.postMessage({ ...message, keys: keysSeen });
     }
   };
 
@@ -251,7 +254,7 @@
     reader.readAsDataURL(file);
   });
 
-  // Every data: image the editor holds becomes a part of the draft: its bytes go to Sealwax
+  // Every data: image the editor holds becomes a part of the draft: its bytes go to Pronto
   // once, which stores them and answers with `adopt`, so the editor shows the image through
   // the composer's cid: scheme from then on.
   const offered = new Set();
@@ -310,6 +313,7 @@
     report.stats = cleaned.stats;
     if (cleaned.html) {
       document.execCommand('insertHTML', false, cleaned.html);
+      markAttributions();
     }
     offerImages();
   };
@@ -383,6 +387,7 @@
   document.addEventListener('input', (event) => {
     if (event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
       adoptBlobImages();
+      markAttributions();
     }
   }, true);
 
@@ -400,7 +405,8 @@
       return;
     }
     const range = document.caretRangeFromPoint(event.clientX, event.clientY);
-    if (range) {
+    // Under a folded quote it goes in where a press there puts the caret (`caretBeforeFold`).
+    if (range && !(inFold(range.startContainer) && caretBeforeFold())) {
       const selection = document.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
@@ -455,6 +461,12 @@
   };
   document.addEventListener('selectionchange', scheduleState);
   document.addEventListener('input', scheduleState);
+
+  // WebKit hands the view's keys to the page one at a time, so Send waits until the page has had
+  // every key typed before it (the card counts what it gave the view).
+  document.addEventListener('keydown', () => {
+    keysSeen += 1;
+  }, true);
 
   // Every edit, for the autosave; the text itself never leaves here this way.
   document.addEventListener('input', (event) => {
@@ -522,17 +534,229 @@
     return false;
   };
 
+  // Attribution lines and the folded quote (the fork's phase C). The marks below are attributes
+  // on the body's own nodes, which the cleaner keeps none of: the draft never holds them.
+  //
+  // An attribution line ("On Mon, 5 Oct 2026 at 10:00, Grace <grace@…> wrote:") is
+  // domain::quotes's: at most 300 characters ending with ':' that name a "wrote" verb as a word.
+  const WROTE = ['wrote', 'skrev', 'schrieb', 'schreef', 'a écrit', 'escribió', 'ha scritto',
+    'escreveu', 'kirjoitti', 'napisał', 'napisała', 'написал'];
+  const WORD = /[\p{L}\p{N}]/u;
+  const hasText = (text) => /[^\s\u200b-\u200d]/.test(text || '');
+  const isAttribution = (element) => {
+    const line = (element.textContent || '').trim();
+    if (!line.endsWith(':') || line.length > 600 || Array.from(line).length > 300 || line.startsWith('>')) {
+      return false;
+    }
+    const lower = line.toLowerCase();
+    return WROTE.some((verb) => {
+      for (let at = lower.indexOf(verb); at >= 0; at = lower.indexOf(verb, at + 1)) {
+        const before = Array.from(lower.slice(Math.max(0, at - 2), at)).pop() || '';
+        const after = Array.from(lower.slice(at + verb.length, at + verb.length + 2))[0] || '';
+        if (!WORD.test(before) && !WORD.test(after) && after !== '-') {
+          return true;
+        }
+      }
+      return false;
+    });
+  };
+  // The attribution line just before `quote` (blank text may sit between), if that is one.
+  const lineBefore = (quote) => {
+    let line = quote.previousSibling;
+    while (line && line.nodeType !== Node.ELEMENT_NODE) {
+      if (line.nodeType === Node.TEXT_NODE && hasText(line.data)) {
+        return null;
+      }
+      line = line.previousSibling;
+    }
+    return line && !line.matches('blockquote, div.sw-signature') && isAttribution(line) ? line : null;
+  };
+
+  // Only attribution lines read small and muted (the editor's stylesheet, the approved mock's):
+  // the user's own line before a quote, such as an answer between a quote's parts, keeps the
+  // body's size (the stylesheet's `:has(+ blockquote)` took any line). Marked when content comes
+  // in (set, pasted); a marked line that stops reading as one (typed into, or the empty line
+  // Enter splits off it, which WebKit makes as a copy) loses its mark.
+  const ATTRIBUTION = 'data-sw-attribution';
+  const marked = new Set();
+  const markAttributions = () => {
+    for (const quote of Array.from(document.body.querySelectorAll('blockquote:not([style]), blockquote[type=cite]'))) {
+      const line = lineBefore(quote);
+      if (line) {
+        line.setAttribute(ATTRIBUTION, '');
+        marked.add(line);
+      }
+    }
+  };
+
+  // A reply's quoted history folded behind a quiet "•••" pill, as the reader folds it: in a card
+  // that answers a message (`setContent`'s `foldable`: a reply, a reply's draft reopened), the
+  // last quote when nothing but blank lines or the signature follows it, with its attribution
+  // line, which becomes the pill (its own ::before, the editor's stylesheet). A quote that the
+  // user's own text follows (an answer between the quote's parts) or that has no attribution
+  // line stays open, as do a new message's and a forward's: nothing but the attribution is ever
+  // a pill, and there is one. A click on the pill, or the caret going onto it (the arrow keys,
+  // Ctrl+End, Select All), shows the quote for the rest of the card's life, as does an edit that
+  // leaves it no longer the trailing quote. The quote stays in the draft and is sent.
+  const FOLD = 'data-sw-fold';
+  const FOLDED = 'sw-quote-folded';
+  let fold = null;
+  const folded = () => fold !== null;
+  const blank = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return !hasText(node.data);
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE || node.matches('div.sw-signature')) {
+      return true;
+    }
+    return !hasText(node.textContent) && !node.matches('img, hr') && !node.querySelector('img, hr');
+  };
+  const trailing = (quote) => {
+    for (let at = quote; at && at !== document.body; at = at.parentNode) {
+      for (let next = at.nextSibling; next; next = next.nextSibling) {
+        if (!blank(next)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+  const foldQuote = () => {
+    const quotes = Array.from(document.body.querySelectorAll('blockquote[type=cite]'))
+      .filter((quote) => !quote.parentElement.closest('blockquote[type=cite]'));
+    const quote = quotes[quotes.length - 1];
+    const attribution = quote && trailing(quote) ? lineBefore(quote) : null;
+    if (!attribution) {
+      return;
+    }
+    attribution.setAttribute(FOLD, 'pill');
+    quote.setAttribute(FOLD, 'quote');
+    fold = { attribution, quote };
+    document.documentElement.classList.add(FOLDED);
+  };
+  const unfold = () => {
+    if (!fold) {
+      return;
+    }
+    fold = null;
+    document.documentElement.classList.remove(FOLDED);
+    for (const element of Array.from(document.querySelectorAll(`[${FOLD}]`))) {
+      element.removeAttribute(FOLD);
+    }
+  };
+  const inFold = (node) => !!fold && !!node && (fold.quote.contains(node) || fold.attribution.contains(node));
+  document.addEventListener('click', (event) => {
+    if (inFold(event.target)) {
+      event.preventDefault();
+      unfold();
+    }
+  }, true);
+  // A press beside or under the pill (the body's empty space under the text) would put the
+  // caret on the pill's line and open the quote: it goes to the end of the line before the fold
+  // instead, where it would go with no quote under the text. Only the pill itself opens it.
+  const caretBeforeFold = () => {
+    let at = fold.attribution;
+    let line = null;
+    while (at && at !== document.body && !line) {
+      line = at.previousSibling;
+      while (line && (line.nodeType === Node.COMMENT_NODE || (line.nodeType === Node.TEXT_NODE && !hasText(line.data)))) {
+        line = line.previousSibling;
+      }
+      at = at.parentNode;
+    }
+    if (!line) {
+      return false;
+    }
+    const selection = document.getSelection();
+    if (line.nodeType === Node.TEXT_NODE) {
+      selection.collapse(line, line.length);
+    } else {
+      selection.selectAllChildren(line);
+      selection.collapseToEnd();
+    }
+    return true;
+  };
+  document.addEventListener('mousedown', (event) => {
+    if (!fold || event.button !== 0 || inFold(event.target)) {
+      return;
+    }
+    const range = document.caretRangeFromPoint(event.clientX, event.clientY);
+    if (range && inFold(range.startContainer) && caretBeforeFold()) {
+      event.preventDefault();
+    }
+  }, true);
+  document.addEventListener('selectionchange', () => {
+    const selection = document.getSelection();
+    if (fold && selection && (inFold(selection.anchorNode) || inFold(selection.focusNode))) {
+      unfold();
+    }
+  });
+  // After every edit: the marks of lines that no longer read as attributions go, and the fold
+  // opens once its quote isn't the trailing one under its attribution any more.
+  new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+          continue;
+        }
+        if (node.hasAttribute(ATTRIBUTION)) {
+          marked.add(node);
+        }
+        for (const inner of node.querySelectorAll(`[${ATTRIBUTION}]`)) {
+          marked.add(inner);
+        }
+      }
+    }
+    for (const line of Array.from(marked)) {
+      if (!line.isConnected) {
+        // Kept marked: Undo may bring it back (then an added node again).
+        marked.delete(line);
+      } else if (!isAttribution(line)) {
+        line.removeAttribute(ATTRIBUTION);
+        marked.delete(line);
+      }
+    }
+    if (fold && !(fold.quote.isConnected && lineBefore(fold.quote) === fold.attribution && trailing(fold.quote))) {
+      unfold();
+    }
+  }).observe(document.body, { childList: true, characterData: true, subtree: true });
+  // What a folded quote says too: the body's text is the same folded or not.
+  const allText = () => {
+    if (!folded()) {
+      return document.body.innerText;
+    }
+    document.documentElement.classList.remove(FOLDED);
+    const text = document.body.innerText;
+    document.documentElement.classList.add(FOLDED);
+    return text;
+  };
+
+  // The body's top-level nodes before the signature and the quote (with its attribution line),
+  // and those after them.
+  const typedParts = () => {
+    const signature = document.querySelector('body > div.sw-signature');
+    const quote = document.querySelector('body > blockquote[type=cite]');
+    const attribution = quote ? quote.previousElementSibling : null;
+    const stops = [signature, attribution, quote].filter(Boolean);
+    const nodes = Array.from(document.body.childNodes);
+    const first = stops.length ? Math.min(...stops.map((stop) => nodes.indexOf(stop))) : nodes.length;
+    const last = stops.length ? Math.max(...stops.map((stop) => nodes.indexOf(stop))) : nodes.length;
+    return { typed: nodes.slice(0, first), after: nodes.slice(last + 1) };
+  };
+
   window.sealwaxComposer = {
     serialize,
     clean: (html) => clean(html, false),
     state: computeState,
     html: () => document.body.innerHTML,
-    text: () => document.body.innerText,
-    isEmpty: () => !document.body.innerText.trim() && !document.querySelector('img'),
+    text: allText,
+    isEmpty: () => !allText().trim() && !document.querySelector('img'),
+    quoteFolded: folded,
     images: () => Array.from(document.querySelectorAll('img')).map((image) => image.getAttribute('src') || ''),
     loadedImages: () => Array.from(document.querySelectorAll('img'))
       .filter((image) => image.complete && image.naturalWidth > 0).length,
     insertText: (text) => document.execCommand('insertText', false, text),
+    keysSeen: () => keysSeen,
     // The sender's signature in place of the one shown (its HTML comes from the compose
     // rules, cleaned here like everything else); before the quote when there is none yet.
     setSignature: (html) => {
@@ -550,7 +774,9 @@
         return false;
       }
       const quote = document.querySelector('blockquote[type=cite]');
-      const anchor = quote && quote.previousElementSibling ? quote.previousElementSibling : quote;
+      const forwarded = Array.from(document.body.children).find((node) =>
+        node.tagName === 'DIV' && node.textContent === '---------- Forwarded message ----------');
+      const anchor = quote && quote.previousElementSibling ? quote.previousElementSibling : (quote || forwarded);
       const holder = document.createElement('div');
       holder.innerHTML = `<div><br></div>${cleaned}`;
       for (const node of Array.from(holder.childNodes)) {
@@ -582,8 +808,15 @@
       insertCleaned(html, report);
       return report.stats;
     },
-    setContent: (html) => {
+    // `foldable`: the draft answers a message, so its quoted history may fold.
+    setContent: (html, foldable) => {
+      unfold();
+      marked.clear();
       document.body.innerHTML = html || '<div><br></div>';
+      markAttributions();
+      if (foldable) {
+        foldQuote();
+      }
       offerImages();
       lastState = '';
       scheduleState();
@@ -622,6 +855,75 @@
     caretAtEnd: () => {
       const selection = document.getSelection();
       selection.selectAllChildren(document.body);
+      selection.collapseToEnd();
+      return true;
+    },
+    // What the user typed above the signature and the quote (the fork's phase B, Pop Draft Out
+    // or In): its lines, and whether it is plain text (lines of text only) with nothing typed
+    // below them.
+    typed: () => {
+      const parts = typedParts();
+      let plain = parts.after.every((node) => !(node.textContent || '').trim() &&
+        !(node.querySelector && node.querySelector('img')));
+      const lines = [];
+      for (const node of parts.typed) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          lines.push(node.textContent);
+          continue;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+          continue;
+        }
+        const simple = node.tagName === 'DIV' && Array.from(node.childNodes).every((child) =>
+          child.nodeType === Node.TEXT_NODE || child.tagName === 'BR');
+        if (!simple) {
+          plain = false;
+        }
+        lines.push((node.innerText || '').replace(/\n$/, ''));
+      }
+      while (lines.length && !lines[lines.length - 1].trim()) {
+        lines.pop();
+      }
+      const signature = document.querySelector('div.sw-signature');
+      if (signature && Array.from(signature.querySelectorAll('*')).some((node) =>
+        !['DIV', 'BR'].includes(node.tagName))) {
+        plain = false;
+      }
+      const signatureText = signature ? (signature.innerText || '')
+        .replace(/^--[ \u00a0]\n?/, '').replace(/\n$/, '') : '';
+      return { text: lines.join('\n'), plain, signature: signatureText };
+    },
+    // A snippet at the caret (Use Snippet…, the fork's phase B): its text typed in over the
+    // selection (at the body's start when it has no caret yet, a new message's), then the caret
+    // put back before `after`, the text after its {cursor}: one step back per grapheme, as
+    // selection.modify moves ('👍🏽' is one step, two code points; a line break is one).
+    insertSnippet: (text, after) => {
+      const selection = document.getSelection();
+      if (!selection.rangeCount || !document.body.contains(selection.anchorNode)) {
+        selection.selectAllChildren(document.body);
+        selection.collapseToStart();
+      }
+      document.body.focus();
+      document.execCommand('insertText', false, text);
+      const back = typeof Intl.Segmenter === 'function'
+        ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(after)].length
+        : Array.from(after).length;
+      for (let step = 0; step < back; step += 1) {
+        selection.modify('move', 'backward', 'character');
+      }
+      return true;
+    },
+    // The caret after what the user typed (a reply popped out of the inline reply).
+    caretAfterTyped: () => {
+      const typed = typedParts().typed.filter((node) => (node.textContent || '').trim());
+      const last = typed[typed.length - 1];
+      const selection = document.getSelection();
+      if (!last) {
+        selection.selectAllChildren(document.body);
+        selection.collapseToStart();
+        return false;
+      }
+      selection.selectAllChildren(last);
       selection.collapseToEnd();
       return true;
     },

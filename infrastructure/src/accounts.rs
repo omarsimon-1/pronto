@@ -45,11 +45,11 @@ pub fn new_key() -> io::Result<AccountKey> {
 /// Where the accounts live.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountPaths {
-    /// `$XDG_CONFIG_HOME/sealwax/accounts.toml`.
+    /// `$XDG_CONFIG_HOME/pronto/accounts.toml`.
     pub settings: PathBuf,
-    /// `$XDG_STATE_HOME/sealwax/accounts-pending`: additions and removals in progress.
+    /// `$XDG_STATE_HOME/pronto/accounts-pending`: additions and removals in progress.
     pub pending: PathBuf,
-    /// `$XDG_CONFIG_HOME/sealwax/rules`: the accounts' Sieve scripts (ADR-020).
+    /// `$XDG_CONFIG_HOME/pronto/rules`: the accounts' Sieve scripts (ADR-020).
     pub rules: PathBuf,
 }
 
@@ -75,7 +75,7 @@ pub enum AccountsFileError {
     KeyExists,
     #[error("accounts.toml already has an account with this address")]
     AddressExists,
-    #[error("accounts.toml kept changing while Sealwax wrote it")]
+    #[error("accounts.toml kept changing while Pronto wrote it")]
     Busy,
 }
 
@@ -115,16 +115,17 @@ pub fn remove(path: &Path, key: &AccountKey) -> Result<bool, AccountsFileError> 
     })
 }
 
-/// Sets the label and the colour of the account with `key` in `path` (`None` takes the line
+/// Sets the label, colour and signature of the account with `key` in `path` (`None` takes the line
 /// out); false when the file doesn't list it.
 pub fn relabel(
     path: &Path,
     key: &AccountKey,
     label: Option<&str>,
     color: Option<AccountColor>,
+    signature: Option<&str>,
 ) -> Result<bool, AccountsFileError> {
     edit(path, |text| match text {
-        Some(text) => accounts_file::relabel(text, key, label, color),
+        Some(text) => accounts_file::relabel(text, key, label, color, signature),
         None => Ok(None),
     })
 }
@@ -396,14 +397,14 @@ mod tests {
         let root = scratch();
         let path = SealwaxDirs::under(root.path()).accounts_file();
         let work = AccountKey("work".into());
-        assert!(!relabel(&path, &work, Some("Work"), None).unwrap());
+        assert!(!relabel(&path, &work, Some("Work"), None, None).unwrap());
         assert!(
             !path.exists(),
             "no file is made for an account that isn't there"
         );
         add(&path, &account("work", "work@example.test")).unwrap();
         add(&path, &account("home", "home@example.test")).unwrap();
-        assert!(relabel(&path, &work, Some("Work"), Some(AccountColor::Slate)).unwrap());
+        assert!(relabel(&path, &work, Some("Work"), Some(AccountColor::Slate), None).unwrap());
         assert_eq!(mode(&path), 0o600);
         let accounts = read(&path).unwrap();
         assert_eq!(
@@ -414,9 +415,9 @@ mod tests {
             (accounts[1].title(), accounts[1].color),
             ("home@example.test", None)
         );
-        assert!(relabel(&path, &work, None, None).unwrap());
+        assert!(relabel(&path, &work, None, None, None).unwrap());
         assert_eq!(read(&path).unwrap()[0].title(), "work@example.test");
-        assert!(!relabel(&path, &AccountKey("gone".into()), Some("X"), None).unwrap());
+        assert!(!relabel(&path, &AccountKey("gone".into()), Some("X"), None, None).unwrap());
     }
 
     #[test]

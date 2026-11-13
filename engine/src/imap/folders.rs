@@ -186,7 +186,7 @@ pub async fn list(conn: &mut Connection) -> Result<Vec<ListedFolder>, ImapError>
 }
 
 /// The wire names of the folders the server lists under `name_raw` (`LIST "" "<name>/*"`),
-/// those Sealwax leaves out included. A name holding LIST's wildcards may list more than its
+/// those Pronto leaves out included. A name holding LIST's wildcards may list more than its
 /// subfolders; only names within it are kept.
 pub(crate) async fn list_under(
     conn: &mut Connection,

@@ -4,7 +4,7 @@
 # flag changes and removals — and afterwards every loaded row and every section count equals the
 # store's own view at the version the list has applied. In a folder, with a chip, from the
 # unified inbox, and scrolled into the middle. Every message is fictional.
-# Run: tools/headless.sh 36 target/debug/sealwax --self-test tests/selftest/list-churn.sealwax-test
+# Run: tools/headless.sh 36 target/debug/pronto --self-test tests/selftest/list-churn.sealwax-test
 
 desktop tiling
 fixtures --count 600 --seed 21 --folders single
@@ -35,14 +35,15 @@ assert-list-matches-folder total
 
 # Scrolled into the middle with a message selected and the keyboard focus in the list: the
 # batches of 70 make the store ask for a reload, which keeps the list's place, its selection
-# and the focus.
+# and the focus. Row 230 is about 8,700 px down in single-line rows and 13,000 px in two-line
+# ones; a reload that lost the place would be back at the top.
 list-scroll 20000
 list-select 230
 list-remember
 assert-list-focus list
 mail-churn 60 5
 assert-list-exact
-assert-list-scrolled 15000
+assert-list-scrolled 5000
 assert-list-remembered
 assert-list-focus list
 assert-list-placeholders 0

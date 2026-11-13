@@ -1,0 +1,209 @@
+# The Superhuman pass's layout (2026-10-28, docs/superhuman/layout.md) at the app's own defaults:
+# Focused, the sidebar hidden. The list fills the window; moving its cursor lays the conversation
+# out behind it, unseen and unread; Enter and o open it in the list's place in the same frame,
+# read, with the keyboard focus in it; j and k go on to the next and previous conversations from
+# there; Escape comes back to the list on the row left; triage in the conversation goes on to the
+# next one, and the last one leaves for Inbox Zero, where c still writes. Every name and message
+# is fictional.
+# Run: tools/headless.sh 29 target/debug/pronto --self-test tests/selftest/focused.sealwax-test
+
+desktop tiling
+layout-defaults app
+resize 1440 900
+triage-mark-read-on-open true
+mail-account Personal
+mail-add Personal:inbox 10m "Hyttetur i oktober" "from=Ingrid Solberg" "text=Skal vi dra fredag?"
+mail-add Personal:inbox 20m "Styremøte torsdag" "from=Marius Dahl" "text=Agendaen kommer i morgen."
+mail-add Personal:inbox 30m "Kvittering for bestilling" "from=Leah Kim" "text=Takk for bestillingen."
+mail-add Personal:inbox 40m "Lunsj fredag" "from=Leah Kim" "text=Klokka tolv?"
+folder inbox Personal
+list-wait
+
+# Focused with the sidebar hidden: the list alone, the window's width; one header row, the
+# search field hidden until asked for.
+assert-view-mode focused
+assert-sidebar hidden
+assert-action-state win.toggle-sidebar false
+assert-action-state win.toggle-reading-pane false
+assert-pane list
+assert-shown list true
+assert-shown reader false
+assert-width list 1440
+assert-shown list-sidebar true
+assert-shown list-compose true
+assert-search-shown false
+assert-shown inbox-zero false
+assert-labelled
+assert-accessible window
+screenshot $DIR/../../.local/selftest/focused-list.png
+
+# The cursor lays the conversation out behind the list, unseen: nothing is read.
+focus list
+list-select 0
+wait-until assert-reader-page message
+assert-reader-warm true
+assert-reader-on-screen false
+assert-shown reader false
+sleep 300
+assert-list-row 0 unread true
+key j
+assert-list-selected 1
+wait-until assert-reader-selected
+sleep 300
+assert-list-row 1 unread true
+assert-pane list
+
+# Enter opens it in the list's place: on screen, read, the keyboard focus in the conversation.
+key Return
+assert-pane reader
+assert-shown reader true
+assert-shown list false
+assert-shown reader-back true
+assert-reader-on-screen true
+assert-reader-warm false
+wait-until assert-focus reader
+wait-until assert-list-row 1 unread false
+assert-list-row 0 unread true
+assert-accessible window
+# Back and the toolbar keep to the thread's column, not the window's edges: Back starts where
+# the conversation does, "n of N" and Next end where it ends.
+assert-aligned reader-back reader-page left
+assert-aligned reader-next reader-page right
+screenshot $DIR/../../.local/selftest/focused-reader.png
+# At the owner's desktop text scale (0.9091) as well: the conversation's column and the bar's
+# are both in px, as the theme's text is (in sp the column narrowed to 653 px, the bar didn't).
+text-scale 0.9091
+wait-frames 2
+assert-aligned reader-back reader-page left
+assert-aligned reader-next reader-page right
+text-scale 1
+wait-frames 2
+
+# j and k from the conversation: the next and previous conversations, read as they show.
+key j
+assert-list-selected 2
+wait-until assert-reader-selected
+assert-pane reader
+wait-until assert-list-row 2 unread false
+wait-until assert-focus reader
+key k
+assert-list-selected 1
+wait-until assert-reader-selected
+wait-until assert-focus reader
+
+# Escape: the list again, on the row left, which has the keyboard focus.
+key Escape
+assert-pane list
+assert-shown list true
+assert-shown reader false
+assert-reader-warm true
+assert-list-selected 1
+assert-list-focus list
+assert-focus-row 1
+# o opens too; Back to the list's button goes back the same way.
+key o
+assert-pane reader
+wait-until assert-focus reader
+click reader-back
+assert-pane list
+assert-list-selected 1
+# Search from an open conversation: the list again, with the field.
+key Return
+assert-pane reader
+wait-until assert-focus reader
+key slash
+assert-pane list
+assert-search-shown true
+assert-focus search
+key Escape
+assert-search-shown false
+assert-list-focus list
+
+# Tab goes round what shows: the list bar and the list, or the reader's bar and conversation;
+# the reader behind the list is no stop.
+focus list
+tab-chain window forward 40
+assert-tab-chain message-list,list-sidebar,list-search-button,list-compose,list-menu,message-list
+key Return
+wait-until assert-focus reader
+tab-chain window forward 60
+assert-tab-chain reader-plain,quick-reply-text,reader-back,reader-archive,reader-next,reader-subject,reader-plain
+key Escape
+assert-pane list
+
+# Opening and going back are each one frame: the next conversation is laid out behind the list
+# before it is opened (Broadway draws in software: a frame that redraws the window takes up to
+# ~60 ms there, so nothing is judged here).
+focus list
+measure-open 4
+list-select 1
+wait-until assert-reader-selected
+
+# Archive from the conversation: the next (older) one shows in its place, read; the last one
+# leaves for the list and Inbox Zero, which keeps the keyboard focus for the list's keys.
+focus list
+key Return
+wait-until assert-focus reader
+key e
+wait-until assert-list-count 3
+assert-pane reader
+wait-until assert-reader-selected
+assert-list-selected 1
+key e
+wait-until assert-list-count 2
+assert-pane reader
+wait-until assert-reader-selected
+key e
+wait-until assert-list-count 1
+assert-pane reader
+wait-until assert-reader-selected
+key e
+wait-until assert-list-count 0
+wait-until assert-pane list
+assert-list-empty "Inbox Zero"
+assert-shown inbox-zero true
+assert-shown reader false
+assert-label inbox-zero-key c
+wait-until assert-focus inbox-zero-area
+# No "0" in the header over Inbox Zero, and the tint runs on under the header with no line
+# between them (phase C, the visual QA: a 1 px line of the untinted window across it).
+wait-until assert-label list-subtitle Personal
+assert-seamless list-pane 64
+assert-accessible window
+screenshot $DIR/../../.local/selftest/focused-inbox-zero.png
+# A search from Inbox Zero, then Escape: the focus comes back to Inbox Zero, not to the rows
+# hidden behind it.
+key slash
+assert-search-shown true
+type zzqq
+wait-until assert-list-empty "No results"
+search-escape
+wait-until assert-list-empty "Inbox Zero"
+wait-until assert-focus inbox-zero-area
+key c
+composer-wait
+composer-close
+wait-until assert-composer count 0
+
+# Undo brings the last one back; the list shows it again, and Inbox Zero goes; the cursor is on
+# it, so e archives it again at once.
+key z
+wait-until assert-list-count 1
+assert-shown inbox-zero false
+wait-until assert-list-selected 0
+
+# A narrow window is one pane at a time as well: the list, then the conversation in its place.
+resize 800 900
+assert-layout narrow
+assert-width list 800
+focus list
+list-select 0
+wait-until assert-reader-selected
+key Return
+assert-pane reader
+assert-width reader 800
+wait-until assert-focus reader
+key Escape
+assert-pane list
+assert-width list 800
+resize 1440 900

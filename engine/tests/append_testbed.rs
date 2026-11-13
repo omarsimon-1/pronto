@@ -8,7 +8,7 @@
 //! Stalwart, as the users `outbox` (direct) and `outboxfault` (through the fault proxy), whose
 //! Sendt and Utkast they empty. Synthetic messages and S7's fixtures only.
 //!
-//! SEALWAX_TESTBED_CA=…/tools/testbed/certs/ca.pem \
+//! PRONTO_TESTBED_CA=…/tools/testbed/certs/ca.pem \
 //!   cargo test -p sealwax-engine --release --test append_testbed -- --ignored --test-threads=1 --nocapture
 
 mod common;
@@ -186,9 +186,9 @@ fn appends_on_every_server() {
     });
 }
 
-/// Seeds per fault scenario: `SEALWAX_APPEND_SEEDS`, else 5.
+/// Seeds per fault scenario: `PRONTO_APPEND_SEEDS`, else 5.
 fn seeds() -> u64 {
-    std::env::var("SEALWAX_APPEND_SEEDS")
+    std::env::var("PRONTO_APPEND_SEEDS")
         .ok()
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(5)

@@ -3,9 +3,10 @@
 
 use super::error::{OAuthError, aadsts_in, authorize_error};
 use super::id_token;
-use super::{Client, Granted, MICROSOFT_SCOPES};
+use super::{Client, Granted};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use sealwax_domain::account::OAuthProvider;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::io;
@@ -28,10 +29,10 @@ const MAX_CONNECTIONS: usize = 16;
 /// Ports tried for a loopback that holds both 127.0.0.1 and ::1.
 const BIND_ATTEMPTS: usize = 8;
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Sealwax</title>\
-    <p>Sealwax has the sign-in. You can close this tab and return to Sealwax.";
-const FAILED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Sealwax</title>\
-    <p>The sign-in didn't finish. You can close this tab and return to Sealwax.";
+const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Pronto</title>\
+    <p>Pronto has the sign-in. You can close this tab and return to Pronto.";
+const FAILED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Pronto</title>\
+    <p>The sign-in didn't finish. You can close this tab and return to Pronto.";
 
 /// `bytes` random bytes, base64url without padding.
 pub(crate) fn random(bytes: usize) -> Result<Zeroizing<String>, OAuthError> {
@@ -94,10 +95,15 @@ impl Loopback {
         }
     }
 
-    /// `http://localhost:<port>` without a path: the registered `http://localhost` matches it
-    /// whatever the port, and a trailing slash wouldn't match (S5).
-    pub(crate) fn redirect_uri(&self) -> String {
-        format!("http://localhost:{}", self.port)
+    /// Microsoft: `http://localhost:<port>` without a path: the registered `http://localhost`
+    /// matches it whatever the port, and a trailing slash wouldn't match (S5). Google:
+    /// `http://127.0.0.1:<port>`, the loopback IP form Google's native-app guide asks for, which
+    /// a Desktop app client accepts on any port without registering it.
+    pub(crate) fn redirect_uri(&self, provider: OAuthProvider) -> String {
+        match provider {
+            OAuthProvider::Microsoft => format!("http://localhost:{}", self.port),
+            OAuthProvider::Google => format!("http://127.0.0.1:{}", self.port),
+        }
     }
 
     /// Waits up to `wait` for the browser's redirect with this `state`. Every request is
@@ -243,24 +249,45 @@ impl Client {
         // 64 bytes: an 86-character verifier (RFC 7636 allows 43–128).
         let verifier = random(64)?;
         let state = random(16)?;
-        let redirect_uri = loopback.redirect_uri();
-        let mut url = self.provider.authorize.clone();
-        url.query_pairs_mut()
-            .append_pair("client_id", &self.id)
-            .append_pair("response_type", "code")
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", MICROSOFT_SCOPES)
-            .append_pair("state", &state)
-            .append_pair("code_challenge", &challenge(&verifier))
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("prompt", "select_account");
+        let redirect_uri = loopback.redirect_uri(self.provider.kind);
+        let url = self.authorize_url(&redirect_uri, &state, &challenge(&verifier));
         Ok(Authorization {
-            url: url.into(),
+            url,
             redirect_uri,
             state,
             verifier,
             loopback,
         })
+    }
+
+    /// The sign-in page's URL for this redirect, state and code challenge. Google also gets
+    /// `access_type=offline`, without which it issues no refresh token, and `prompt=consent`, so
+    /// that a second sign-in to the same account (a re-sign-in, or another Pronto) still gets
+    /// one.
+    pub(crate) fn authorize_url(&self, redirect_uri: &str, state: &str, challenge: &str) -> String {
+        let mut url = self.provider.authorize.clone();
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("client_id", &self.id)
+                .append_pair("response_type", "code")
+                .append_pair("redirect_uri", redirect_uri)
+                .append_pair("scope", self.provider.scopes())
+                .append_pair("state", state)
+                .append_pair("code_challenge", challenge)
+                .append_pair("code_challenge_method", "S256");
+            match self.provider.kind {
+                OAuthProvider::Microsoft => {
+                    query.append_pair("prompt", "select_account");
+                }
+                OAuthProvider::Google => {
+                    query
+                        .append_pair("access_type", "offline")
+                        .append_pair("prompt", "consent select_account");
+                }
+            }
+        }
+        url.into()
     }
 
     /// Waits up to `wait` for the browser, exchanges the code with the verifier and checks the
@@ -287,7 +314,7 @@ impl Client {
             .id_token
             .as_ref()
             .ok_or(OAuthError::IdToken("missing"))?;
-        let identity = id_token::check(id_token, &self.id, SystemTime::now())?;
+        let identity = id_token::check(self.provider.kind, id_token, &self.id, SystemTime::now())?;
         if tokens.refresh.is_none() {
             return Err(OAuthError::NoRefreshToken);
         }

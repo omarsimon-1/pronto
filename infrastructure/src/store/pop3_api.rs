@@ -7,7 +7,7 @@
 //! The account's actor downloads what the server lists that the store hasn't recorded, by the
 //! server's UIDL: each message is stored with its UIDL in one transaction, so a crash never
 //! loses a downloaded message nor downloads one twice. The UIDLs keep when each message was
-//! downloaded, for "delete from the server after N days", and when Sealwax deleted it there.
+//! downloaded, for "delete from the server after N days", and when Pronto deleted it there.
 
 use super::reader::ReadJob;
 use super::writer::WriteJob;
@@ -49,7 +49,7 @@ pub struct Pop3Uidl {
     pub downloaded: i64,
     /// Downloaded whole; else only its header (too large), and it stays on the server.
     pub whole: bool,
-    /// When Sealwax deleted it from the server (Unix seconds): DELE, then a QUIT sent, whose
+    /// When Pronto deleted it from the server (Unix seconds): DELE, then a QUIT sent, whose
     /// reply may have been lost; the next listing tells.
     pub deleted: Option<i64>,
 }
@@ -107,7 +107,7 @@ pub struct Pop3PassDone {
     /// UIDLs marked with DELE before a QUIT went out: deleted, or possibly so when its reply
     /// was lost or refused (the next listing tells).
     pub deleted: Vec<String>,
-    /// UIDLs Sealwax deleted that the server no longer lists: forgotten.
+    /// UIDLs Pronto deleted that the server no longer lists: forgotten.
     pub forget: Vec<String>,
     /// Unix seconds.
     pub at: i64,
